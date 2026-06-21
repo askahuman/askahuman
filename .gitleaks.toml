@@ -1,0 +1,18 @@
+# gitleaks config — extend the default rules, but allowlist deterministic crypto
+# test vectors: expected SPAKE2 / secretbox outputs hard-coded in unit tests are
+# high-entropy by design, not secrets. All non-test code is still fully scanned.
+title = "ask-a-human"
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Crypto test vectors (deterministic expected values, not secrets)"
+paths = [
+  '''backend/pkg/spake2/spake2_test\.go''',
+  '''backend/pkg/sealedbox/sealedbox_test\.go''',
+  '''backend/pkg/wire/wire_test\.go''',
+  '''backend/cmd/spake2vectors/main\.go''',
+  '''frontend/test/spake2-interop\.mjs''',
+  '''frontend/test/payload\.test\.ts''',
+]
