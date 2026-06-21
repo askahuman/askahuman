@@ -11,9 +11,10 @@
 #
 # One-time setup (NOT in this repo):
 #   - Artifact Registry repo holding relay/ + web/ images.
-#   - Deployer SA with roles/artifactregistry.writer, roles/container.developer,
-#     roles/gkehub.gatewayEditor (Connect Gateway); WIF principalSet bound to THIS repo.
-#   - Namespace `ask-a-human` + a RoleBinding granting the SA edit on it.
+#   - Deployer SA with roles/artifactregistry.writer + roles/gkehub.gatewayEditor +
+#     roles/gkehub.viewer (Connect Gateway); WIF principalSet bound to THIS repo.
+#   - Namespace `ask-a-human` + a RoleBinding granting the SA edit on it (NOT the
+#     cluster-wide container.developer — keep blast radius to the one namespace).
 #   - GitHub Secrets: GCP_PROJECT_ID, GCP_WIF_PROVIDER, GCP_DEPLOYER_SA,
 #     GKE_CLUSTER, GAR_REGISTRY (e.g. <region>-docker.pkg.dev/<project>/<repo>).
 name: deploy
@@ -35,6 +36,10 @@ concurrency:
 jobs:
   deploy:
     runs-on: ubuntu-24.04
+    # Optional manual gate: configure the 'production' Environment with required
+    # reviewers in repo Settings → Environments to make every tag deploy wait for
+    # an approval click. Until configured, it runs as before (no gate).
+    environment: production
     env:
       TAG: ${{ github.ref_name }}
       GAR_REGISTRY: ${{ secrets.GAR_REGISTRY }}
@@ -42,17 +47,17 @@ jobs:
       GKE_CLUSTER: ${{ secrets.GKE_CLUSTER }}
       USE_GKE_GCLOUD_AUTH_PLUGIN: "True"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       # Keyless auth — mints a short-lived (1h) token via federation.
       - id: auth
-        uses: google-github-actions/auth@v3
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
         with:
           project_id: ${{ secrets.GCP_PROJECT_ID }}
           workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
           service_account: ${{ secrets.GCP_DEPLOYER_SA }}
 
-      - uses: google-github-actions/setup-gcloud@v3
+      - uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3
         with:
           install_components: gke-gcloud-auth-plugin
 
@@ -66,7 +71,7 @@ jobs:
         env:
           KO_DOCKER_REPO: ${{ secrets.GAR_REGISTRY }}/relay
         run: |
-          go install github.com/google/ko@latest
+          go install github.com/google/ko@v0.18.1
           "$(go env GOPATH)/bin/ko" build --bare --platform=linux/amd64 \
             --tags "${TAG#v},latest" ./cmd/relay
 
