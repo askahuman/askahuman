@@ -91,7 +91,13 @@ body {
   color: var(--color-page-text);
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
-  /* Block iOS long-press selection/callout from interrupting the drag. */
+}
+
+/* App shell ONLY (Layout.astro sets .app-shell on <body>): block iOS long-press
+   selection/callout so a horizontal "approve" drag reaches the card instead of
+   selecting text. The marketing landing (LandingLayout) omits this class, so all
+   its copy — including the npx / mcp.json snippet — stays selectable + copyable. */
+body.app-shell {
   -webkit-user-select: none;
   user-select: none;
   -webkit-touch-callout: none;

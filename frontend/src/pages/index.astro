@@ -131,10 +131,12 @@ const features = [
             Add it to your agent.
           </h2>
           <p class="mt-3 text-pretty text-muted">
-            Drop this into your MCP client config. The server starts locally with
+            <strong class="text-text">No account, no API key, nothing to configure.</strong>
+            Paste this into your MCP client config and your agent can reach you.
             <code class="rounded bg-surface px-1.5 py-0.5 text-sm text-text"
               >npx @askahuman/mcp serve</code
-            > — no install, no account.
+            > fetches a single static binary on first run and talks to
+            <span class="text-text">ask-a-human.ai</span> out of the box — zero config.
           </p>
         </div>
 
@@ -146,12 +148,59 @@ const features = [
             <span class="size-3 rounded-full bg-cat-deploy/70"></span>
             <span class="size-3 rounded-full bg-approve/70"></span>
             <span class="ml-2 font-sans">mcp.json</span>
+            <button
+              id="copy-mcp"
+              type="button"
+              aria-label="Copy the mcp.json snippet"
+              aria-live="polite"
+              class="ml-auto rounded-md border border-border bg-surface/60 px-2.5 py-1 font-sans text-xs font-medium text-muted transition hover:bg-surface hover:text-text"
+            >
+              Copy
+            </button>
           </div>
           <pre
             class="overflow-x-auto px-5 py-5 text-sm leading-relaxed text-text"
-            style="user-select: text; -webkit-user-select: text;"
-          ><code>{mcpSnippet}</code></pre>
+          ><code id="mcp-code">{mcpSnippet}</code></pre>
         </div>
+
+        <!-- Copy-to-clipboard for the snippet. Astro processes this <script> and
+             adds its sha256 to the build-synced CSP (astro.config.mjs experimental.csp),
+             so it runs without loosening script-src. Falls back to selecting the text
+             when the Clipboard API is unavailable (older / insecure contexts). -->
+        <script>
+          const btn = document.getElementById("copy-mcp");
+          const code = document.getElementById("mcp-code");
+          if (btn && code) {
+            const flash = (msg: string) => {
+              btn.textContent = msg;
+              window.setTimeout(() => {
+                btn.textContent = "Copy";
+              }, 1500);
+            };
+            btn.addEventListener("click", async () => {
+              const text = code.textContent ?? "";
+              try {
+                await navigator.clipboard.writeText(text);
+                flash("Copied!");
+              } catch {
+                // Insecure-context / legacy fallback: select the snippet and try the
+                // legacy copy command; if even that is blocked, tell the user to copy.
+                const range = document.createRange();
+                range.selectNodeContents(code);
+                const sel = window.getSelection();
+                sel?.removeAllRanges();
+                sel?.addRange(range);
+                let ok = false;
+                try {
+                  ok = document.execCommand("copy");
+                } catch {
+                  ok = false;
+                }
+                flash(ok ? "Copied!" : "Press Ctrl+C");
+              }
+            });
+          }
+        </script>
       </div>
     </section>
 
