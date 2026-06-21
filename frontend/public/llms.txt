@@ -1,0 +1,71 @@
+# ask-a-human
+
+> ask-a-human is one copy-paste MCP (Model Context Protocol) server that lets an AI agent pause and
+> ask a human for approval — on their phone. The human approves, declines, picks an option, or types a
+> reply, and the agent receives exactly that decision. Approvals are end-to-end encrypted: the relay in
+> the middle is content-blind — it only ever forwards `base64(nonce‖ciphertext)` plus which room talks to
+> which, so it cannot read, log, or forge a decision. No accounts, no database, nothing to install.
+
+How it works: the MCP server runs locally next to your agent over stdio. On the first `request_approval`
+it prints a QR code + deep link to stderr; you scan it with your phone to pair over a Magic-Wormhole-style
+SPAKE2 handshake — an in-house, RFC 9382-style construction in which a short pairing code becomes a strong
+shared key. After that, each approval is sealed with NaCl secretbox on one side and opened on the other.
+The relay in between sees only `base64(nonce‖ciphertext)` and which room talks to which — never the
+content, never the decision.
+
+## Add it to your agent (zero setup)
+
+Paste this into your MCP client config — Cursor (`~/.cursor/mcp.json`), Claude Desktop
+(`claude_desktop_config.json`), Codex, or any MCP client:
+
+```json
+{ "mcpServers": { "ask-a-human": { "command": "npx", "args": ["-y", "@askahuman/mcp", "serve"] } } }
+```
+
+No account, no API key, nothing to configure. `npx` fetches a single static release binary on first run
+and defaults to the hosted relay `wss://ask-a-human.ai/ws` and PWA `https://ask-a-human.ai`. To self-host,
+pass `--relay <wss-url>` and `--web <https-origin>`.
+
+## Tools
+
+- `request_approval` — Ask a human to approve/decline/answer on their phone. BLOCKS until the human
+  responds or it times out. A failure, decline, or timeout is NEVER returned as approved. Inputs:
+  - `title` (string, required) — short title shown on the phone card.
+  - `summary` (string, required) — the human-readable question body.
+  - `response_kind` (string, required) — answer shape: `yesno` | `choice` | `text`.
+  - `category` (string, optional) — badge; recognized values `cash` | `deploy` | `data` | `access` |
+    `other`. Any other value is accepted and simply shown as `other` (not rejected).
+  - `options` (string[], optional) — the choices, when `response_kind` is `choice`.
+  - `placeholder` (string, optional) — input hint, when `response_kind` is `text`.
+  - `max_len` (integer, optional) — max input length, when `response_kind` is `text`.
+  - `expires_in_s` (integer, optional) — countdown in seconds before the request times out.
+- `pair_status` — Report whether the agent is paired, waiting to pair, or idle. Read-only; returns only
+  non-secret status (the pairing QR/code are shown out-of-band in the terminal, never in the result). It
+  does not start pairing — until the first `request_approval`, it reports idle.
+
+## When to use it
+
+Call `request_approval` before any high-stakes or irreversible action a human should sign off on:
+spending money, deploying, deleting or modifying data, granting access, sending external communications,
+or any judgment call you are not authorized to make alone. Treat anything other than an explicit approval
+(declined, timed out, error) as "do not proceed".
+
+## Security model
+
+- End-to-end encrypted — plaintext only ever exists on your machine and the human's phone.
+- Content-blind relay — forwards ciphertext verbatim; it cannot read, log, or replay approvals, and holds
+  no database (pairing lives in RAM for the server's lifetime; a restart means re-pair).
+- Pairing is a SPAKE2-style handshake — an in-house construction following RFC 9382 over the ristretto255
+  group (RFC 9496). A short code (delivered out-of-band, by scanning) becomes a strong shared key with no
+  relay-in-the-middle. App traffic is then sealed with NaCl secretbox (XSalsa20-Poly1305).
+- The MCP server runs on your machine on purpose: it is the only party holding the key + plaintext, so it
+  is never hosted. It never auto-approves.
+
+## Links
+
+- Website: https://ask-a-human.ai
+- App (phone PWA): https://ask-a-human.ai/app
+- Source code (MIT): https://github.com/askahuman/askahuman
+- npm package: https://www.npmjs.com/package/@askahuman/mcp
+- README: https://github.com/askahuman/askahuman/blob/main/README.md
+- Security policy: https://github.com/askahuman/askahuman/blob/main/SECURITY.md
