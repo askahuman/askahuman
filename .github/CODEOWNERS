@@ -1,3 +1,4 @@
-# Every change requires review from the sole code owner before merge.
-# Enable "Require review from Code Owners" in the branch protection rule for this to bind.
-*       @AlexandrosKyriakakis
+# Every change requires review from the maintainers team before merge.
+# Setup: create the @askahuman/maintainers team in the org, give it write access to
+# this repo, add yourself; then enable "Require review from Code Owners" in branch protection.
+*       @askahuman/maintainers
