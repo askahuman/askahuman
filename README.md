@@ -2,18 +2,22 @@
 
 **Let your AI agent ask a human — on your phone.** End-to-end encrypted. No accounts, no database.
 
+> **Zero setup.** Paste one line into your agent and go — no install, no account, no API key, no dependency to wire up.
+
 [![npm](https://img.shields.io/npm/v/@askahuman/mcp?logo=npm)](https://www.npmjs.com/package/@askahuman/mcp)
 [![license](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![release](https://github.com/askahuman/askahuman/actions/workflows/release.yml/badge.svg)](https://github.com/askahuman/askahuman/actions/workflows/release.yml)
 
-The MCP server runs **locally next to your agent** (Cursor / Claude / Codex) and exposes exactly **one
-tool — `request_approval`** — that **blocks until a human answers** (approve / decline / choose / reply)
-on a phone PWA. It never auto-approves. The server is a content-blind **relay**: it only ever sees
-`base64(nonce‖ciphertext)` + which room talks to which. Pairing is a Magic-Wormhole-style **SPAKE2**
-handshake — a short code becomes a strong shared key, with no relay MITM. No DB, RAM-only; restart ⇒ re-pair.
+The MCP server runs **locally next to your agent** (Cursor / Claude / Codex) and exposes **one tool you
+call — `request_approval`** (plus a read-only `pair_status`) — that **blocks until a human answers**
+(approve / decline / choose / reply) on a phone PWA. It never auto-approves. The **relay** in the middle
+is content-blind: it only ever sees `base64(nonce‖ciphertext)` + which room talks to which. Pairing is a
+[Magic-Wormhole](https://github.com/magic-wormhole/magic-wormhole)-style **SPAKE2** handshake — a short
+code becomes a strong shared key, with no relay MITM. No DB, RAM-only; restart ⇒ re-pair.
 
 - Repo: [github.com/askahuman/askahuman](https://github.com/askahuman/askahuman)
 - Website: [ask-a-human.ai](https://ask-a-human.ai) · npm: [`@askahuman/mcp`](https://www.npmjs.com/package/@askahuman/mcp)
+- For agents: [ask-a-human.ai/llms.txt](https://ask-a-human.ai/llms.txt)
 
 ```
   AGENT SIDE                    RELAY (kind / GKE)            USER SIDE
@@ -54,11 +58,22 @@ This is the whole point of the project:
 
 Found a bug? Report it — see [SECURITY.md](SECURITY.md). I patch and release fast.
 
-## Crypto (see `docs/decisions/architecture/0002`)
-- Pairing: **SPAKE2 over ristretto255** — a short code becomes a strong shared key with no relay MITM.
-  Go uses `gtank/ristretto255`; the PWA uses `@noble/curves`; the protocol is ours. Roles: agent = A, phone = B.
-- App traffic: **`nacl/secretbox`** (XSalsa20-Poly1305) keyed by the SPAKE2 session key (symmetric, so
-  `secretbox` not `box`). The Go↔JS interop is pinned by `frontend/test/spake2-interop.mjs`.
+## Crypto — the magic wormhole (see `docs/decisions/architecture/0002`)
+Pairing borrows [Magic Wormhole](https://github.com/magic-wormhole/magic-wormhole)'s trick: a short,
+human-readable code becomes a strong shared key via a **SPAKE2** PAKE (password-authenticated key
+exchange). A passive *or* active relay can never read or forge the channel — and even if the short code leaks, an
+attacker still gets only **one online guess** against the live handshake. We follow the SPAKE2
+construction of [RFC 9382](https://www.rfc-editor.org/rfc/rfc9382.html) over the **ristretto255** group
+([RFC 9496](https://www.rfc-editor.org/rfc/rfc9496.html)); the protocol glue (transcript, HKDF,
+key-confirmation) is ours, so this is RFC 9382-*style*, not a byte-for-byte implementation. Foundations:
+Abdalla & Pointcheval, *Simple Password-Based Encrypted Key Exchange Protocols* (CT-RSA 2005,
+[doi:10.1007/978-3-540-30574-3_14](https://doi.org/10.1007/978-3-540-30574-3_14)); reference impl:
+[`warner/python-spake2`](https://github.com/warner/python-spake2).
+
+- **Pairing:** SPAKE2 over ristretto255 — Go uses `gtank/ristretto255`, the PWA uses `@noble/curves`;
+  roles agent = A, phone = B. Go↔JS interop is pinned by `frontend/test/spake2-interop.mjs`.
+- **App traffic:** **`nacl/secretbox`** (XSalsa20-Poly1305) keyed by the SPAKE2 session key (symmetric,
+  so `secretbox` not `box`).
 
 ## Layout
 | Dir | What |
@@ -138,11 +153,12 @@ make ci-up && make e2e                    # LIVE: integration vs kind relay + re
 `make e2e` proves the whole path with nothing mocked: the MCP agent + relay-in-kind + the real PWA
 (it spawns `agent ask`, drives headless Chromium to approve, asserts the agent gets the sealed decision).
 
-## Production (scaffolded, **not** deployed)
-`infra/prod` targets a private GKE cluster: domain **`ask-a-human.ai`**, images
-`<artifact-registry>/ask-a-human/{relay,web}:VERSION`, a `gce`
-ingress + `ManagedCertificate` + `BackendConfig` (long-lived-WS timeout). **Before deploying:** reserve
-the global static IP `ask-a-human-global-ip`, point `ask-a-human.ai` DNS at it, and set `VERSION`. This
-repo does not push images or apply to the live cluster.
+## Production
+The hosted relay + PWA at **[ask-a-human.ai](https://ask-a-human.ai)** run on a private GKE cluster.
+`infra/prod` (kustomize) defines a `gce` ingress + `ManagedCertificate` + `BackendConfig` (long-lived-WS
+timeout); each `v*` tag builds the `relay`/`web` images and rolls them out keylessly via Workload Identity
+Federation — see [`.github/workflows/deploy.yml`](.github/workflows/deploy.yml). The registry, GCP
+project, and cluster identity live **only** in GitHub Secrets, never in this repo. Prefer your own
+infra? Self-host the relay + PWA and point the agent at them with `--relay` / `--web`.
 </content>
 </invoke>
