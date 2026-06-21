@@ -1,0 +1,52 @@
+# Local-only patches: never pull (images live in the local registry / Tilt-built),
+# and expose both services via NodePort so the kind port mappings reach them.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ask-a-human-relay
+spec:
+  template:
+    spec:
+      containers:
+        - name: relay
+          imagePullPolicy: IfNotPresent
+          # Dev-only: log per-connection room/peer events so pairing is observable
+          # (kubectl logs). Prod leaves this unset → the relay stays silent/private.
+          env:
+            - name: AAH_RELAY_VERBOSE
+              value: "1"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ask-a-human-web
+spec:
+  template:
+    spec:
+      containers:
+        - name: web
+          imagePullPolicy: IfNotPresent
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ask-a-human-relay
+spec:
+  type: NodePort
+  ports:
+    - port: 8080
+      targetPort: 8080
+      nodePort: 30080
+      name: http
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ask-a-human-web
+spec:
+  type: NodePort
+  ports:
+    - port: 80
+      targetPort: 8080 # nginx-unprivileged container port
+      nodePort: 30081
+      name: http

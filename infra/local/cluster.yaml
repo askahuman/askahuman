@@ -1,0 +1,27 @@
+# ctlptl provisions a kind cluster wired to a local image registry, so ko/Docker
+# can push and the cluster can pull without a remote registry. See architecture/0003.
+# Apply with: ctlptl apply -f infra/local/cluster.yaml
+apiVersion: ctlptl.dev/v1alpha1
+kind: Registry
+name: ctlptl-registry
+port: 5005 # host port for the local registry; Tilt's default_registry points here
+---
+apiVersion: ctlptl.dev/v1alpha1
+kind: Cluster
+product: kind
+name: kind-ask-a-human
+registry: ctlptl-registry
+kindV1Alpha4Cluster:
+  # Inline kind config — the single source of truth (ctlptl needs it inline here).
+  # The former standalone infra/local/kind-config.yaml was a byte-duplicate with no
+  # caller (ctlptl drives the cluster, not `kind create cluster --config`) → removed.
+  name: ask-a-human
+  nodes:
+    - role: control-plane
+      extraPortMappings:
+        - containerPort: 30080 # relay NodePort -> host 8080
+          hostPort: 8080
+          protocol: TCP
+        - containerPort: 30081 # web NodePort -> host 8081
+          hostPort: 8081
+          protocol: TCP

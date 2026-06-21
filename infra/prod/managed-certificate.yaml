@@ -1,0 +1,9 @@
+# Google-managed TLS cert for the relay/PWA domain. HTTPS is mandatory (plan §9).
+apiVersion: networking.gke.io/v1
+kind: ManagedCertificate
+metadata:
+  name: ask-a-human-ssl
+  namespace: default
+spec:
+  domains:
+    - ask-a-human.ai

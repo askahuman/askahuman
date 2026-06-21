@@ -1,0 +1,93 @@
+version: "2"
+run:
+  tests: true
+linters:
+  enable:
+    - asciicheck
+    - bodyclose
+    - dogsled
+    - durationcheck
+    - errname
+    - errorlint
+    - goconst
+    - gocritic
+    - goprintffuncname
+    - gosec
+    - importas
+    - makezero
+    - misspell
+    - nakedret
+    - nilerr
+    - nolintlint
+    - thelper
+    - tparallel
+    - unconvert
+    - unparam
+    - wastedassign
+    - whitespace
+  disable:
+    - errcheck
+    - govet
+    - staticcheck
+    - unused
+  settings:
+    gocritic:
+      disabled-checks:
+        - hugeParam
+        - singleCaseSwitch
+        # main() exiting via log.Fatal/os.Exit after `defer stop()` is fine: the
+        # signal-stop cleanup is moot once the process is exiting.
+        - exitAfterDefer
+      enabled-tags:
+        - diagnostic
+        - performance
+      disabled-tags:
+        - experimental
+    govet:
+      disable:
+        - fieldalignment
+        - shadow
+      enable-all: true
+    misspell:
+      locale: US
+    tagliatelle:
+      case:
+        rules:
+          json: snake
+        use-field-name: true
+    wrapcheck:
+      ignore-package-globs:
+        - github.com/askahuman/askahuman/*
+  exclusions:
+    generated: lax
+    rules:
+      - path: (.+)\.go$
+        text: G104
+      - path: (.+)\.go$
+        text: G404
+      # CLI tools logging their own args/format; not attacker-controlled here.
+      - path: (.+)\.go$
+        text: G706
+      # spake2vectors deliberately emits the session key (it generates test vectors).
+      - path: (.+)\.go$
+        text: G117
+    paths:
+      - third_party$
+      - builtin$
+      - examples$
+formatters:
+  enable:
+    - gci
+    - gofumpt
+  settings:
+    gci:
+      sections:
+        - standard
+        - default
+        - prefix(github.com/askahuman)
+  exclusions:
+    generated: lax
+    paths:
+      - third_party$
+      - builtin$
+      - examples$

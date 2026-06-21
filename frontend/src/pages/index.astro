@@ -1,0 +1,186 @@
+---
+import LandingLayout from "../layouts/LandingLayout.astro";
+
+// Single static marketing landing. No React island: nothing here is interactive
+// beyond plain links, so it ships as pure HTML/CSS (the PWA lives at /app).
+
+const REPO_URL = "https://github.com/askahuman/askahuman";
+const APP_URL = "/app";
+
+const mcpSnippet = `{
+  "mcpServers": {
+    "ask-a-human": {
+      "command": "npx",
+      "args": ["-y", "@askahuman/mcp", "serve"]
+    }
+  }
+}`;
+
+const features = [
+  {
+    title: "Content-blind relay",
+    body: "The server only ever sees base64(nonce‖ciphertext) and which room talks to which. It is a dumb relay — never the data, never a decision.",
+  },
+  {
+    title: "SPAKE2 pairing",
+    body: "A short pairing code becomes a strong shared key via a Magic-Wormhole-style SPAKE2 handshake. No relay-in-the-middle can read or forge it.",
+  },
+  {
+    title: "End-to-end encrypted",
+    body: "Your agent and your phone hold the keys. Approvals are sealed on one side and opened on the other — nowhere in between.",
+  },
+  {
+    title: "No DB, open-source",
+    body: "RAM-only, no accounts, no database. Restart means re-pair. Self-host the relay and web with a flag, or read every line on GitHub.",
+  },
+];
+---
+
+<LandingLayout>
+  <main class="relative isolate">
+    <!-- Hero -->
+    <section
+      class="relative overflow-hidden border-b border-border-soft"
+    >
+      <!-- Gradient glow -->
+      <div
+        aria-hidden="true"
+        class="pointer-events-none absolute inset-0 -z-10"
+        style="background:
+          radial-gradient(60rem 40rem at 50% -10%, rgba(57,217,138,0.10), transparent 60%),
+          radial-gradient(50rem 30rem at 85% 10%, rgba(91,156,246,0.08), transparent 60%),
+          linear-gradient(180deg, #0c0d11 0%, #08090c 100%);"
+      >
+      </div>
+
+      <div class="mx-auto max-w-5xl px-6 pt-24 pb-20 sm:pt-32 sm:pb-28 text-center">
+        <span
+          class="inline-flex items-center gap-2 rounded-full border border-border bg-surface/60 px-3 py-1 text-xs font-medium text-muted"
+        >
+          <span class="size-1.5 rounded-full bg-approve"></span>
+          No accounts · No database · End-to-end encrypted
+        </span>
+
+        <h1
+          class="mx-auto mt-6 max-w-3xl text-balance font-sans text-4xl font-semibold leading-tight tracking-tight text-text sm:text-6xl"
+        >
+          Let your AI agent
+          <span class="text-approve">ask a human</span>
+          — on your phone.
+        </h1>
+
+        <p class="mx-auto mt-6 max-w-2xl text-pretty text-base text-muted sm:text-lg">
+          One MCP tool, <code class="rounded bg-surface px-1.5 py-0.5 text-sm text-text"
+            >request_approval</code
+          >, that blocks your agent until a human approves, declines, chooses, or
+          replies — on a phone PWA. It never auto-approves.
+        </p>
+
+        <div class="mt-10 flex flex-col items-center justify-center gap-3 sm:flex-row">
+          <a
+            href={APP_URL}
+            class="inline-flex w-full items-center justify-center rounded-xl bg-approve px-6 py-3 font-sans text-sm font-semibold text-page shadow-lg shadow-approve/20 transition hover:brightness-110 sm:w-auto"
+          >
+            Open the app
+          </a>
+          <a
+            href={REPO_URL}
+            class="inline-flex w-full items-center justify-center gap-2 rounded-xl border border-border bg-surface/40 px-6 py-3 font-sans text-sm font-semibold text-text transition hover:bg-surface sm:w-auto"
+          >
+            <svg viewBox="0 0 16 16" aria-hidden="true" class="size-4 fill-current">
+              <path
+                d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8Z"
+              ></path>
+            </svg>
+            View on GitHub
+          </a>
+        </div>
+      </div>
+    </section>
+
+    <!-- Trust story -->
+    <section class="mx-auto max-w-5xl px-6 py-20 sm:py-24">
+      <div class="max-w-2xl">
+        <h2 class="font-sans text-2xl font-semibold tracking-tight text-text sm:text-3xl">
+          The server never sees your data.
+        </h2>
+        <p class="mt-3 text-pretty text-muted">
+          The MCP server runs locally next to your agent (Cursor, Claude, Codex).
+          Everything that crosses the network is sealed — the relay is a dumb pipe
+          that just passes bytes between two rooms.
+        </p>
+      </div>
+
+      <div class="mt-10 grid gap-4 sm:grid-cols-2">
+        {
+          features.map((f) => (
+            <div class="rounded-2xl border border-border bg-surface/50 p-6 transition hover:border-border hover:bg-surface">
+              <h3 class="font-sans text-base font-semibold text-text">{f.title}</h3>
+              <p class="mt-2 text-sm leading-relaxed text-muted">{f.body}</p>
+            </div>
+          ))
+        }
+      </div>
+    </section>
+
+    <!-- Add to your agent -->
+    <section class="border-t border-border-soft bg-bg/40">
+      <div class="mx-auto max-w-5xl px-6 py-20 sm:py-24">
+        <div class="max-w-2xl">
+          <h2 class="font-sans text-2xl font-semibold tracking-tight text-text sm:text-3xl">
+            Add it to your agent.
+          </h2>
+          <p class="mt-3 text-pretty text-muted">
+            Drop this into your MCP client config. The server starts locally with
+            <code class="rounded bg-surface px-1.5 py-0.5 text-sm text-text"
+              >npx @askahuman/mcp serve</code
+            > — no install, no account.
+          </p>
+        </div>
+
+        <div class="mt-8 overflow-hidden rounded-2xl border border-border bg-page">
+          <div
+            class="flex items-center gap-2 border-b border-border-soft px-4 py-2.5 text-xs text-faint"
+          >
+            <span class="size-3 rounded-full bg-decline/70"></span>
+            <span class="size-3 rounded-full bg-cat-deploy/70"></span>
+            <span class="size-3 rounded-full bg-approve/70"></span>
+            <span class="ml-2 font-sans">mcp.json</span>
+          </div>
+          <pre
+            class="overflow-x-auto px-5 py-5 text-sm leading-relaxed text-text"
+            style="user-select: text; -webkit-user-select: text;"
+          ><code>{mcpSnippet}</code></pre>
+        </div>
+      </div>
+    </section>
+
+    <!-- Footer CTA -->
+    <footer class="border-t border-border-soft">
+      <div
+        class="mx-auto flex max-w-5xl flex-col items-center gap-6 px-6 py-16 text-center"
+      >
+        <h2 class="font-sans text-2xl font-semibold tracking-tight text-text">
+          Ready when your agent needs a human.
+        </h2>
+        <div class="flex flex-col items-center gap-3 sm:flex-row">
+          <a
+            href={APP_URL}
+            class="inline-flex items-center justify-center rounded-xl bg-approve px-6 py-3 font-sans text-sm font-semibold text-page transition hover:brightness-110"
+          >
+            Open the app
+          </a>
+          <a
+            href={REPO_URL}
+            class="inline-flex items-center justify-center rounded-xl border border-border bg-surface/40 px-6 py-3 font-sans text-sm font-semibold text-text transition hover:bg-surface"
+          >
+            View on GitHub
+          </a>
+        </div>
+        <p class="text-xs text-faint">
+          Open-source &amp; self-hostable · ask-a-human.ai
+        </p>
+      </div>
+    </footer>
+  </main>
+</LandingLayout>

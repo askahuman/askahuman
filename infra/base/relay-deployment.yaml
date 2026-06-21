@@ -1,0 +1,73 @@
+# Relay — stateless WebSocket rendezvous. RAM-only, no DB, single replica.
+# Image placeholder "ask-a-human-relay" is rewritten per overlay (local registry / GKE AR).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ask-a-human-relay
+  namespace: default
+spec:
+  replicas: 1 # room affinity needs one pod; multi-replica deferred — see architecture/0005
+  selector:
+    matchLabels:
+      app: ask-a-human-relay
+  template:
+    metadata:
+      labels:
+        app: ask-a-human-relay
+    spec:
+      # Hardening: ko builds distroless static nonroot (uid 65532); pin it + drop all.
+      # The static binary needs no writable root → readOnlyRootFilesystem.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532 # distroless "nonroot"
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: relay
+          image: "ask-a-human-relay"
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          ports:
+            - containerPort: 8080
+              name: http
+          resources:
+            # TODO(phase2): tune from real WS connection counts (idle conns are ~KBs each).
+            requests:
+              cpu: "100m"
+              memory: "64Mi"
+            limits:
+              cpu: "250m"
+              memory: "128Mi"
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 2
+            periodSeconds: 5
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ask-a-human-relay
+  namespace: default
+  annotations:
+    # Long-lived WebSockets — raise the GKE backend timeout via BackendConfig (prod overlay).
+    cloud.google.com/backend-config: '{"default": "ask-a-human-relay-backend-config"}'
+spec:
+  selector:
+    app: ask-a-human-relay
+  ports:
+    - port: 8080
+      targetPort: 8080
+      name: http
+  type: ClusterIP

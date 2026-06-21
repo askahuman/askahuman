@@ -1,0 +1,8 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Shared Deployments + Services. Overlays (local / prod) rewrite the image refs.
+resources:
+  - relay-deployment.yaml
+  - web-deployment.yaml
+  - network-policy.yaml

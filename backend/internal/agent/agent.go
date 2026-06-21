@@ -1,0 +1,435 @@
+// Package agent runs next to an AI agent (Cursor/Claude/Codex) as a stdio
+// MCP server. It owns the session key and VAPID keypair (RAM only), runs
+// SPAKE2 pairing, seals/opens application messages, sends Web Push to wake
+// the phone, and re-announces a pending request until it receives an
+// authenticated decision or times out. A failure is never returned as
+// "approved".
+//
+// See docs/decisions/architecture/0005_relay_ramonly_agent_retries.md and
+// docs/plan.md sections 8 and 10.
+package agent
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	webpush "github.com/SherClockHolmes/webpush-go"
+
+	"github.com/askahuman/askahuman/backend/pkg/sealedbox"
+	"github.com/askahuman/askahuman/backend/pkg/wire"
+)
+
+// Default relay endpoint for local dev.
+const defaultRelayURL = "ws://127.0.0.1:8080/ws"
+
+// Retry/backoff bounds for the Ask re-announce loop (see plan section 8).
+const (
+	baseBackoff = 500 * time.Millisecond
+	maxBackoff  = 5 * time.Second
+)
+
+// vapidSubject identifies the push sender in the VAPID JWT (RFC 8292). The
+// relay never sees it; the push service requires a mailto/URL subject.
+const vapidSubject = "mailto:ask-a-human@localhost"
+
+// ErrTimeout is returned when no authenticated decision arrives before the
+// request's deadline. It is never substituted with an "approved" result.
+var ErrTimeout = errors.New("agent: request timed out")
+
+// ErrNotPaired is returned when Ask is called before a successful Pair.
+var ErrNotPaired = errors.New("agent: not paired")
+
+// ErrBusy is returned when Ask is called while another Ask is in flight. The
+// agent serializes on the single shared session connection (one phone, one
+// question at a time); a second concurrent Ask is rejected, never approved.
+var ErrBusy = errors.New("agent: another request in flight")
+
+// Asker requests a human decision and blocks until an authenticated answer
+// arrives or the deadline passes. This is the consumer interface the MCP
+// tool depends on.
+type Asker interface {
+	// Ask seals req to the paired phone and returns the human's decision,
+	// retrying on undeliverable/transport failures until ctx is done.
+	Ask(ctx context.Context, req wire.Request) (wire.Decision, error)
+}
+
+// Config holds the agent's runtime settings.
+type Config struct {
+	// RelayURL is the ws:// (or wss://) endpoint the agent dials.
+	RelayURL string
+	// PublicRelayURL is the relay URL advertised to the phone in the pairing
+	// payload when it differs from the URL the agent dials. Used for local
+	// HTTPS: the agent dials the plain local relay while the phone connects over
+	// a wss:// reverse proxy. Defaults to RelayURL.
+	PublicRelayURL string
+	// AgentName optionally names who is asking (e.g. "cursor @ workstation").
+	AgentName string
+}
+
+// Agent owns the session key, pairing state, VAPID keypair, and retry loop.
+// The zero value is not usable; call New.
+type Agent struct {
+	cfg  Config
+	dial dialer
+
+	// vapidPub/vapidPriv sign the Web Push wake-up. Sourced from
+	// AAH_VAPID_PUBLIC_KEY/AAH_VAPID_PRIVATE_KEY when set (so the agent signs
+	// with the key the PWA subscribed under) else a fresh RAM-only pair.
+	vapidPub  string
+	vapidPriv string
+
+	// mu guards sess and sub, which Pair sets and Ask reads.
+	mu   sync.Mutex
+	sess *Session
+	// sub is the phone's Web Push subscription, delivered sealed; the agent
+	// sends the contentless wake-up push itself.
+	sub *webpush.Subscription
+
+	// asking single-flights Ask: the agent owns one shared session connection,
+	// so concurrent Asks would interleave frames on it. A second Ask is
+	// rejected with ErrBusy rather than racing.
+	asking atomic.Bool
+}
+
+var _ Asker = (*Agent)(nil)
+
+// New returns an Agent configured from cfg. The VAPID keypair is taken from
+// AAH_VAPID_PUBLIC_KEY/AAH_VAPID_PRIVATE_KEY when both are set — the public half
+// MUST equal the PWA's build-time PUBLIC_VAPID_KEY or the push service rejects
+// the agent's signed wake-up. Absent the env, a fresh RAM-only pair is generated;
+// pushes then won't reach a phone subscribed under a different key, but pairing
+// and decisions still work (push is best-effort). See ADR 0010. It errors only
+// if key generation fails.
+func New(cfg Config) (*Agent, error) {
+	if cfg.RelayURL == "" {
+		cfg.RelayURL = defaultRelayURL
+	}
+	if cfg.PublicRelayURL == "" {
+		cfg.PublicRelayURL = cfg.RelayURL
+	}
+	pub := os.Getenv("AAH_VAPID_PUBLIC_KEY")
+	priv := os.Getenv("AAH_VAPID_PRIVATE_KEY")
+	if pub == "" || priv == "" {
+		var err error
+		priv, pub, err = webpush.GenerateVAPIDKeys()
+		if err != nil {
+			return nil, fmt.Errorf("agent: vapid: %w", err)
+		}
+	}
+	return &Agent{cfg: cfg, dial: dialWS, vapidPriv: priv, vapidPub: pub}, nil
+}
+
+// Pairing holds what the agent must display so the phone can join: the deep
+// link / QR payload and the short code for manual entry.
+type Pairing struct {
+	// RoomID is the 16-hex room both peers join.
+	RoomID string
+	// Code is the short pairing code (the SPAKE2 password).
+	Code string
+	// Payload is base64url(JSON(PairPayload)) for the deep-link fragment.
+	Payload string
+}
+
+// NewPairing generates a fresh room id, code, and encoded payload without
+// connecting. Used by `pair`/`ask` to print before dialing.
+func (a *Agent) NewPairing() (Pairing, error) {
+	room, err := newRoomID()
+	if err != nil {
+		return Pairing{}, err
+	}
+	code, err := newCode()
+	if err != nil {
+		return Pairing{}, err
+	}
+	payload, err := encodePairPayload(PairPayload{Relay: a.cfg.PublicRelayURL, Room: room, Code: code})
+	if err != nil {
+		return Pairing{}, err
+	}
+	return Pairing{RoomID: room, Code: code, Payload: payload}, nil
+}
+
+// Pair runs wormhole-style SPAKE2 pairing (A-side) for the given room/code
+// over the relay, derives the session key, and stores the live session. The
+// caller is expected to have already displayed the pairing (QR + code).
+func (a *Agent) Pair(ctx context.Context, p Pairing) error {
+	sess, err := pairAsA(ctx, a.dial, a.cfg.RelayURL, p.RoomID, p.Code)
+	if err != nil {
+		return err
+	}
+	a.mu.Lock()
+	a.sess = sess
+	a.mu.Unlock()
+	return nil
+}
+
+// Paired reports whether a session has been established.
+func (a *Agent) Paired() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.sess != nil
+}
+
+// VAPIDPublicKey returns the agent's public VAPID key (base64url), so a
+// caller could surface it; the phone needs only its own subscription.
+func (a *Agent) VAPIDPublicKey() string { return a.vapidPub }
+
+// Config returns the agent's runtime configuration.
+func (a *Agent) Config() Config { return a.cfg }
+
+// Ask implements Asker. It seals req to the paired phone and re-announces on
+// undeliverable / transport failure with capped exponential backoff until an
+// authenticated (sealedbox.Open-verified) decision for req.ID arrives. A bad
+// frame is never treated as approval; ctx cancellation/deadline -> ErrTimeout.
+func (a *Agent) Ask(ctx context.Context, req wire.Request) (wire.Decision, error) {
+	// Single-flight: one phone, one shared connection, one question at a time.
+	// Reject (never approve) a concurrent Ask instead of racing on sess.conn.
+	if !a.asking.CompareAndSwap(false, true) {
+		return wire.Decision{}, ErrBusy
+	}
+	defer a.asking.Store(false)
+
+	a.mu.Lock()
+	sess := a.sess
+	a.mu.Unlock()
+	if sess == nil {
+		return wire.Decision{}, ErrNotPaired
+	}
+
+	// Enforce the request's own deadline: a timeout fires the ctx.Err() ->
+	// ErrTimeout branches below, returning a zero Decision, never approved.
+	if req.ExpiresInS > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, time.Duration(req.ExpiresInS)*time.Second)
+		defer cancel()
+	}
+
+	req.Kind = wire.KindRequest
+	// EncodeRequest pads to a fixed block so the request body length does not
+	// leak to the relay via ciphertext-length analysis (mirrors the phone).
+	plain, err := wire.EncodeRequest(req)
+	if err != nil {
+		return wire.Decision{}, fmt.Errorf("agent: encode request: %w", err)
+	}
+
+	backoff := baseBackoff
+	for {
+		if err := ctx.Err(); err != nil {
+			return wire.Decision{}, ErrTimeout
+		}
+
+		dec, sendErr := a.askOnce(ctx, sess, req, plain)
+		if sendErr == nil {
+			return dec, nil
+		}
+		if !errors.Is(sendErr, errResend) {
+			return wire.Decision{}, sendErr
+		}
+
+		// A transport failure means the live connection is dead: re-dial the
+		// same room (no re-pairing). An undeliverable peer (or a peer that
+		// left mid-request) means the phone is absent: keep the connection,
+		// wake it with a push (best-effort), and wait. A successful reconnect
+		// resets the backoff so a later blip starts fresh.
+		if errors.Is(sendErr, errReconnect) {
+			if reconnectErr := a.reconnect(ctx, sess); reconnectErr != nil {
+				if waitErr := sleep(ctx, backoff); waitErr != nil {
+					return wire.Decision{}, ErrTimeout
+				}
+				backoff = nextBackoff(backoff)
+				continue
+			}
+			backoff = baseBackoff
+		} else {
+			_ = a.Notify(ctx) // best-effort wake; no subscription -> no-op.
+		}
+		if waitErr := sleep(ctx, backoff); waitErr != nil {
+			return wire.Decision{}, ErrTimeout
+		}
+		backoff = nextBackoff(backoff)
+	}
+}
+
+// errResend is the internal signal to re-announce the request. errReconnect
+// additionally signals the live connection is dead and must be re-dialed.
+var (
+	errResend    = errors.New("agent: resend")
+	errReconnect = fmt.Errorf("%w: reconnect", errResend)
+)
+
+// askOnce seals plain, sends one box, and reads frames until an
+// authenticated decision for id arrives. It returns errResend on
+// undeliverable / transport failure so Ask can re-announce. Push
+// subscriptions that arrive are absorbed and stored.
+func (a *Agent) askOnce(ctx context.Context, sess *Session, req wire.Request, plain []byte) (wire.Decision, error) {
+	box, err := sealedbox.Seal(sess.key, plain)
+	if err != nil {
+		return wire.Decision{}, fmt.Errorf("agent: seal: %w", err)
+	}
+	if err := writeEnvelope(ctx, sess.conn, envelope{Box: box}); err != nil {
+		return wire.Decision{}, fmt.Errorf("%w: write: %w", errReconnect, err)
+	}
+
+	for {
+		env, err := readEnvelope(ctx, sess.conn)
+		if err != nil {
+			if ctx.Err() != nil {
+				return wire.Decision{}, ErrTimeout
+			}
+			return wire.Decision{}, fmt.Errorf("%w: read: %w", errReconnect, err)
+		}
+		switch {
+		case env.Relay == wire.SignalUndeliverable, env.Relay == wire.SignalPeerLeft:
+			// Peer absent or left mid-request: re-announce so the outer Ask
+			// loop re-wakes and re-sends when the phone returns.
+			return wire.Decision{}, errResend
+		case env.Relay != "":
+			continue // peer_joined: keep waiting.
+		case env.Box == "":
+			continue // pake/confirm stragglers post-pairing: ignore.
+		}
+
+		plainResp, err := sealedbox.Open(sess.key, env.Box)
+		if err != nil {
+			// Unauthenticated frame: never trust it, keep waiting.
+			continue
+		}
+		if a.absorbPush(plainResp) {
+			continue
+		}
+		dec, ok := decodeDecision(plainResp, req)
+		if !ok {
+			continue // wrong id (dup/stale), wrong kind, or shape mismatch.
+		}
+		return dec, nil
+	}
+}
+
+// absorbPush stores a sealed push subscription if plain is one, returning
+// true when it consumed the message.
+func (a *Agent) absorbPush(plain []byte) bool {
+	var ps wire.PushSub
+	if err := json.Unmarshal(plain, &ps); err != nil {
+		return false
+	}
+	if ps.Kind != wire.KindPushSub || ps.Subscription.Endpoint == "" {
+		return false
+	}
+	a.mu.Lock()
+	a.sub = &webpush.Subscription{
+		Endpoint: ps.Subscription.Endpoint,
+		Keys: webpush.Keys{
+			P256dh: ps.Subscription.Keys.P256dh,
+			Auth:   ps.Subscription.Keys.Auth,
+		},
+	}
+	a.mu.Unlock()
+	return true
+}
+
+// decodeDecision parses plain as a wire.Decision for req.ID; ok is false
+// unless it is a decision whose ID matches and whose Result shape matches the
+// requested ResponseKind. A decision with the wrong shape (e.g. a yesno reply
+// missing the approve bool, or a choice not among the offered options) is
+// treated as not-yet-valid (ok=false) so Ask keeps waiting — never approved.
+func decodeDecision(plain []byte, req wire.Request) (dec wire.Decision, ok bool) {
+	if err := json.Unmarshal(plain, &dec); err != nil {
+		return wire.Decision{}, false
+	}
+	if dec.Kind != wire.KindDecision || dec.ID != req.ID {
+		return wire.Decision{}, false
+	}
+	if !resultMatchesKind(dec.Result, req.Response) {
+		return wire.Decision{}, false
+	}
+	return dec, true
+}
+
+// resultMatchesKind reports whether res is a well-formed answer for the
+// requested response shape. It is a bounded trust-boundary check: a decision
+// whose shape does not match the request is rejected, never approved.
+func resultMatchesKind(res wire.Result, resp wire.Response) bool {
+	switch resp.Kind {
+	case wire.ResponseYesNo:
+		return res.Approved != nil
+	case wire.ResponseChoice:
+		if res.Choice == "" {
+			return false
+		}
+		for _, opt := range resp.Options {
+			if res.Choice == opt {
+				return true
+			}
+		}
+		return false
+	case wire.ResponseText:
+		if resp.MaxLen > 0 && len(res.Text) > resp.MaxLen {
+			return false
+		}
+		return true
+	default:
+		return false
+	}
+}
+
+// reconnect re-dials the relay room and swaps in a fresh connection on the
+// session. The session key is unchanged (no re-pairing): both peers rejoin
+// the same room id and the agent re-announces. Returns an error if the dial
+// or handshake re-confirmation fails.
+func (a *Agent) reconnect(ctx context.Context, sess *Session) error {
+	_ = sess.conn.close()
+	conn, err := sess.dial(ctx, sess.relayURL, sess.roomID)
+	if err != nil {
+		return err
+	}
+	sess.conn = conn
+	return nil
+}
+
+// Notify sends a contentless wake-up Web Push to the paired phone using the
+// RAM VAPID keypair. It returns an error if no subscription has arrived yet.
+func (a *Agent) Notify(ctx context.Context) error {
+	a.mu.Lock()
+	sub := a.sub
+	a.mu.Unlock()
+	if sub == nil {
+		return errors.New("agent: no push subscription")
+	}
+	resp, err := webpush.SendNotificationWithContext(ctx, []byte("New approval request"), sub, &webpush.Options{
+		Subscriber:      vapidSubject,
+		VAPIDPublicKey:  a.vapidPub,
+		VAPIDPrivateKey: a.vapidPriv,
+		TTL:             30,
+	})
+	if err != nil {
+		return fmt.Errorf("agent: push: %w", err)
+	}
+	_ = resp.Body.Close()
+	return nil
+}
+
+// nextBackoff doubles d up to maxBackoff.
+func nextBackoff(d time.Duration) time.Duration {
+	d *= 2
+	if d > maxBackoff {
+		return maxBackoff
+	}
+	return d
+}
+
+// sleep waits d or returns ctx.Err() if ctx ends first.
+func sleep(ctx context.Context, d time.Duration) error {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-t.C:
+		return nil
+	}
+}

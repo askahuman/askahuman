@@ -1,0 +1,27 @@
+{
+  "name": "@askahuman/mcp",
+  "version": "0.0.0",
+  "publishConfig": {
+    "access": "public"
+  },
+  "description": "Copy-paste MCP server: let your AI agent ask a human for approval on their phone. End-to-end encrypted, no accounts, no database.",
+  "keywords": ["mcp", "model-context-protocol", "claude", "cursor", "agent", "human-in-the-loop", "approval"],
+  "homepage": "https://ask-a-human.ai",
+  "bugs": "https://github.com/askahuman/askahuman/issues",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/askahuman/askahuman.git"
+  },
+  "license": "MIT",
+  "author": "askahuman",
+  "bin": {
+    "askahuman": "bin/cli.js"
+  },
+  "files": ["bin/cli.js", "install.js"],
+  "scripts": {
+    "postinstall": "node install.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

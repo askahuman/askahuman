@@ -1,0 +1,33 @@
+# HTTP->HTTPS redirect for the Ingress, plus a BackendConfig for the relay with a
+# RAISED timeout so the GLB does not kill long-lived WebSockets (plan §9).
+apiVersion: networking.gke.io/v1beta1
+kind: FrontendConfig
+metadata:
+  name: ask-a-human-frontend-config
+  namespace: default
+spec:
+  redirectToHttps:
+    enabled: true
+    responseCodeName: MOVED_PERMANENTLY_DEFAULT
+---
+# Relay backend: WebSockets are long-lived, so the GLB backend timeout must be high.
+apiVersion: cloud.google.com/v1
+kind: BackendConfig
+metadata:
+  name: ask-a-human-relay-backend-config
+  namespace: default
+spec:
+  # 1h — keep idle/long-lived WS connections from being cut at the LB.
+  # TODO(phase2): tune against the agent's ping-keepalive interval (plan §9).
+  timeoutSec: 3600
+  # PRIVACY (HARD INVARIANT): room id rides on /ws?room=... — HTTP(S) LB access logs
+  # would persist that to Cloud Logging, breaking the RAM-only metadata guarantee.
+  # Keep request logging OFF for the relay backend. Do NOT flip enable:true.
+  logging:
+    enable: false
+  connectionDraining:
+    drainingTimeoutSec: 60
+  healthCheck:
+    type: HTTP
+    requestPath: /healthz
+    port: 8080

@@ -1,0 +1,20 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# kind overlay: shared base + local-registry image refs + dev patches.
+resources:
+  - ../base
+
+# Bare image names + a `local` tag. Tilt's `default_registry('localhost:5005')` (Tiltfile)
+# rewrites these to the ctlptl local-registry refs at build time, so the names must stay
+# un-prefixed here to match Tilt's build targets. The registry port 5005 matches
+# infra/local/cluster.yaml. For standalone `kubectl apply -k`, push to the registry as
+# localhost:5005/ask-a-human-{relay,web}:local first.
+images:
+  - name: ask-a-human-relay
+    newTag: local
+  - name: ask-a-human-web
+    newTag: local
+
+patches:
+  - path: dev-patches.yaml

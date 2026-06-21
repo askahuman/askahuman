@@ -1,0 +1,11 @@
+---
+import Layout from "../layouts/Layout.astro";
+import App from "../components/App.tsx";
+---
+
+<Layout>
+  <!-- Full-viewport PWA: the React island owns all nine screens + crypto/relay.
+       client:only — pairing reads location.hash and runs WebCrypto in the
+       browser; there is nothing to server-render. -->
+  <App client:only="react" />
+</Layout>

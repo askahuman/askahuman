@@ -1,0 +1,58 @@
+# Tests + linters on every push / PR — the status checks that make the CODEOWNERS
+# branch-protection rule meaningful. Backend (Go) and frontend (Astro/TS) run in
+# parallel jobs; each mirrors the repo's Makefile / package.json commands.
+name: ci
+
+on:
+  push:
+    branches: [develop, main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  backend:
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: backend/go.mod
+          cache-dependency-path: backend/go.sum
+      - run: go build ./...
+      - run: go vet ./...
+      - run: go test -race ./...
+      - name: golangci-lint (v2)
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/HEAD/install.sh \
+            | sh -s -- -b "$(go env GOPATH)/bin" v2.11.3
+          "$(go env GOPATH)/bin/golangci-lint" run --timeout 5m
+
+  frontend:
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.2.15"
+      # The Go<->JS SPAKE2 interop check shells out to the Go toolchain.
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: backend/go.mod
+          cache-dependency-path: backend/go.sum
+      - run: bun install --frozen-lockfile
+      - name: Type-check (astro check)
+        run: bun run check
+      - name: Unit tests (vitest)
+        run: bun run test
+      - name: Build PWA
+        run: bun run build
+      - name: Go<->JS SPAKE2 + secretbox interop
+        run: bun run interop

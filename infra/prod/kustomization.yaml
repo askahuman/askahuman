@@ -1,0 +1,26 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Isolate ask-a-human in its own namespace on the shared cluster (the namespace
+# name is non-sensitive; the cluster/project/registry identity is injected by CI).
+namespace: ask-a-human
+
+# GKE overlay. Scaffold only — do NOT push to the real registry/cluster this build
+# (plan §15). Deploy + E2E run on local kind.
+resources:
+  - ../base
+  - managed-certificate.yaml
+  - ingress.yaml
+  - frontend-config.yaml
+
+# Image refs are intentionally generic placeholders. The deploy workflow injects
+# the real (private) Artifact Registry + released tag at apply time via
+#   kustomize edit set image ask-a-human-relay=$GAR_REGISTRY/relay:$TAG
+# so the registry/project/cluster identity never lives in this public repo.
+images:
+  - name: ask-a-human-relay
+    newName: relay
+    newTag: latest
+  - name: ask-a-human-web
+    newName: web
+    newTag: latest

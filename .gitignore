@@ -1,0 +1,17 @@
+
+# built Go binaries (scripts go build -o ./bin/...)
+/bin/
+
+# autonomous agent-E2E pair log (scripts/agent-e2e.sh)
+.aah-pair.log
+.cursor/mcp.json
+.aah-dbg.log*
+
+# never commit keys/certs — go public safely
+*.pem
+
+# macOS Finder noise
+.DS_Store
+
+# private — agent instructions, never publish
+CLAUDE.md

@@ -1,0 +1,23 @@
+# ko builds the relay into a distroless static nonroot image — no Dockerfile. See architecture/0003.
+# Build (from ./backend): KO_DOCKER_REPO=localhost:5005 ko build ./cmd/relay
+# Import paths are resolved against backend/go.mod
+# (module github.com/askahuman/askahuman/backend), so `./cmd/relay` is the relay.
+# distroless static, nonroot (uid 65532).
+# ponytail: chainguard free tier only publishes the floating :latest tag, so this is NOT
+# yet reproducible. Upgrade path = append @sha256:<digest> from
+# `crane digest cgr.dev/chainguard/static:latest` (resolve online) for a pinned, reproducible base.
+defaultBaseImage: cgr.dev/chainguard/static:latest
+defaultPlatforms:
+  - linux/amd64
+  - linux/arm64
+builds:
+  - id: relay
+    # Import path of the relay main package (relative to backend/go.mod).
+    main: ./cmd/relay
+    env:
+      - CGO_ENABLED=0 # static binary, no libc — required for the distroless static base
+    flags:
+      - -trimpath
+    ldflags:
+      - -s
+      - -w

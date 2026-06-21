@@ -1,0 +1,29 @@
+# Secrets / local credentials — never ship in the build context.
+.env
+.env.*
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+infra/local/certs
+
+# Build artifacts / deps (rebuilt inside the image).
+node_modules
+dist
+.astro
+
+# VCS, OS, reports/logs, local-only.
+.git
+.gitignore
+.DS_Store
+*.log
+reports
+test-results
+playwright-report
+e2e
+test
+initial-design
+Dockerfile
+.dockerignore
+Makefile

@@ -1,0 +1,68 @@
+---
+import "../styles/global.css";
+
+// Marketing landing layout. Deliberately NOT the PWA shell:
+//  - no service-worker registration (only /app is installable),
+//  - no web-manifest <link> (only /app is installable),
+//  - normal referrer policy (no pairing secret ever lives on the landing).
+// It keeps only what the marketing page needs: dark theme + anti-FOUC + SEO/OG.
+
+interface Props {
+  title?: string;
+  description?: string;
+}
+
+const {
+  title = "ask-a-human — let your AI agent ask a human, on your phone",
+  description = "End-to-end encrypted approvals for your AI agent. No accounts, no database. A content-blind relay and a SPAKE2 handshake — the server never sees your data.",
+} = Astro.props;
+
+const THEME_COLOR = "#08090c";
+const SITE_URL = "https://ask-a-human.ai";
+const OG_IMAGE = "/icons/icon-512.png";
+---
+
+<!doctype html>
+<html lang="en" class="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, viewport-fit=cover"
+    />
+    <meta name="generator" content={Astro.generator} />
+
+    <title>{title}</title>
+    <meta name="description" content={description} />
+
+    <!-- SEO / Open Graph (no secrets on the landing -> default referrer policy). -->
+    <meta property="og:title" content={title} />
+    <meta property="og:description" content={description} />
+    <meta property="og:type" content="website" />
+    <meta property="og:url" content={SITE_URL} />
+    <meta property="og:image" content={OG_IMAGE} />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content={title} />
+    <meta name="twitter:description" content={description} />
+    <meta name="twitter:image" content={OG_IMAGE} />
+
+    <meta name="theme-color" content={THEME_COLOR} />
+    <link rel="icon" type="image/svg+xml" href="/icons/icon.svg" />
+    <link rel="apple-touch-icon" href="/icons/icon-192.png" />
+
+    <!-- Anti-FOUC: apply the dark class before paint (mirror the app shell). -->
+    <script is:inline>
+      (function () {
+        const theme = localStorage.getItem("theme");
+        if (theme === "light") {
+          document.documentElement.classList.remove("dark");
+        } else {
+          document.documentElement.classList.add("dark");
+        }
+      })();
+    </script>
+  </head>
+  <body class="min-h-screen overflow-x-hidden">
+    <slot />
+  </body>
+</html>

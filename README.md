@@ -1,0 +1,148 @@
+# ask-a-human
+
+**Let your AI agent ask a human — on your phone.** End-to-end encrypted. No accounts, no database.
+
+[![npm](https://img.shields.io/npm/v/@askahuman/mcp?logo=npm)](https://www.npmjs.com/package/@askahuman/mcp)
+[![license](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![release](https://github.com/askahuman/askahuman/actions/workflows/release.yml/badge.svg)](https://github.com/askahuman/askahuman/actions/workflows/release.yml)
+
+The MCP server runs **locally next to your agent** (Cursor / Claude / Codex) and exposes exactly **one
+tool — `request_approval`** — that **blocks until a human answers** (approve / decline / choose / reply)
+on a phone PWA. It never auto-approves. The server is a content-blind **relay**: it only ever sees
+`base64(nonce‖ciphertext)` + which room talks to which. Pairing is a Magic-Wormhole-style **SPAKE2**
+handshake — a short code becomes a strong shared key, with no relay MITM. No DB, RAM-only; restart ⇒ re-pair.
+
+- Repo: [github.com/askahuman/askahuman](https://github.com/askahuman/askahuman)
+- Website: [ask-a-human.ai](https://ask-a-human.ai) · npm: [`@askahuman/mcp`](https://www.npmjs.com/package/@askahuman/mcp)
+
+```
+  AGENT SIDE                    RELAY (kind / GKE)            USER SIDE
+ ┌──────────────┐  seal       ┌──────────────────┐  blob   ┌────────────────┐
+ │ MCP agent    │ ──────────► │ rooms-of-two WS   │ ──────► │ phone PWA      │
+ │ request_     │             │ verbatim forward  │         │ swipe / choose │
+ │   approval   │ ◄────────── │ RAM-only, no DB   │ ◄────── │ / reply → seal │
+ └──────────────┘   open      └──────────────────┘  blob   └────────────────┘
+        the relay sees only ciphertext + which room-id talks to which
+```
+
+## Quickstart — copy-paste MCP (npx)
+
+Paste into Cursor `~/.cursor/mcp.json`, Claude Desktop `claude_desktop_config.json`, or your Codex MCP config:
+```json
+{ "mcpServers": { "ask-a-human": {
+  "command": "npx",
+  "args": ["-y", "@askahuman/mcp", "serve"]
+}}}
+```
+No checkout, no build, no flags — the published binary defaults to `wss://ask-a-human.ai/ws` +
+`https://ask-a-human.ai`. The first `request_approval` prints a QR + deep link (`…/app#p=<payload>`) to
+stderr; scan it with your phone Camera to pair on the PWA at [ask-a-human.ai/app](https://ask-a-human.ai/app)
+(RAM-only, restart ⇒ re-pair). Override `--relay`/`--web` to self-host.
+
+The MCP server runs **on your machine** (stdio) on purpose: it holds the SPAKE2 key + plaintext, so it is
+never hosted — only the content-blind relay is. See `docs/decisions/architecture/0011`.
+
+## Security & trust
+
+This is the whole point of the project:
+- **Open-source + self-hostable** — read the code, run your own relay/PWA (`--relay` / `--web`).
+- **End-to-end encrypted** — plaintext only ever exists on your machine and your phone.
+- **Content-blind relay** — it forwards `base64(nonce‖ciphertext)` verbatim and knows only which room-id
+  talks to which. It cannot read, log, or replay your approvals.
+- **No DB, no accounts** — pairing lives in RAM for the server's lifetime; a restart simply means re-pair.
+- **Never auto-approves** — `request_approval` blocks until a real human answers (or it times out).
+
+Found a bug? Report it — see [SECURITY.md](SECURITY.md). I patch and release fast.
+
+## Crypto (see `docs/decisions/architecture/0002`)
+- Pairing: **SPAKE2 over ristretto255** — a short code becomes a strong shared key with no relay MITM.
+  Go uses `gtank/ristretto255`; the PWA uses `@noble/curves`; the protocol is ours. Roles: agent = A, phone = B.
+- App traffic: **`nacl/secretbox`** (XSalsa20-Poly1305) keyed by the SPAKE2 session key (symmetric, so
+  `secretbox` not `box`). The Go↔JS interop is pinned by `frontend/test/spake2-interop.mjs`.
+
+## Layout
+| Dir | What |
+|---|---|
+| `backend/` | Go relay (`cmd/relay`) + MCP agent (`cmd/agent`); `pkg/spake2`, `pkg/sealedbox`, `pkg/wire` |
+| `frontend/` | Astro 5 + React 19 + Tailwind 4 static PWA (9 screens, service worker, client crypto) |
+| `npm/` | `@askahuman/mcp` wrapper — `postinstall` pulls the matching release binary, `bin/cli.js` execs it |
+| `infra/` | `ctlptl`/`kind` cluster, `ko`/Tilt build, kustomize `base`/`local`/`prod` (GKE) |
+| `docs/` | `plan.md` + `decisions/` (ADRs) — read these first |
+
+## Local dev (Tilt + kind)
+Requires Docker, plus `tilt`/`ko`/`ctlptl`/`kind` on `PATH` (`/opt/homebrew/bin`).
+```bash
+make up        # ctlptl cluster + registry, then `tilt up` (interactive UI at :10350)
+# ...or headless:
+make ci-up     # build (ko relay + docker web) → apply infra/local → wait healthy
+```
+Then:
+- Relay: `http://localhost:8080/healthz` · WS `ws://localhost:8080/ws?room=<id>`
+- PWA:   `http://localhost:8081/app`
+- Pair manually: run `./bin/agent pair` (or `serve`) — it prints a QR + code + deep link; open the
+  link on the PWA (`http://localhost:8081/app#p=<payload>`) to pair, then approvals show up live.
+```bash
+make down      # tilt down + ctlptl delete (tears down the cluster + registry)
+```
+
+### From your iPhone (same Wi-Fi)
+The kind cluster publishes the relay (`:8080`) and PWA (`:8081`) on all interfaces, so they're reachable at
+this Mac's LAN IP. The agent just hands the phone the LAN-IP pairing link:
+```bash
+make pair                  # auto-detects LAN IP, prints a QR + deep link, sends one demo request
+#   scripts/pair-lan.sh pair    # just hold pairing open    serve  # MCP server bound to the LAN IP
+```
+Scan the QR with the iPhone **Camera app** (it opens the link in Safari) → the PWA pairs over SPAKE2 →
+approve/decline/choose/reply. If the page won't load, allow incoming connections for Docker in System
+Settings → Network → Firewall.
+
+**Plain http caveat (iOS secure-context rule):** over `http://<lan-ip>` the **in-app QR camera, service
+worker, and Web Push are disabled** — pairing (via the native Camera app) and all decisions still work.
+
+**Want the in-app camera + push?** Run a local HTTPS proxy (mkcert), trust its CA on the phone once:
+```bash
+make https                 # mkcert cert for the LAN IP + a TLS proxy on :8443 (keep it running)
+HTTPS=1 make pair          # advertises wss://<lan>:8443/ws to the phone; agent still dials plain local
+```
+`make https` prints the `rootCA.pem` path — AirDrop it to the phone, install the profile (Settings →
+General → VPN & Device Management), then enable full trust (Settings → General → About → Certificate Trust
+Settings). After that `https://<lan-ip>:8443/app` is a secure context, so the in-app scanner + push work. The
+agent never needs the cert (it dials the relay over plain local `ws`); only the phone trusts the CA.
+
+## Connect an agent from source (register the MCP server)
+Build it: `make backend-build` → `./bin/agent`. Register the launcher (it binds to your LAN IP so a
+phone can pair, and tees the pairing link to a log) as an MCP **stdio** server in your client —
+Cursor `~/.cursor/mcp.json`, Claude Desktop `claude_desktop_config.json`, or Codex MCP config:
+```json
+{ "mcpServers": { "ask-a-human": {
+  "command": "/ABS/PATH/ask-a-human/scripts/mcp-serve.sh"
+}}}
+```
+That exposes one tool — `request_approval(title, category, summary, response_kind, options?,
+placeholder?, max_len?, expires_in_s?)` — which **blocks until the human answers** (or times out;
+never auto-approves). First call pairs: the QR + deep link print to the server's stderr **and** to
+`$TMPDIR/ask-a-human-pair.log` — `tail -f` it and scan with the iPhone Camera. Pairing is held in
+RAM for that server's lifetime (no DB); restart ⇒ re-pair.
+
+Localhost-only (no phone)? Skip the launcher and point `command` at `./bin/agent` with
+`"args": ["serve", "--relay", "ws://127.0.0.1:8080/ws", "--web", "http://localhost:8081"]`.
+
+## Tests
+```bash
+make backend-test                         # go test ./...  (unit, -race)
+( cd backend && go test -tags integration -race ./... )   # hermetic round trip + relay blindness + MCP
+( cd frontend && bunx vitest run )        # 38 PWA/crypto unit tests
+( cd frontend && node test/spake2-interop.mjs )           # Go↔JS SPAKE2 interop
+make ci-up && make e2e                    # LIVE: integration vs kind relay + real PWA in headless Chromium
+```
+`make e2e` proves the whole path with nothing mocked: the MCP agent + relay-in-kind + the real PWA
+(it spawns `agent ask`, drives headless Chromium to approve, asserts the agent gets the sealed decision).
+
+## Production (scaffolded, **not** deployed)
+`infra/prod` targets a private GKE cluster: domain **`ask-a-human.ai`**, images
+`<artifact-registry>/ask-a-human/{relay,web}:VERSION`, a `gce`
+ingress + `ManagedCertificate` + `BackendConfig` (long-lived-WS timeout). **Before deploying:** reserve
+the global static IP `ask-a-human-global-ip`, point `ask-a-human.ai` DNS at it, and set `VERSION`. This
+repo does not push images or apply to the live cluster.
+</content>
+</invoke>

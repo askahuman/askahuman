@@ -1,0 +1,86 @@
+# Web — static Astro PWA bundle served by nginx-unprivileged. No secrets, no DB.
+# The runtime image (frontend/Dockerfile) listens on 8080 as the non-root nginx user.
+# Image placeholder "ask-a-human-web" is rewritten per overlay (local registry / GKE AR).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ask-a-human-web
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ask-a-human-web
+  template:
+    metadata:
+      labels:
+        app: ask-a-human-web
+    spec:
+      # Hardening: nginx-unprivileged runs as uid 101; pin it + drop all caps.
+      # readOnlyRootFilesystem needs emptyDir for nginx's cache/run/tmp scratch dirs.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 101 # nginx-unprivileged
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: web
+          image: "ask-a-human-web"
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          ports:
+            - containerPort: 8080 # nginx-unprivileged listens on 8080 (non-root)
+              name: http
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "32Mi"
+            limits:
+              cpu: "100m"
+              memory: "64Mi"
+          volumeMounts:
+            - name: nginx-cache
+              mountPath: /var/cache/nginx
+            - name: nginx-run
+              mountPath: /var/run
+            - name: tmp
+              mountPath: /tmp
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 8080
+            initialDelaySeconds: 2
+            periodSeconds: 5
+      volumes:
+        - name: nginx-cache
+          emptyDir: {}
+        - name: nginx-run
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ask-a-human-web
+  namespace: default
+spec:
+  selector:
+    app: ask-a-human-web
+  # Service port 80 -> container 8080. Prod ingress targets port 80; local overlay
+  # patches this Service to NodePort (see infra/local/dev-patches.yaml).
+  ports:
+    - port: 80
+      targetPort: 8080
+      name: http
+  type: ClusterIP

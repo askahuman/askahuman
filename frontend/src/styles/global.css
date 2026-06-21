@@ -1,0 +1,98 @@
+@import "tailwindcss";
+@import "@fontsource/jetbrains-mono/400.css";
+@import "@fontsource/jetbrains-mono/500.css";
+@import "@fontsource/jetbrains-mono/700.css";
+@import "@fontsource/ibm-plex-sans/400.css";
+@import "@fontsource/ibm-plex-sans/500.css";
+@import "@fontsource/ibm-plex-sans/600.css";
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+/* Design tokens — taken verbatim from the mockup renderVals()
+   (frontend/initial-design/ask-a-human.dc.html). */
+@theme {
+  --color-page: var(--theme-page);
+  --color-page-text: var(--theme-page-text);
+  --color-page-muted: var(--theme-page-muted);
+  --color-bg: var(--theme-bg);
+  --color-surface: var(--theme-surface);
+  --color-surface-2: var(--theme-surface-2);
+  --color-border: var(--theme-border);
+  --color-border-soft: var(--theme-border-soft);
+  --color-text: var(--theme-text);
+  --color-muted: var(--theme-muted);
+  --color-faint: var(--theme-faint);
+  --color-approve: var(--theme-approve);
+  --color-decline: var(--theme-decline);
+
+  /* Category badge palette (shared dark/light). */
+  --color-cat-cash: #2dd4bf;
+  --color-cat-deploy: #f5a524;
+  --color-cat-data: #5b9cf6;
+  --color-cat-access: #c084fc;
+  --color-cat-other: #94a3b8;
+
+  --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", monospace;
+  --font-sans: "IBM Plex Sans", system-ui, sans-serif;
+}
+
+/* Light palette — renderVals() else-branch. */
+:root {
+  --theme-page: #dfe2e7;
+  --theme-page-text: #15171c;
+  --theme-page-muted: #6b7280;
+  --theme-bg: #f4f5f8;
+  --theme-surface: #ffffff;
+  --theme-surface-2: #f0f2f6;
+  --theme-border: #dde0e6;
+  --theme-border-soft: #e8eaef;
+  --theme-text: #15171c;
+  --theme-muted: #5e6470;
+  --theme-faint: #9aa0ab;
+  --theme-approve: #11a861;
+  --theme-decline: #e23b30;
+  --theme-approve-dim: rgba(17, 168, 97, 0.12);
+  --theme-decline-dim: rgba(226, 59, 48, 0.1);
+  --theme-glass: rgba(255, 255, 255, 0.72);
+}
+
+/* Dark palette — renderVals() then-branch (the design default). */
+.dark {
+  --theme-page: #08090c;
+  --theme-page-text: #e7e9ee;
+  --theme-page-muted: #7d838f;
+  --theme-bg: #0c0d11;
+  --theme-surface: #15171d;
+  --theme-surface-2: #1b1e26;
+  --theme-border: #2a2e38;
+  --theme-border-soft: #21242c;
+  --theme-text: #e9ebf0;
+  --theme-muted: #8b919d;
+  --theme-faint: #5b616c;
+  --theme-approve: #39d98a;
+  --theme-decline: #ff5d52;
+  --theme-approve-dim: rgba(57, 217, 138, 0.14);
+  --theme-decline-dim: rgba(255, 93, 82, 0.14);
+  --theme-glass: rgba(24, 27, 34, 0.72);
+}
+
+/* iOS PWA swipe lock — suppress horizontal back-swipe + rubber-band overscroll
+   so a left->right "approve" drag reaches the card instead of the OS edge-pan.
+   pan-y still allows vertical page scroll. ref. ADR 0008. */
+html,
+body {
+  overscroll-behavior: none;
+  touch-action: pan-y;
+}
+
+body {
+  font-family: var(--font-mono);
+  background-color: var(--color-page);
+  color: var(--color-page-text);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  /* Block iOS long-press selection/callout from interrupting the drag. */
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
+}

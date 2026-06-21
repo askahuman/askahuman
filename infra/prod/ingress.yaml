@@ -1,0 +1,51 @@
+# GKE L7 Ingress: the PWA and the WSS relay share one host.
+#   /ws       -> relay (WebSocket rendezvous)
+#   /healthz  -> relay (probe / liveness over the public host)
+#   /         -> web   (static Astro PWA)
+# WSS/TLS is mandatory for PWA, service workers, and Web Push (secure-context — plan §9).
+# Domain: ask-a-human.ai. Point its A record at the `ask-a-human-global-ip` reserved static IP
+# (gcloud compute addresses create ask-a-human-global-ip --global) before the managed cert provisions.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: ask-a-human-ingress
+  namespace: default
+  annotations:
+    kubernetes.io/ingress.class: "gce"
+    kubernetes.io/ingress.global-static-ip-name: "ask-a-human-global-ip"
+    networking.gke.io/managed-certificates: "ask-a-human-ssl"
+    networking.gke.io/v1beta1.FrontendConfig: "ask-a-human-frontend-config"
+    # TODO(prod, manual cloud step): attach a Cloud Armor security policy to the relay
+    # backend for per-IP rate limiting (protects /ws against connection floods). Create
+    # the policy out-of-band, then reference it via a BackendConfig `securityPolicy.name`.
+    # Not encoded here: the policy is a project-level Cloud resource, not a k8s object —
+    # inventing a CRD for it would be a non-renderable placeholder. See infra/README.
+spec:
+  rules:
+    - host: ask-a-human.ai
+      http:
+        paths:
+          # Relay: WebSocket rendezvous endpoint.
+          - path: /ws
+            pathType: Prefix
+            backend:
+              service:
+                name: ask-a-human-relay
+                port:
+                  number: 8080
+          # Relay: health probe exposed on the shared public host.
+          - path: /healthz
+            pathType: Prefix
+            backend:
+              service:
+                name: ask-a-human-relay
+                port:
+                  number: 8080
+          # Everything else: the static PWA.
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: ask-a-human-web
+                port:
+                  number: 80

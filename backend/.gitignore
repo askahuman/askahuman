@@ -1,0 +1,10 @@
+/bin/
+# stray binaries from ad-hoc `go build ./cmd/<x>` at backend root
+/relay
+/agent
+/devproxy
+*.out
+*.test
+*.log
+.DS_Store
+coverage.txt

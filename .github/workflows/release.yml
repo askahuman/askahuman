@@ -1,0 +1,47 @@
+# Tag a version (git tag v1.2.3 && git push --tags) to:
+#  1. cross-compile the agent + publish a GitHub Release (GoReleaser)
+#  2. publish the npm wrapper @askahuman/mcp@1.2.3 whose postinstall pulls
+#     the matching release binary. ref. .goreleaser.yaml, npm/install.js
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write # GoReleaser creates the GitHub Release
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: backend/go.mod
+          cache-dependency-path: backend/go.sum
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: GoReleaser (build + GitHub Release)
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          version: "~> v2"
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish npm package
+        working-directory: npm
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          npm version "$VERSION" --no-git-tag-version --allow-same-version
+          npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

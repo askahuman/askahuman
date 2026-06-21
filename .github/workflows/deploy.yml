@@ -1,0 +1,99 @@
+# Deploy the relay + PWA to the private GKE cluster on a version tag.
+#
+# KEYLESS: authenticates via Workload Identity Federation — no service-account
+# JSON key anywhere. The private project / registry / cluster identity lives
+# ONLY in GitHub Secrets, never in this public repo.
+#
+# HARDENED so a credential can never reach the public log: no `set -x`, no env
+# dumps, no `-o yaml`/`-o json`/`describe` on any manifest (the relay + web carry
+# zero server-side secrets, so there is nothing secret to render — but we keep the
+# discipline anyway). ref. docs/decisions/architecture/0013.
+#
+# One-time setup (NOT in this repo):
+#   - Artifact Registry repo holding relay/ + web/ images.
+#   - Deployer SA with roles/artifactregistry.writer, roles/container.developer,
+#     roles/gkehub.gatewayEditor (Connect Gateway); WIF principalSet bound to THIS repo.
+#   - Namespace `ask-a-human` + a RoleBinding granting the SA edit on it.
+#   - GitHub Secrets: GCP_PROJECT_ID, GCP_WIF_PROVIDER, GCP_DEPLOYER_SA,
+#     GKE_CLUSTER, GAR_REGISTRY (e.g. <region>-docker.pkg.dev/<project>/<repo>).
+name: deploy
+
+on:
+  push:
+    tags: ["v*"]
+
+# Minimal scopes. id-token:write is REQUIRED for WIF; contents:read for checkout.
+permissions:
+  contents: read
+  id-token: write
+
+# Serialize deploys; never cancel a half-applied rollout.
+concurrency:
+  group: deploy-prod
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-24.04
+    env:
+      TAG: ${{ github.ref_name }}
+      GAR_REGISTRY: ${{ secrets.GAR_REGISTRY }}
+      GCP_PROJECT: ${{ secrets.GCP_PROJECT_ID }}
+      GKE_CLUSTER: ${{ secrets.GKE_CLUSTER }}
+      USE_GKE_GCLOUD_AUTH_PLUGIN: "True"
+    steps:
+      - uses: actions/checkout@v4
+
+      # Keyless auth — mints a short-lived (1h) token via federation.
+      - id: auth
+        uses: google-github-actions/auth@v3
+        with:
+          project_id: ${{ secrets.GCP_PROJECT_ID }}
+          workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
+          service_account: ${{ secrets.GCP_DEPLOYER_SA }}
+
+      - uses: google-github-actions/setup-gcloud@v3
+        with:
+          install_components: gke-gcloud-auth-plugin
+
+      - name: Configure Docker for Artifact Registry
+        run: gcloud auth configure-docker "${GAR_REGISTRY%%/*}" --quiet
+
+      # Relay → distroless static image via ko (no Dockerfile). --bare pushes to
+      # exactly $KO_DOCKER_REPO. ref. backend/.ko.yaml.
+      - name: Build + push relay image
+        working-directory: backend
+        env:
+          KO_DOCKER_REPO: ${{ secrets.GAR_REGISTRY }}/relay
+        run: |
+          go install github.com/google/ko@latest
+          "$(go env GOPATH)/bin/ko" build --bare --platform=linux/amd64 \
+            --tags "${TAG#v},latest" ./cmd/relay
+
+      - name: Build + push web image
+        run: |
+          docker buildx build --push \
+            -t "${GAR_REGISTRY}/web:${TAG#v}" \
+            -t "${GAR_REGISTRY}/web:latest" \
+            frontend
+
+      # Private cluster reached through fleet Connect Gateway (same as the sibling).
+      - name: Get cluster credentials
+        run: |
+          gcloud container fleet memberships get-credentials "$GKE_CLUSTER" \
+            --project "$GCP_PROJECT"
+
+      # Inject the real (private) registry + released tag at apply time, then apply.
+      # kustomize is preinstalled on GitHub-hosted runners.
+      - name: Set images + apply
+        working-directory: infra/prod
+        run: |
+          kustomize edit set image \
+            ask-a-human-relay="${GAR_REGISTRY}/relay:${TAG#v}" \
+            ask-a-human-web="${GAR_REGISTRY}/web:${TAG#v}"
+          kubectl apply -k . -o name
+
+      - name: Wait for rollout
+        run: |
+          kubectl rollout status deploy/ask-a-human-relay -n ask-a-human --timeout=180s
+          kubectl rollout status deploy/ask-a-human-web   -n ask-a-human --timeout=180s

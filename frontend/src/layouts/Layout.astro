@@ -1,0 +1,66 @@
+---
+import "../styles/global.css";
+// pwaInfo is injected by @vite-pwa/astro; holds the manifest <link> + web manifest icon.
+import { pwaInfo } from "virtual:pwa-info";
+
+interface Props {
+  title?: string;
+  description?: string;
+}
+
+const {
+  title = "ask-a-human",
+  description = "End-to-end-encrypted approvals from your AI agents, on your phone.",
+} = Astro.props;
+
+const THEME_COLOR = "#08090c";
+---
+
+<!doctype html>
+<html lang="en" class="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, viewport-fit=cover"
+    />
+    <meta name="generator" content={Astro.generator} />
+
+    <!-- Defense-in-depth: never leak the URL (which carries the pairing secret in
+         location.hash) via the Referer header. nginx also sends Referrer-Policy. -->
+    <meta name="referrer" content="no-referrer" />
+
+    <title>{title}</title>
+    <meta name="description" content={description} />
+
+    <!-- PWA: theme color + manifest link (manifest injected by vite-plugin-pwa). -->
+    <meta name="theme-color" content={THEME_COLOR} />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <link rel="icon" type="image/svg+xml" href="/icons/icon.svg" />
+    <link rel="apple-touch-icon" href="/icons/icon-192.png" />
+    {pwaInfo && <Fragment set:html={pwaInfo.webManifest.linkTag} />}
+
+    <!-- Anti-FOUC: apply the dark class before paint (mirror platia). -->
+    <script is:inline>
+      (function () {
+        const theme = localStorage.getItem("theme");
+        if (theme === "light") {
+          document.documentElement.classList.remove("dark");
+        } else {
+          document.documentElement.classList.add("dark");
+        }
+      })();
+    </script>
+  </head>
+  <body class="min-h-screen overflow-x-hidden">
+    <slot />
+
+    <!-- Register the service worker (autoUpdate). -->
+    <script>
+      import { registerSW } from "virtual:pwa-register";
+      registerSW({ immediate: true });
+    </script>
+  </body>
+</html>

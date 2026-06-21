@@ -1,0 +1,46 @@
+# GoReleaser builds the cross-platform `ask-a-human` MCP agent and publishes a
+# GitHub Release whose assets the npm package (@askahuman/mcp) downloads on
+# install. ref. npm/install.js, .github/workflows/release.yml
+version: 2
+
+project_name: ask-a-human
+
+builds:
+  - id: agent
+    dir: backend # go.mod lives in backend/
+    main: ./cmd/agent
+    binary: ask-a-human
+    env:
+      - CGO_ENABLED=0
+    goos: [darwin, linux, windows]
+    goarch: [amd64, arm64]
+    flags:
+      - -trimpath
+    # Bake the hosted endpoints into release builds so `npx @askahuman/mcp
+    # serve` is zero-config. Dev `go build` keeps the localhost defaults.
+    ldflags:
+      - -s -w
+      - -X main.defaultRelayURL=wss://ask-a-human.ai/ws
+      - -X main.defaultWebOrigin=https://ask-a-human.ai
+
+archives:
+  - id: agent
+    ids: [agent]
+    # install.js depends on this exact name: ask-a-human_<os>_<arch>.<ext>
+    name_template: "ask-a-human_{{ .Os }}_{{ .Arch }}"
+    formats: [tar.gz]
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+
+checksum:
+  name_template: "checksums.txt"
+
+release:
+  github:
+    owner: askahuman
+    name: askahuman
+
+changelog:
+  use: github
+  sort: asc

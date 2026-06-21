@@ -1,0 +1,58 @@
+# NetworkPolicies — least-privilege pod traffic. The relay holds RAM-only metadata,
+# so lateral movement and unexpected egress are the threats we close here.
+#
+# Ingress: both pods serve HTTP on 8080. We do NOT restrict ingress *source* because
+# GKE L7/LB health checks and client traffic arrive from external/LB IP ranges, not
+# from selectable pods — a podSelector source would silently break them. We pin the
+# port instead. Egress: neither pod calls out (no DB, no upstream), so we allow only
+# DNS (kube-dns on 53). The agent⇄relay⇄phone path is all *inbound* to the relay.
+#
+# ponytail: ceiling — ingress source is open per-port (LB ranges aren't selectable);
+# upgrade path is Cloud Armor / an LB source-range allowlist at the edge (see ingress.yaml).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: ask-a-human-relay
+  namespace: default
+spec:
+  podSelector:
+    matchLabels:
+      app: ask-a-human-relay
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - ports:
+        - protocol: TCP
+          port: 8080
+  egress:
+    # DNS only — the relay makes no outbound app calls.
+    - ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: ask-a-human-web
+  namespace: default
+spec:
+  podSelector:
+    matchLabels:
+      app: ask-a-human-web
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - ports:
+        - protocol: TCP
+          port: 8080
+  egress:
+    # DNS only — static nginx serves bundled assets, no outbound calls.
+    - ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
