@@ -134,6 +134,18 @@ export class SessionManager {
     return summaries.sort((a, b) => Number(b.hasRequest) - Number(a.hasRequest));
   }
 
+  /** pendingCount returns how many paired agents currently have an unanswered
+   *  request open. It is the number the OS app-icon badge shows (two agents each
+   *  waiting on one request -> 2), and it drops back as each request is answered
+   *  (the session clears its request on confirm), reaching 0 -> badge cleared. */
+  pendingCount(): number {
+    let n = 0;
+    for (const entry of this.entries.values()) {
+      if (entry.session.getState().request != null) n += 1;
+    }
+    return n;
+  }
+
   /** setActive foregrounds a room and clears its unread. */
   setActive(room: string): void {
     if (!this.entries.has(room) || this.active === room) {

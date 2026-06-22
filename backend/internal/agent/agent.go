@@ -65,6 +65,18 @@ const (
 	pushWakeTimeout = 10 * time.Second
 )
 
+// defaultReWakeInterval throttles the reactive re-wake in the Ask loop. The
+// relay re-reports the peer absent on every keepalive cycle, so an unthrottled
+// re-wake fired a fresh contentless push on every backoff tick (≤5s apart) —
+// the phone buzzed again and again, and iOS surfaced a new banner each time,
+// until the human finally answered. Capping re-wakes to one per this interval
+// turns that storm into a single wake-up plus an occasional reminder. It sits
+// well above maxBackoff (so the storm is gone) yet short enough that a genuinely
+// missed proactive nudge — e.g. the push raced ahead of the subscription, or
+// iOS dropped the banner — still gets a prompt backup, rather than the human
+// waiting minutes (the proactive and reactive wakes share one clock).
+const defaultReWakeInterval = 60 * time.Second
+
 // resolveVAPIDSubject returns the VAPID subject: AAH_VAPID_SUBJECT when set, else
 // defaultVAPIDSubject. A self-hoster may pass an https URL or a BARE email. We
 // strip a stray leading "mailto:" from a non-https override because webpush-go
@@ -152,6 +164,11 @@ type Agent struct {
 	// so concurrent Asks would interleave frames on it. A second Ask is
 	// rejected with ErrBusy rather than racing.
 	asking atomic.Bool
+
+	// reWakeInterval caps how often the Ask loop's reactive branch re-sends a
+	// wake-up push for one request (see defaultReWakeInterval). A field so tests
+	// can shrink it; production uses the default set in New.
+	reWakeInterval time.Duration
 }
 
 var _ Asker = (*Agent)(nil)
@@ -185,7 +202,7 @@ func New(cfg Config) (*Agent, error) {
 			return nil, fmt.Errorf("agent: vapid: %w", err)
 		}
 	}
-	return &Agent{cfg: cfg, dial: dialWS, vapidPriv: priv, vapidPub: pub, vapidSub: resolveVAPIDSubject()}, nil
+	return &Agent{cfg: cfg, dial: dialWS, vapidPriv: priv, vapidPub: pub, vapidSub: resolveVAPIDSubject(), reWakeInterval: defaultReWakeInterval}, nil
 }
 
 // vapidKeypair is the persisted VAPID keypair (both halves base64url). Only the
@@ -419,7 +436,17 @@ func (a *Agent) Ask(ctx context.Context, req wire.Request) (wire.Decision, error
 	// phone, coalesced by the SW's fixed notification tag. Best-effort and run in
 	// its own goroutine so it never delays reading the decision.
 	var wakeOnce sync.Once
-	wake := func() { wakeOnce.Do(func() { go a.wakePush(ctx) }) }
+	// lastWake stamps when the most recent wake-up push was issued (proactive or
+	// reactive) so the reactive branch below can throttle itself. Only the Ask
+	// loop goroutine touches it — the proactive closure runs synchronously inside
+	// askOnce before launching its push goroutine — so it needs no lock.
+	var lastWake time.Time
+	wake := func() {
+		wakeOnce.Do(func() {
+			lastWake = time.Now()
+			go a.wakePush(ctx)
+		})
+	}
 
 	backoff := baseBackoff
 	for {
@@ -449,10 +476,15 @@ func (a *Agent) Ask(ctx context.Context, req wire.Request) (wire.Decision, error
 				continue
 			}
 			backoff = baseBackoff
-		} else {
+		} else if time.Since(lastWake) >= a.reWakeInterval {
 			// Peer explicitly absent (undeliverable / left mid-request): re-wake
 			// it. This is the fallback to the proactive wake above; both are
 			// best-effort and a benign "no subscription yet" is never logged.
+			// THROTTLED: the relay re-reports the peer absent on every keepalive
+			// cycle, so re-waking on each one buzzed the phone every backoff tick
+			// until the human answered (see defaultReWakeInterval). Cap it to one
+			// push per reWakeInterval — a single nudge plus an occasional reminder.
+			lastWake = time.Now()
 			a.wakePush(ctx)
 		}
 		if waitErr := sleep(ctx, backoff); waitErr != nil {

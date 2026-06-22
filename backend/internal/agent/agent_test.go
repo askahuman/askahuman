@@ -190,6 +190,48 @@ func TestAskResendsOnUndeliverable(t *testing.T) {
 	assert.GreaterOrEqual(t, conn.writeCount(), 2) // resent at least once.
 }
 
+// TestAskThrottlesReWake guards the push-storm fix: the relay re-reports the
+// peer absent on every resend, but the human must get ONE wake-up, not a fresh
+// push on every backoff tick. With reWakeInterval set huge, several
+// undeliverable resends must yield at most the single proactive push (never a
+// reactive re-wake per signal). Without the throttle this count climbs with the
+// resend count.
+func TestAskThrottlesReWake(t *testing.T) {
+	key := make([]byte, sealedbox.KeySize)
+	conn := newFakeConn()
+	a := pairedAgent(t, key, conn, nil)
+
+	var pushes atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		pushes.Add(1)
+		w.WriteHeader(http.StatusCreated)
+	}))
+	defer srv.Close()
+	stubSub(t, a, srv.URL)
+	a.reWakeInterval = time.Hour // far longer than the test: no reactive re-wake.
+
+	// Three "peer absent" reports drive three resends; only then does the phone
+	// answer. Each resend re-enters the reactive branch.
+	pushSignal(t, conn, wire.SignalUndeliverable)
+	pushSignal(t, conn, wire.SignalUndeliverable)
+	pushSignal(t, conn, wire.SignalUndeliverable)
+	approved := true
+	go func() {
+		time.Sleep(200 * time.Millisecond)
+		pushBox(t, conn, key, wire.Decision{Kind: wire.KindDecision, ID: "req_1", Result: wire.Result{Approved: &approved}})
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	dec, err := a.Ask(ctx, yesnoReq())
+	require.NoError(t, err)
+	require.NotNil(t, dec.Result.Approved)
+	assert.GreaterOrEqual(t, conn.writeCount(), 3, "the loop must have resent on each undeliverable")
+	// Let the proactive goroutine's single push (if any) land before counting.
+	time.Sleep(100 * time.Millisecond)
+	assert.LessOrEqual(t, pushes.Load(), int32(1), "throttled: one wake-up, not one per resend")
+}
+
 func TestAskReconnectsOnTransportError(t *testing.T) {
 	key := make([]byte, sealedbox.KeySize)
 	first := newFakeConn()
@@ -709,10 +751,12 @@ func TestAskProactivePushFiresOnceAcrossReconnect(t *testing.T) {
 }
 
 // TestAskReactiveWakeSendsPush asserts the REACTIVE (peer-absent) branch still
-// sends a real wake-up push: a request whose first delivery is undeliverable
-// produces the proactive push AND a reactive re-wake (>=2 pushes), so a
-// regression that dropped the reactive a.wakePush would be caught here (the
-// peer-absent tests use no subscription, so they never exercise this path).
+// sends a real wake-up push once its throttle window elapses: a request whose
+// first delivery is undeliverable produces the proactive push AND a reactive
+// re-wake (>=2 pushes), so a regression that dropped the reactive a.wakePush
+// would be caught here (the peer-absent tests use no subscription, so they
+// never exercise this path). reWakeInterval is set to 0 so the reactive re-wake
+// is due immediately — TestAskThrottlesReWake covers the throttle itself.
 func TestAskReactiveWakeSendsPush(t *testing.T) {
 	t.Setenv("AAH_VAPID_SUBJECT", "")
 	key := make([]byte, sealedbox.KeySize)
@@ -732,6 +776,7 @@ func TestAskReactiveWakeSendsPush(t *testing.T) {
 
 	a := pairedAgent(t, key, conn, nil)
 	stubSub(t, a, srv.URL)
+	a.reWakeInterval = 0 // reactive re-wake due on the first peer-absent report.
 
 	// First delivery finds the peer absent -> reactive re-wake; then answer once
 	// BOTH the proactive and reactive pushes have fired (deterministic, no sleep).

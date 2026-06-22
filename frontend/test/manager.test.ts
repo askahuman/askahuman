@@ -316,4 +316,28 @@ describe('SessionManager', () => {
     // Only b carries a request -> only b's chip shows the red request dot.
     expect(list.filter((x) => x.hasRequest).map((x) => x.id)).toEqual([b]);
   });
+
+  it('pendingCount counts agents with an unanswered request (drives the app badge)', () => {
+    const m = newManager();
+    const a = 'aaaa1111aaaa1111';
+    const b = 'bbbb1111bbbb1111';
+    m.add(payload(a));
+    m.add(payload(b));
+    const { ws: wsA, agentKey: keyA } = pair(a);
+    const { ws: wsB, agentKey: keyB } = pair(b);
+
+    // No requests -> nothing to badge.
+    expect(m.pendingCount()).toBe(0);
+
+    // The user's case: two agents each with one request -> the badge reads 2.
+    wsA.recv(sealReq(keyA, yesno('ra')));
+    expect(m.pendingCount()).toBe(1);
+    wsB.recv(sealReq(keyB, yesno('rb')));
+    expect(m.pendingCount()).toBe(2);
+
+    // Answering the active agent's request clears it -> the count drops to 1.
+    m.setActive(a);
+    m.approve();
+    expect(m.pendingCount()).toBe(1);
+  });
 });
