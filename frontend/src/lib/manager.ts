@@ -114,9 +114,12 @@ export class SessionManager {
     this.emit();
   }
 
-  /** list returns the roster in insertion order. */
+  /** list returns the roster ordered requests-first (leftmost), then insertion
+   *  order. Array.prototype.sort is stable, so same-state agents keep their add
+   *  order; only an agent with a live pending request (hasRequest) moves to the
+   *  front, so whatever needs the human sits at the left edge of the strip. */
   list(): AgentSummary[] {
-    return this.order.map((room) => {
+    const summaries = this.order.map((room) => {
       const entry = this.entries.get(room)!;
       const s = entry.session.getState();
       return {
@@ -128,6 +131,7 @@ export class SessionManager {
         active: room === this.active,
       };
     });
+    return summaries.sort((a, b) => Number(b.hasRequest) - Number(a.hasRequest));
   }
 
   /** setActive foregrounds a room and clears its unread. */
