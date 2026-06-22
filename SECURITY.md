@@ -6,7 +6,7 @@
 
 The architecture is deliberately split so no single piece holds everything:
 
-- **The relay is content-blind.** It only ever sees `base64(nonce‖ciphertext)` and which room talks to which. No database, RAM-only — restart means re-pair. It cannot read messages, and it is open-source and self-hostable (override `--relay` / `--web`).
+- **The relay is content-blind.** It only ever sees `base64(nonce‖ciphertext)` and which room talks to which. No database, RAM-only — restart means re-pair. It cannot read messages, and it is open-source and self-hostable (override `--relay` / `--public-relay`).
 - **The agent runs locally**, next to your editor (Cursor/Claude/Codex) via `npx @askahuman/mcp serve`. It holds the SPAKE2-derived key and the plaintext. It exposes ONE tool, `request_approval`, which blocks until a human answers (approve / decline / choose / reply). It never auto-approves.
 - **The phone PWA** (https://ask-a-human.ai/app) is the only other key-holder.
 

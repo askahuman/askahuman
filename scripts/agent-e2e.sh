@@ -43,7 +43,7 @@ case "$KIND" in
   *) echo "bad KIND=$KIND" >&2; exit 2 ;;
 esac
 
-# 1) Phone side: poll the pair log for the deep link, drive the REAL PWA to answer.
+# 1) Phone side: poll the pair log for the typed code, drive the REAL PWA to answer.
 ( cd frontend && PAIR_LOG="$LOG" KIND="$KIND" SHOT="$PWD/e2e/pwa-approve.png" \
     node e2e/pwa-approve.mjs ) > "$PHONE_OUT" 2>&1 &
 PHONE_PID=$!

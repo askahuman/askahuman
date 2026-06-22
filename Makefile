@@ -24,7 +24,7 @@ ci-up: ## Headless bring-up: provision the cluster, build + apply, wait for heal
 e2e: ## Live end-to-end check against the running kind system (needs `make ci-up` first)
 	./scripts/e2e.sh
 
-https: ## Local HTTPS proxy (mkcert) so the iPhone in-app camera + service worker + push work
+https: ## Local HTTPS proxy (mkcert) so the iPhone service worker + push work
 	./scripts/https-lan.sh
 
 pair: ## Pair a phone over the LAN + send one demo request (HTTPS=1 make pair uses the TLS proxy)

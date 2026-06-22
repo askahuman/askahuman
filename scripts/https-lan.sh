@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Local HTTPS for phone testing. Generates a mkcert cert for this Mac's LAN IP and
 # runs a TLS reverse proxy that fronts the kind relay (wss /ws + /healthz) and the
-# PWA (https /) on one origin (:8443). A secure context is required for the in-app
-# QR camera (getUserMedia), the service worker, and Web Push. NOT for production.
+# PWA (https /) on one origin (:8443). A secure context is required for the service
+# worker and Web Push (pairing itself is a typed code, so it works over plain http
+# too). NOT for production.
 #
 # Run this in one terminal (it stays up); pair from another with:
 #   HTTPS=1 scripts/pair-lan.sh
@@ -34,7 +35,7 @@ fi
 CA="$(mkcert -CAROOT)/rootCA.pem"
 cat <<EOF
 
-iPhone setup (one time): install + trust this root CA, then the in-app camera works:
+iPhone setup (one time): install + trust this root CA, then the service worker + push work:
   $CA
 (AirDrop it to the phone → install the profile → enable full trust under Certificate Trust Settings.)
 
