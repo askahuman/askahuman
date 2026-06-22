@@ -125,36 +125,43 @@ const pairHTML = `<!doctype html>
     setTimeout(function () { try { window.close(); } catch (e) { /* ignore */ } }, 1200);
   }
 
-  // Long-poll: each request blocks on the server until pairing completes, so the
-  // flip is instant. A returned {paired:false} is a long-poll timeout — re-issue.
-  function wait() {
+  // Self-rescheduling poll. Each request long-polls server-side so the flip is
+  // instant, but the CLIENT always reschedules on every settle. Crucially, this
+  // survives a background-tab SUSPEND: Safari fully freezes a backgrounded tab
+  // (WebKit bug 150515) while the human types the code on their phone, tearing
+  // down the held request so its .then/.catch NEVER runs — the loop would be dead,
+  // not paused. kick() re-arms it on return. inflight (an AbortController) bounds
+  // us to ONE request at a time so the focus/visibility/pageshow events that fire
+  // together on resume cannot stack toward Safari's ~6-connections-per-host cap.
+  var inflight = null;
+  function poll() {
     if (stopped) return;
-    fetch(STATUS, { cache: 'no-store' })
+    // Don't hold a request while hidden (Safari would suspend it anyway); a
+    // visibilitychange kick() restarts the loop the instant the tab is shown.
+    if (document.visibilityState !== 'visible') { setTimeout(poll, 1000); return; }
+    if (inflight) inflight.abort(); // drop any prior (possibly suspended/stale) request
+    var ctl = new AbortController();
+    inflight = ctl;
+    fetch(STATUS, { cache: 'no-store', signal: ctl.signal })
       .then(function (r) { return r.ok ? r.json() : null; })
       .then(function (s) {
-        if (s && s.paired) { connected(); }
-        else { setTimeout(wait, 400); }
+        if (ctl !== inflight) return; // superseded by a newer poll
+        if (s && s.paired) { connected(); } else { setTimeout(poll, 400); }
       })
-      .catch(function () { setTimeout(wait, 1500); /* server gone/blip: back off */ });
+      .catch(function () { if (ctl === inflight) setTimeout(poll, 1500); });
   }
 
-  // Re-check the instant the human returns to this tab. While they typed the code
-  // on their phone this tab was backgrounded and may have been throttled, so a
-  // held long-poll might not have observed the flip yet — a one-shot check on
-  // focus/visibility catches up immediately (the server stays up for this).
-  function kick() {
-    if (stopped || document.visibilityState !== 'visible') return;
-    fetch(STATUS, { cache: 'no-store' })
-      .then(function (r) { return r.ok ? r.json() : null; })
-      .then(function (s) { if (s && s.paired) connected(); })
-      .catch(function () { /* ignore: the wait() loop keeps trying */ });
-  }
+  // The instant the human returns to this tab, re-arm the loop. After a suspend
+  // the in-flight request's promise may never settle (loop dead), so poll()
+  // aborts that stale request and issues a fresh one. Idempotent across the
+  // visibilitychange/focus/pageshow events that fire together on resume.
+  function kick() { if (!stopped) poll(); }
   document.addEventListener('visibilitychange', kick);
   window.addEventListener('focus', kick);
-  window.addEventListener('pageshow', kick);
+  window.addEventListener('pageshow', kick); // bfcache / page-cache restore
 
   if ({{ .Paired }}) { connected(); }
-  else { wait(); }
+  else { poll(); }
 })();
 </script>
 </body>

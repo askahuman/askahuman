@@ -60,8 +60,9 @@ const pageGrace = 5 * time.Minute
 
 // statusWait caps how long a single /status long-poll blocks before returning
 // so the browser re-issues; it does not gate the flip, which fires the instant
-// pairedCh closes.
-const statusWait = 20 * time.Second
+// pairedCh closes. Kept short so a socket a backgrounded tab left frozen is
+// recycled quickly once the tab is foregrounded again.
+const statusWait = 8 * time.Second
 
 // openCodePage mints a loopback pair page for displayCode and opens it in the
 // host's default browser. It returns the page handle (so the caller can mark it
@@ -208,7 +209,11 @@ func (p *pairPage) handle(w http.ResponseWriter, r *http.Request) {
 	case "status":
 		// Long-poll: block until paired (instant flip), the browser gives up, or
 		// the server closes. r.Context() is canceled if the tab navigates away.
+		// Connection: close so a backgrounded tab that froze this socket cannot
+		// have its next re-issued fetch land on a half-dead pooled connection
+		// (Safari background-tab suspend, WebKit bug 150515).
 		h.Set("Content-Type", "application/json")
+		h.Set("Connection", "close")
 		_, _ = fmt.Fprintf(w, "{\"paired\":%t}", p.waitPaired(r.Context()))
 	default:
 		http.NotFound(w, r)
