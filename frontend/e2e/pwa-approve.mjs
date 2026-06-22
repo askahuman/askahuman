@@ -5,7 +5,7 @@
 // (teed to a log by scripts/mcp-serve-test.sh), opens the REAL PWA in headless Chromium as
 // role B, TYPES the code into the pairing field, and answers the request. Used by
 // scripts/agent-e2e.sh so a real agent CLI (codex / cursor-agent) drives the agent side
-// while this drives the phone side. There is no QR / deep link — the code is the only secret.
+// while this drives the phone side. There is no deep link — the code is the only secret.
 //
 // Input (one of):
 //   PAIR_CODE=ABCD-2345          the 8-char pairing code to type

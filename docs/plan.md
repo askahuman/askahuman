@@ -61,6 +61,8 @@ cannot reach each other directly. The backend is *not* an app server with busine
 
 ## 4. Pairing (the "wormhole" part)
 
+> Note: pairing shipped **code-only** ([architecture/0015](decisions/architecture/0015_code_only_pairing.md)). The QR / deep-link design described in this section and the phase plans below was dropped — the agent prints a short code the human types at `/app`; nothing rides a URL. Kept as historical planning context.
+
 Pairing replaces login. Agent generates a random **room id** + a **short code**; presents both as a
 **QR code** *and* as copy-pasteable text. The QR encodes `{ relay URL, room id, code }` so a scan
 auto-fills; manual copy-paste of the code works too.

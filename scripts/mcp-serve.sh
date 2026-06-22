@@ -5,7 +5,7 @@
 # wrappers around it); the pairing CODE is written to a log file on the FIRST
 # request_approval (or start_pairing) call:
 #   tail -f "$LOG"     # then type the "Pairing code: …" value into the app on your phone
-# There is no QR or deep link — the typed code is the out-of-band secret; the phone derives
+# There is no deep link — the typed code is the out-of-band secret; the phone derives
 # the relay room from it. Pairing is held in RAM for the life of this process (no DB);
 # restart ⇒ re-pair.
 set -euo pipefail

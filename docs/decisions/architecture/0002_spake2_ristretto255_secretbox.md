@@ -16,7 +16,7 @@ JS (PWA). The original plan suggested NaCl `box` (Curve25519 ECDH). We chose **S
 - **Construction (RFC 9382-style, single shared password = the short code):**
   - `M`, `N` are fixed points derived by hash-to-group from domain-separated strings
     (`"ask-a-human:spake2:M"` / `":N"`) — computed identically on both sides.
-  - Agent plays A (uses `M`), phone plays B (uses `N`). Roles are fixed by the QR/initiator.
+  - Agent plays A (uses `M`), phone plays B (uses `N`). Roles are fixed by the initiator.
   - `w = scalar_from_uniform(SHA-512(code))`. A→ `T=x·G+w·M`; B→ `S=y·G+w·N`;
     shared `K` via `x·(S−w·N)` = `y·(T−w·M)`.
   - `key = HKDF-SHA256(transcript)`, transcript = length-prefixed `idA‖idB‖S‖T‖K‖w`.

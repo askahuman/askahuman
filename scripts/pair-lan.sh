@@ -2,7 +2,7 @@
 # Pair from a phone on the same Wi-Fi. The kind cluster publishes the relay (:8080)
 # and PWA (:8081) on all interfaces, so they're reachable at this Mac's LAN IP. The
 # agent prints a short pairing CODE to stderr; open the PWA on the phone and TYPE it
-# (there is no QR or deep link — the code is the out-of-band secret).
+# (there is no deep link — the code is the out-of-band secret).
 #
 # Usage: scripts/pair-lan.sh [ask|pair|serve]      (default: ask — sends one demo request)
 #   HTTPS=1 scripts/pair-lan.sh   →  use the TLS proxy (run `scripts/https-lan.sh` first) so the

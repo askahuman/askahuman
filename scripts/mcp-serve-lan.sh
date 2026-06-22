@@ -2,7 +2,7 @@
 # Cursor / Claude-Desktop MCP stdio launcher for phone pairing over the LAN. Every time an
 # agent calls request_approval (or start_pairing), the agent prints a short pairing CODE to
 # its stderr, which this script tees to a log file. TYPE that code into the app on your phone
-# (open the PWA at http://<lan-ip>:8081/app) — there is no QR or deep link anymore; the code
+# (open the PWA at http://<lan-ip>:8081/app) — there is no deep link; the code
 # is the out-of-band secret and the phone derives the relay room from it.
 #
 # Register THIS script as the MCP server "command". stdin/stdout stay pristine for MCP

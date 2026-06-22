@@ -11,7 +11,7 @@ import (
 )
 
 // runServe runs the stdio MCP server exposing request_approval. It pairs
-// lazily on the first tool call (printing the QR/code to stderr).
+// lazily on the first tool call (printing the pairing code to stderr).
 func runServe(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)

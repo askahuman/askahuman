@@ -1,7 +1,7 @@
 // PairScreen is the code-only pairing UI: the user types the 8-char code their
 // agent printed into ONE field and submits. The phone derives the relay room
 // from the code alone (App: canonicalizeCode -> roomFromCode); nothing secret is
-// ever placed in a URL. There is no QR, camera, or deep link.
+// ever placed in a URL. There is no deep link.
 //
 // Optional "Advanced" relay URL (persisted in localStorage) lets self-hosters
 // point at their own relay; it is validated by validRelayURL before use.

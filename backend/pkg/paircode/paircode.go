@@ -4,7 +4,7 @@
 // The code is the entire SPAKE2 password (~39.6 bits). The room id is a one-way,
 // domain-separated function of the code, so the content-blind relay learns
 // nothing about the code from the room it forwards to (preimage resistance), and
-// the phone can derive the same room from only the typed code — no QR, no link,
+// the phone can derive the same room from only the typed code —
 // nothing secret in any URL. Go and the JS twin (frontend/src/lib/codegen.ts)
 // MUST compute Canonicalize and RoomFromCode byte-identically; the contract is
 // pinned by frontend/test/spake2-interop.mjs. ref. docs/decisions/architecture.

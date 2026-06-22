@@ -2,7 +2,7 @@
 // it to the nine screens. Pairing is code-only: the agent prints an 8-char code,
 // the user opens /app and TYPES it. The phone canonicalizes the code, derives the
 // relay room from it (HKDF, codegen.roomFromCode), and runs SPAKE2 as role B.
-// NOTHING secret is ever placed in a URL/hash — there is no deep link or QR.
+// NOTHING secret is ever placed in a URL/hash — there is no deep link.
 
 import { useEffect, useRef, useState } from 'react';
 

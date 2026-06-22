@@ -1,6 +1,6 @@
 // Unit tests for the surviving payload helpers (code-only pairing): the relay
-// URL guard and the room-id contract regex. The deep-link/QR encode/decode and
-// hash/query/scan parsers were removed with the QR pairing flow.
+// URL guard and the room-id contract regex. The deep-link encode/decode and
+// hash/query parsers were removed with the old (URL-carried) pairing flow.
 
 import { describe, expect, it } from 'vitest';
 

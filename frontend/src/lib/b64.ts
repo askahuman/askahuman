@@ -1,6 +1,6 @@
 // b64 is the one shared base64 codec for the PWA. Two flavors:
 //   - standard base64 (SPAKE2 raw-byte messages on the wire): b64Encode/b64Decode.
-//   - base64url, unpadded (the deep-link payload blob): b64urlEncode/b64urlDecode.
+//   - base64url, unpadded (the pairing payload blob): b64urlEncode/b64urlDecode.
 // One copy so payload.ts and pairing.ts never drift. (push.ts dedupe is separate.)
 
 /** b64Encode encodes bytes as standard (padded) base64. */

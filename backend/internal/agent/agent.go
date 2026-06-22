@@ -153,7 +153,7 @@ type Pairing struct {
 }
 
 // NewPairing mints a fresh code, canonicalizes it, and derives the room id from
-// the canonical form — no QR, no link, nothing secret in any URL. Used by
+// the canonical form — nothing secret in any URL. Used by
 // `pair`/`ask`/start_pairing to print the code before dialing.
 func (a *Agent) NewPairing() (Pairing, error) {
 	code, err := paircode.NewCode()

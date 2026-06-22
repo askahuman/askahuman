@@ -14,7 +14,7 @@ and (c) add MORE agents without dropping the live ones.
   - the **label** (`Request.agent` / the `--name` flag, else short room id);
   - an **unread badge** (count) when that agent has an unanswered request it isn't foregrounding.
   Tapping a chip `setActive`s it, foregrounding that agent's screen and clearing its unread.
-- **Add-agent action:** a "+" chip at the end of the strip opens `PairScreen` (scan / show-my-code)
+- **Add-agent action:** a "+" chip at the end of the strip opens `PairScreen` (type the agent's code)
   to ADD a session via `manager.add(payload)` — it never replaces a live one. After a successful
   add the new agent becomes active.
 - **Auto-foreground:** a request arriving on a NON-active agent bumps its badge; if the user isn't

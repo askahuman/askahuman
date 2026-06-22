@@ -1,5 +1,7 @@
 # 0002 — Ship the full PWA (all nine states) + contentless push
 
+> Note: the `pair` state’s "scan / show-my-code / QR" affordance was dropped for code-only pairing ([0015](../architecture/0015_code_only_pairing.md)); the pairing screen is now a single typed-code field. The rest of this decision stands.
+
 **Status:** accepted · 2026-06-20
 
 ## Context

@@ -1,5 +1,7 @@
 # 0004 — Marketing landing at `/`, the PWA at `/app`
 
+> Note: the agent deep link and `?p=`/`#p=` QR payload described below were dropped for code-only pairing ([0015](../architecture/0015_code_only_pairing.md)); only the `/` landing vs `/app` split decision stands.
+
 **Status:** accepted · 2026-06-21
 
 ## Context
