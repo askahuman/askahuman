@@ -1,9 +1,11 @@
 // Package agent runs next to an AI agent (Cursor/Claude/Codex) as a stdio
-// MCP server. It owns the session key and VAPID keypair (RAM only), runs
-// SPAKE2 pairing, seals/opens application messages, sends Web Push to wake
-// the phone, and re-announces a pending request until it receives an
-// authenticated decision or times out. A failure is never returned as
-// "approved".
+// MCP server. It owns the session key (RAM only) and a VAPID keypair (persisted
+// 0600 under the user config dir so the signer key stays stable across restarts;
+// it only authorizes the fixed, contentless wake-up — it is not the session key
+// and cannot decrypt sealed content), runs SPAKE2 pairing, seals/opens
+// application messages, sends Web Push to wake the phone, and re-announces a
+// pending request until it receives an authenticated decision or times out. A
+// failure is never returned as "approved".
 //
 // See docs/decisions/architecture/0005_relay_ramonly_agent_retries.md and
 // docs/plan.md sections 8 and 10.
@@ -14,8 +16,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -36,9 +40,46 @@ const (
 	maxBackoff  = 5 * time.Second
 )
 
-// vapidSubject identifies the push sender in the VAPID JWT (RFC 8292). The
-// relay never sees it; the push service requires a mailto/URL subject.
-const vapidSubject = "mailto:ask-a-human@localhost"
+// defaultVAPIDSubject is the VAPID "sub" contact baked into the wake-up JWT
+// (RFC 8292). It MUST be a routable https URL or mailto address: Apple's Web
+// Push validates the sub claim and rejects a non-routable/malformed one (e.g. a
+// localhost mailto) with HTTP 403 BadJwtToken, so every push silently fails. We
+// default to the project's https URL — webpush-go passes an https value through
+// verbatim, while it prepends "mailto:" to anything else. The relay never sees
+// the subject; it is static sender metadata on a contentless push, not a secret.
+const defaultVAPIDSubject = "https://github.com/askahuman/askahuman"
+
+// wakeBody is the FIXED, contentless push payload. The service worker renders a
+// generic notification and never echoes wire content, so this string carries no
+// request detail; it exists only so the push has a body. ref. ADR 0016, sw.ts.
+const wakeBody = "New approval request"
+
+// Web Push delivery tuning. pushTTL is how long the push service retains an
+// undelivered wake-up for a briefly-unreachable (sleeping/backgrounded) phone;
+// 30s was shorter than the radio wake latency and dropped the nudge, so we hold
+// it for the typical request lifetime. UrgencyHigh asks the push service to
+// deliver even on low battery. pushWakeTimeout bounds a single proactive push so
+// its goroutine cannot outlive the Ask that launched it.
+const (
+	pushTTL         = 300
+	pushWakeTimeout = 10 * time.Second
+)
+
+// resolveVAPIDSubject returns the VAPID subject: AAH_VAPID_SUBJECT when set, else
+// defaultVAPIDSubject. A self-hoster may pass an https URL or a BARE email. We
+// strip a stray leading "mailto:" from a non-https override because webpush-go
+// re-prepends "mailto:" to any non-https subject, which would otherwise yield an
+// invalid doubled "mailto:mailto:<addr>" sub claim.
+func resolveVAPIDSubject() string {
+	s := strings.TrimSpace(os.Getenv("AAH_VAPID_SUBJECT"))
+	if s == "" {
+		return defaultVAPIDSubject
+	}
+	if !strings.HasPrefix(s, "https:") {
+		s = strings.TrimPrefix(s, "mailto:")
+	}
+	return s
+}
 
 // ErrTimeout is returned when no authenticated decision arrives before the
 // request's deadline. It is never substituted with an "approved" result.
@@ -92,9 +133,13 @@ type Agent struct {
 
 	// vapidPub/vapidPriv sign the Web Push wake-up. Sourced from
 	// AAH_VAPID_PUBLIC_KEY/AAH_VAPID_PRIVATE_KEY when set (so the agent signs
-	// with the key the PWA subscribed under) else a fresh RAM-only pair.
+	// with the key the PWA subscribed under) else a keypair persisted 0600 under
+	// the user config dir, stable across restarts (see loadOrCreateVAPIDKeys).
 	vapidPub  string
 	vapidPriv string
+	// vapidSub is the routable "sub" contact placed in the wake-up VAPID JWT,
+	// resolved once at New from AAH_VAPID_SUBJECT or defaultVAPIDSubject.
+	vapidSub string
 
 	// mu guards sess and sub, which Pair sets and Ask reads.
 	mu   sync.Mutex
@@ -140,7 +185,7 @@ func New(cfg Config) (*Agent, error) {
 			return nil, fmt.Errorf("agent: vapid: %w", err)
 		}
 	}
-	return &Agent{cfg: cfg, dial: dialWS, vapidPriv: priv, vapidPub: pub}, nil
+	return &Agent{cfg: cfg, dial: dialWS, vapidPriv: priv, vapidPub: pub, vapidSub: resolveVAPIDSubject()}, nil
 }
 
 // vapidKeypair is the persisted VAPID keypair (both halves base64url). Only the
@@ -361,13 +406,28 @@ func (a *Agent) Ask(ctx context.Context, req wire.Request) (wire.Decision, error
 		return wire.Decision{}, fmt.Errorf("agent: encode request: %w", err)
 	}
 
+	// Proactively wake a possibly-backgrounded phone exactly once, fired the
+	// moment the request first reaches the wire. iOS silently freezes a
+	// backgrounded WebSocket without a clean close, so the relay can keep
+	// believing the phone present and deliver the live frame into a dead socket;
+	// the reactive wake below only fires once the relay's keepalive ping
+	// eventually declares the peer absent (~20-40s) — long after the user has
+	// given up, if ever. wakeOnce keeps the PROACTIVE wake to one push per Ask so
+	// a foregrounded phone (which still shows a banner under userVisibleOnly, the
+	// known cost of a contentless wake-up — see ADR 0016) is not re-alerted for a
+	// request it can already see; the reactive branch keeps re-nudging an absent
+	// phone, coalesced by the SW's fixed notification tag. Best-effort and run in
+	// its own goroutine so it never delays reading the decision.
+	var wakeOnce sync.Once
+	wake := func() { wakeOnce.Do(func() { go a.wakePush(ctx) }) }
+
 	backoff := baseBackoff
 	for {
 		if err := ctx.Err(); err != nil {
 			return wire.Decision{}, ErrTimeout
 		}
 
-		dec, sendErr := a.askOnce(ctx, sess, req, plain)
+		dec, sendErr := a.askOnce(ctx, sess, req, plain, wake)
 		if sendErr == nil {
 			return dec, nil
 		}
@@ -390,12 +450,10 @@ func (a *Agent) Ask(ctx context.Context, req wire.Request) (wire.Decision, error
 			}
 			backoff = baseBackoff
 		} else {
-			// Best-effort wake. A real failure (push service rejected the
-			// signed push, bad endpoint) is worth surfacing; the benign "no
-			// subscription yet" case is not — the phone simply hasn't sent one.
-			if nerr := a.Notify(ctx); nerr != nil && !errors.Is(nerr, errNoPushSub) {
-				fmt.Fprintf(os.Stderr, "ask-a-human: push wake-up failed: %v\n", nerr)
-			}
+			// Peer explicitly absent (undeliverable / left mid-request): re-wake
+			// it. This is the fallback to the proactive wake above; both are
+			// best-effort and a benign "no subscription yet" is never logged.
+			a.wakePush(ctx)
 		}
 		if waitErr := sleep(ctx, backoff); waitErr != nil {
 			return wire.Decision{}, ErrTimeout
@@ -414,8 +472,10 @@ var (
 // askOnce seals plain, sends one box, and reads frames until an
 // authenticated decision for id arrives. It returns errResend on
 // undeliverable / transport failure so Ask can re-announce. Push
-// subscriptions that arrive are absorbed and stored.
-func (a *Agent) askOnce(ctx context.Context, sess *Session, req wire.Request, plain []byte) (wire.Decision, error) {
+// subscriptions that arrive are absorbed and stored. wake is invoked once the
+// request is on the wire so Ask can proactively nudge a backgrounded phone; it
+// is single-fire across re-announces (see Ask) and never blocks the read.
+func (a *Agent) askOnce(ctx context.Context, sess *Session, req wire.Request, plain []byte, wake func()) (wire.Decision, error) {
 	box, err := sealedbox.Seal(sess.key, plain)
 	if err != nil {
 		return wire.Decision{}, fmt.Errorf("agent: seal: %w", err)
@@ -423,6 +483,9 @@ func (a *Agent) askOnce(ctx context.Context, sess *Session, req wire.Request, pl
 	if err := writeEnvelope(ctx, sess.conn, envelope{Box: box}); err != nil {
 		return wire.Decision{}, fmt.Errorf("%w: write: %w", errReconnect, err)
 	}
+	// The request is on the wire: nudge a possibly-backgrounded phone now,
+	// concurrently with waiting for the decision below.
+	wake()
 
 	for {
 		env, err := readEnvelope(ctx, sess.conn)
@@ -546,9 +609,12 @@ func (a *Agent) reconnect(ctx context.Context, sess *Session) error {
 var errNoPushSub = errors.New("agent: no push subscription")
 
 // Notify sends a contentless wake-up Web Push to the paired phone, signing with
-// the agent's VAPID keypair (the same public half the phone subscribed under).
-// It returns errNoPushSub if no subscription has arrived yet; a push-service
-// rejection includes the HTTP status to aid diagnosis.
+// the agent's VAPID keypair (the same public half the phone subscribed under)
+// and a routable VAPID subject (a.vapidSub) so Apple's push service accepts the
+// JWT. It returns errNoPushSub if no subscription has arrived yet; a push-service
+// rejection includes the HTTP status to aid diagnosis. A 404/410 means the
+// endpoint is permanently gone, so the stored subscription is dropped (the phone
+// re-subscribes and re-delivers it sealed on its next pairing/resume).
 func (a *Agent) Notify(ctx context.Context) error {
 	a.mu.Lock()
 	sub := a.sub
@@ -556,24 +622,48 @@ func (a *Agent) Notify(ctx context.Context) error {
 	if sub == nil {
 		return errNoPushSub
 	}
-	resp, err := webpush.SendNotificationWithContext(ctx, []byte("New approval request"), sub, &webpush.Options{
-		Subscriber:      vapidSubject,
+	resp, err := webpush.SendNotificationWithContext(ctx, []byte(wakeBody), sub, &webpush.Options{
+		Subscriber:      a.vapidSub,
 		VAPIDPublicKey:  a.vapidPub,
 		VAPIDPrivateKey: a.vapidPriv,
-		TTL:             30,
+		Urgency:         webpush.UrgencyHigh,
+		TTL:             pushTTL,
 	})
 	if err != nil {
 		return fmt.Errorf("agent: push: %w", err)
 	}
 	// A 2xx is success; anything else means the push service rejected the
-	// signed wake-up (e.g. a key mismatch is a 401/403). Surface the status
-	// before closing the body so the caller can log it.
+	// signed wake-up (e.g. a key/subject mismatch is a 401/403). Surface the
+	// status before closing the body so the caller can log it.
 	status := resp.StatusCode
 	_ = resp.Body.Close()
+	if status == http.StatusNotFound || status == http.StatusGone {
+		// Permanently gone endpoint: drop the dead subscription so we stop
+		// signing pushes to it (and so errNoPushSub resumes until a fresh one
+		// arrives). Guard against clobbering a subscription swapped in meanwhile.
+		a.mu.Lock()
+		if a.sub == sub {
+			a.sub = nil
+		}
+		a.mu.Unlock()
+		return fmt.Errorf("agent: push: endpoint gone (status %d)", status)
+	}
 	if status < 200 || status >= 300 {
 		return fmt.Errorf("agent: push: rejected with status %d", status)
 	}
 	return nil
+}
+
+// wakePush sends one best-effort contentless wake-up, bounded by pushWakeTimeout
+// so the goroutine that runs it (see Ask) cannot outlive the request. The benign
+// "no subscription yet" case is not logged (the phone simply hasn't delivered
+// its subscription); a real push-service failure is surfaced on stderr.
+func (a *Agent) wakePush(ctx context.Context) {
+	wctx, cancel := context.WithTimeout(ctx, pushWakeTimeout)
+	defer cancel()
+	if err := a.Notify(wctx); err != nil && !errors.Is(err, errNoPushSub) {
+		fmt.Fprintf(os.Stderr, "ask-a-human: push wake-up failed: %v\n", err)
+	}
 }
 
 // nextBackoff doubles d up to maxBackoff.
