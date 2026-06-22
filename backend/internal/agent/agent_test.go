@@ -2,12 +2,15 @@ package agent
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -507,3 +510,243 @@ const (
 	testP256dh = "BJINtcGg1K_0knrtHoburzRnrdJH1gpuACeg4JDROOhSJ7D6x4NS25OxQ6qwvRTe3A5S3lQ3WB00ZDdEPJp-PoY"
 	testAuth   = "tu2pewRVkyFW06hUToHs8g"
 )
+
+// stubSub points an agent's subscription at srv so Notify performs a real signed
+// POST against the test server (with well-formed client keys so encryption works).
+func stubSub(t *testing.T, a *Agent, endpoint string) {
+	t.Helper()
+	a.mu.Lock()
+	a.sub = &webpush.Subscription{Endpoint: endpoint, Keys: webpush.Keys{P256dh: testP256dh, Auth: testAuth}}
+	a.mu.Unlock()
+}
+
+// vapidSubClaim decodes the "sub" claim from a webpush VAPID Authorization
+// header ("vapid t=<jwt>, k=<pubkey>") so a test can assert the signed subject.
+func vapidSubClaim(t *testing.T, authHeader string) string {
+	t.Helper()
+	const marker = "t="
+	i := strings.Index(authHeader, marker)
+	require.GreaterOrEqual(t, i, 0, "Authorization header must carry a VAPID token")
+	tok := authHeader[i+len(marker):]
+	if j := strings.IndexByte(tok, ','); j >= 0 {
+		tok = tok[:j]
+	}
+	parts := strings.Split(strings.TrimSpace(tok), ".")
+	require.Len(t, parts, 3, "VAPID token must be a JWT (header.payload.signature)")
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	require.NoError(t, err)
+	var claims struct {
+		Sub string `json:"sub"`
+	}
+	require.NoError(t, json.Unmarshal(payload, &claims))
+	return claims.Sub
+}
+
+// TestResolveVAPIDSubject asserts the subject resolver: it defaults to the
+// routable https project URL, passes a bare email or https override through, and
+// strips a stray "mailto:" (webpush-go re-adds it, so keeping it would double).
+func TestResolveVAPIDSubject(t *testing.T) {
+	t.Setenv("AAH_VAPID_SUBJECT", "")
+	assert.Equal(t, defaultVAPIDSubject, resolveVAPIDSubject())
+
+	t.Setenv("AAH_VAPID_SUBJECT", "ops@example.com")
+	assert.Equal(t, "ops@example.com", resolveVAPIDSubject(), "a bare email is passed through (webpush adds mailto: once)")
+
+	t.Setenv("AAH_VAPID_SUBJECT", "mailto:ops@example.com")
+	assert.Equal(t, "ops@example.com", resolveVAPIDSubject(), "a stray mailto: is stripped so webpush does not double-prefix")
+
+	t.Setenv("AAH_VAPID_SUBJECT", "https://my.relay.example")
+	assert.Equal(t, "https://my.relay.example", resolveVAPIDSubject(), "an https subject is passed through verbatim")
+
+	t.Setenv("AAH_VAPID_SUBJECT", "  https://my.relay.example  ")
+	assert.Equal(t, "https://my.relay.example", resolveVAPIDSubject(), "surrounding whitespace is trimmed")
+}
+
+// TestNotifyVAPIDSubjectRoutable asserts the SIGNED sub claim is the routable
+// default — not a localhost mailto and never the doubled "mailto:mailto:" that
+// webpush-go would produce from a mailto-prefixed input. A non-routable/malformed
+// sub is what Apple's Web Push rejects with HTTP 403, killing every push.
+func TestNotifyVAPIDSubjectRoutable(t *testing.T) {
+	t.Setenv("AAH_VAPID_SUBJECT", "")
+	conn := newFakeConn()
+	a := pairedAgent(t, make([]byte, sealedbox.KeySize), conn, nil)
+
+	var auth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		auth = r.Header.Get("Authorization")
+		w.WriteHeader(http.StatusCreated)
+	}))
+	defer srv.Close()
+	stubSub(t, a, srv.URL)
+
+	require.NoError(t, a.Notify(context.Background()))
+	sub := vapidSubClaim(t, auth)
+	assert.Equal(t, defaultVAPIDSubject, sub, "default subject must be the routable https project URL")
+	assert.NotContains(t, sub, "localhost", "a localhost sub is rejected by Apple with 403")
+	assert.NotContains(t, sub, "mailto:mailto:", "subject must never be double-prefixed")
+}
+
+// TestNotifyTTLAndUrgency asserts the wake-up carries a TTL long enough to
+// survive a sleeping radio and high urgency so the push service delivers it.
+func TestNotifyTTLAndUrgency(t *testing.T) {
+	conn := newFakeConn()
+	a := pairedAgent(t, make([]byte, sealedbox.KeySize), conn, nil)
+
+	var ttl, urgency string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ttl = r.Header.Get("TTL")
+		urgency = r.Header.Get("Urgency")
+		w.WriteHeader(http.StatusCreated)
+	}))
+	defer srv.Close()
+	stubSub(t, a, srv.URL)
+
+	require.NoError(t, a.Notify(context.Background()))
+	assert.Equal(t, "300", ttl, "TTL must outlast the relay-detection window and a sleeping radio")
+	assert.Equal(t, "high", urgency, "wake-ups are high urgency")
+}
+
+// TestNotifyDropsSubOnGone asserts a 410 Gone endpoint is dropped so the agent
+// stops signing pushes to a dead endpoint and reports errNoPushSub thereafter.
+func TestNotifyDropsSubOnGone(t *testing.T) {
+	a, err := New(Config{})
+	require.NoError(t, err)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusGone)
+	}))
+	defer srv.Close()
+	stubSub(t, a, srv.URL)
+
+	require.Error(t, a.Notify(context.Background()))
+	a.mu.Lock()
+	sub := a.sub
+	a.mu.Unlock()
+	assert.Nil(t, sub, "a 410 Gone endpoint must be dropped")
+	require.ErrorIs(t, a.Notify(context.Background()), errNoPushSub, "after drop, Notify reports no subscription")
+}
+
+// TestAskFiresProactivePush asserts a fresh request proactively wakes the phone
+// with EXACTLY ONE push, without the relay ever signaling the peer absent. This
+// is the core fix: a backgrounded phone (whose frozen socket the relay still
+// believes present) is nudged at request time instead of ~20-40s later, if ever.
+func TestAskFiresProactivePush(t *testing.T) {
+	t.Setenv("AAH_VAPID_SUBJECT", "")
+	key := make([]byte, sealedbox.KeySize)
+	conn := newFakeConn()
+
+	var pushes atomic.Int32
+	pushed := make(chan struct{}, 4)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		pushes.Add(1)
+		w.WriteHeader(http.StatusCreated)
+		select {
+		case pushed <- struct{}{}:
+		default:
+		}
+	}))
+	defer srv.Close()
+
+	a := pairedAgent(t, key, conn, nil)
+	stubSub(t, a, srv.URL)
+
+	approved := true
+	go func() {
+		<-pushed // answer only AFTER the proactive push has fired
+		pushBox(t, conn, key, wire.Decision{Kind: wire.KindDecision, ID: "req_1", Result: wire.Result{Approved: &approved}})
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	dec, err := a.Ask(ctx, yesnoReq())
+	require.NoError(t, err)
+	require.NotNil(t, dec.Result.Approved)
+	// No undeliverable/peer_left was ever sent, yet a push fired — proactive, not
+	// relay-gated — and exactly once.
+	assert.Equal(t, int32(1), pushes.Load())
+	assert.Equal(t, 1, conn.writeCount(), "request delivered live; one box written")
+}
+
+// TestAskProactivePushFiresOnceAcrossReconnect asserts the proactive wake-up is
+// single-fire per Ask even when the request is re-announced over a fresh socket:
+// re-pushing on every cycle risks iOS revoking the subscription.
+func TestAskProactivePushFiresOnceAcrossReconnect(t *testing.T) {
+	t.Setenv("AAH_VAPID_SUBJECT", "")
+	key := make([]byte, sealedbox.KeySize)
+	first := newFakeConn()
+	second := newFakeConn()
+
+	var pushes atomic.Int32
+	pushed := make(chan struct{}, 4)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		pushes.Add(1)
+		w.WriteHeader(http.StatusCreated)
+		select {
+		case pushed <- struct{}{}:
+		default:
+		}
+	}))
+	defer srv.Close()
+
+	dial := func(_ context.Context, _, _ string) (frameConn, error) { return second, nil }
+	a := pairedAgent(t, key, first, dial)
+	stubSub(t, a, srv.URL)
+
+	approved := true
+	go func() {
+		<-pushed          // proactive push fired after the first write on `first`
+		_ = first.close() // kill the live conn -> errReconnect -> re-dial `second`
+		for second.writeCount() < 1 {
+			time.Sleep(2 * time.Millisecond) // wait for the re-announce on `second`
+		}
+		pushBox(t, second, key, wire.Decision{Kind: wire.KindDecision, ID: "req_1", Result: wire.Result{Approved: &approved}})
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, err := a.Ask(ctx, yesnoReq())
+	require.NoError(t, err)
+	assert.Equal(t, int32(1), pushes.Load(), "proactive wake-up is single-fire per Ask")
+}
+
+// TestAskReactiveWakeSendsPush asserts the REACTIVE (peer-absent) branch still
+// sends a real wake-up push: a request whose first delivery is undeliverable
+// produces the proactive push AND a reactive re-wake (>=2 pushes), so a
+// regression that dropped the reactive a.wakePush would be caught here (the
+// peer-absent tests use no subscription, so they never exercise this path).
+func TestAskReactiveWakeSendsPush(t *testing.T) {
+	t.Setenv("AAH_VAPID_SUBJECT", "")
+	key := make([]byte, sealedbox.KeySize)
+	conn := newFakeConn()
+
+	var pushes atomic.Int32
+	pushed := make(chan struct{}, 8)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		pushes.Add(1)
+		w.WriteHeader(http.StatusCreated)
+		select {
+		case pushed <- struct{}{}:
+		default:
+		}
+	}))
+	defer srv.Close()
+
+	a := pairedAgent(t, key, conn, nil)
+	stubSub(t, a, srv.URL)
+
+	// First delivery finds the peer absent -> reactive re-wake; then answer once
+	// BOTH the proactive and reactive pushes have fired (deterministic, no sleep).
+	pushSignal(t, conn, wire.SignalUndeliverable)
+	approved := true
+	go func() {
+		<-pushed // proactive (after the first write)
+		<-pushed // reactive (after undeliverable)
+		pushBox(t, conn, key, wire.Decision{Kind: wire.KindDecision, ID: "req_1", Result: wire.Result{Approved: &approved}})
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	dec, err := a.Ask(ctx, yesnoReq())
+	require.NoError(t, err)
+	require.NotNil(t, dec.Result.Approved)
+	assert.GreaterOrEqual(t, pushes.Load(), int32(2), "proactive + reactive wake-ups both send a push")
+}
