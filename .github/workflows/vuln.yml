@@ -69,7 +69,9 @@ jobs:
           # deployment. The PWA is output:'static' served by nginx — no Astro server
           # runtime runs in prod, and both highs require it (SSR / on-demand rendering).
           # Every OTHER high/critical (including any NEW astro one) still fails the build.
-          # TODO: upgrade to astro >=6.4.6, then delete this allowlist.
+          # TODO: clear by upgrading to astro >=6.4.6 — BLOCKED until @vite-pwa/astro
+          # supports Astro 6 (as of 2026-06 it peer-caps at astro ^5; it builds our
+          # service worker + manifest, so we can't force the bump). Then drop this allowlist.
           #   GHSA-2pvr-wf23-7pc7  Astro SSRF in prerendered error-page fetch (SSR-only)
           #   GHSA-8hv8-536x-4wqp  Astro reflected XSS via unescaped slot name (SSR-only)
           ALLOW="GHSA-2pvr-wf23-7pc7 GHSA-8hv8-536x-4wqp" node -e '
