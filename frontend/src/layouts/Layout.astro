@@ -26,8 +26,9 @@ const THEME_COLOR = "#08090c";
     />
     <meta name="generator" content={Astro.generator} />
 
-    <!-- Defense-in-depth: never leak the URL (which carries the pairing secret in
-         location.hash) via the Referer header. nginx also sends Referrer-Policy. -->
+    <!-- Defense-in-depth: the pairing code is typed and never placed in any URL,
+         but we still suppress the Referer header so no app URL leaks to third
+         parties. nginx also sends Referrer-Policy. -->
     <meta name="referrer" content="no-referrer" />
 
     <title>{title}</title>

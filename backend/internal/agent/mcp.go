@@ -32,39 +32,36 @@ type ApprovalOutput struct {
 	Text     string `json:"text,omitempty"`
 }
 
-// MCPServer wraps an Agent as an MCP server exposing request_approval. It
-// pairs lazily on the first tool call, printing the QR/code/deep-link to
-// status (stderr in production). The zero value is not usable; call
-// NewMCPServer.
+// MCPServer wraps an Agent as an MCP server exposing request_approval,
+// pair_status, and start_pairing. It pairs lazily on the first request (or
+// eagerly via start_pairing), printing the code to status (stderr in
+// production). The zero value is not usable; call NewMCPServer.
 type MCPServer struct {
-	ag        *Agent
-	webOrigin string
-	srv       *mcp.Server
-	// status is where pairing instructions are printed (stderr by default;
+	ag  *Agent
+	srv *mcp.Server
+	// status is where the pairing code is printed (stderr by default;
 	// io.Discard in tests). stdout is reserved for MCP JSON-RPC.
 	status io.Writer
 	// pair, when set, overrides the default Agent.Pair (tests inject a stub
-	// pairing that completes against the phone-stub without a QR scan).
+	// pairing that completes against the phone-stub without manual entry).
 	pair func(ctx context.Context) error
 
 	mu       sync.Mutex
 	pairedCh chan struct{}
-	// pairing is the current pairing once pairOnce has minted it; pair_status
-	// renders this exact one so the QR shown matches what request_approval is
-	// waiting on. mu guards it.
+	// pairing is the current pairing once pairOnce has minted it. mu guards it.
 	pairing     Pairing
 	havePairing bool
 }
 
-// NewMCPServer returns an MCPServer with request_approval registered. The
-// handler pairs ag lazily and prints pairing instructions to status (use
-// os.Stderr in production, io.Discard in tests). webOrigin is the PWA origin
-// for the deep link. Call Server to get the runnable *mcp.Server.
-func NewMCPServer(ag *Agent, webOrigin string, status io.Writer) *MCPServer {
+// NewMCPServer returns an MCPServer with request_approval, pair_status, and
+// start_pairing registered. The handlers pair ag lazily/eagerly and print the
+// pairing code to status (use os.Stderr in production, io.Discard in tests).
+// Call Server to get the runnable *mcp.Server.
+func NewMCPServer(ag *Agent, status io.Writer) *MCPServer {
 	if status == nil {
 		status = os.Stderr
 	}
-	h := &MCPServer{ag: ag, webOrigin: webOrigin, status: status}
+	h := &MCPServer{ag: ag, status: status}
 
 	h.srv = mcp.NewServer(&mcp.Implementation{Name: "ask-a-human", Version: "v0"}, nil)
 	mcp.AddTool(h.srv, &mcp.Tool{
@@ -73,8 +70,12 @@ func NewMCPServer(ag *Agent, webOrigin string, status io.Writer) *MCPServer {
 	}, h.requestApproval)
 	mcp.AddTool(h.srv, &mcp.Tool{
 		Name:        "pair_status",
-		Description: "Report whether the agent is paired, waiting to pair, or idle. Read-only; returns only non-secret status. The pairing QR/code are shown out-of-band (terminal/log), never in this result.",
+		Description: "Report whether the agent is paired, waiting to pair, or idle. Read-only; returns only non-secret status. The pairing code is shown out-of-band (terminal/log), never in this result.",
 	}, h.pairStatus)
+	mcp.AddTool(h.srv, &mcp.Tool{
+		Name:        "start_pairing",
+		Description: "Begin pairing with the human's phone. Prints a short code in the agent terminal that the human types into the app; the handshake runs in the background. Returns only non-secret status — the code never appears here.",
+	}, h.startPairing)
 	return h
 }
 
@@ -85,8 +86,11 @@ func (h *MCPServer) Server() *mcp.Server { return h.srv }
 // completes against a phone-stub without a real QR scan).
 func (h *MCPServer) SetPairFunc(pair func(ctx context.Context) error) { h.pair = pair }
 
-// pairOnce runs the pairing step: the test override if set, else the default
-// that pairs the underlying Agent over the relay.
+// pairOnce runs one pairing attempt: the test override if set, else mint a
+// fresh code, print it (out-of-band, never in a tool result), and run the
+// A-side handshake. Each call mints a NEW code and Agent.Pair bounds it by
+// pairTTL, so a failed/expired attempt is abandoned and the next pairOnce
+// re-mints — capping an attacker to one online SPAKE2 guess per code lifetime.
 func (h *MCPServer) pairOnce(ctx context.Context) error {
 	if h.pair != nil {
 		return h.pair(ctx)
@@ -98,9 +102,16 @@ func (h *MCPServer) pairOnce(ctx context.Context) error {
 	h.mu.Lock()
 	h.pairing, h.havePairing = p, true
 	h.mu.Unlock()
-	PrintPairing(h.status, h.webOrigin, p)
-	_, _ = fmt.Fprintln(h.status, "waiting for phone to pair...")
+	PrintCode(h.status, p.Display)
+	_, _ = fmt.Fprintln(h.status, "waiting for the phone to enter the code...")
 	if err := h.ag.Pair(ctx, p); err != nil {
+		// Abandon this code so a fresh one is minted on the next attempt; never
+		// retry the same low-entropy code against a possibly-watching room.
+		h.mu.Lock()
+		h.havePairing = false
+		h.pairing = Pairing{}
+		h.mu.Unlock()
+		_, _ = fmt.Fprintln(h.status, "pairing failed; the code is now void — call start_pairing for a new one.")
 		return err
 	}
 	_, _ = fmt.Fprintln(h.status, "paired.")
@@ -141,14 +152,11 @@ func (h *MCPServer) ensurePaired(ctx context.Context) error {
 type PairStatusInput struct{}
 
 // pairStatus reports the pairing state (paired / waiting / idle) as a tool
-// result. It returns ONLY non-secret status: the SPAKE2 code, room id, payload,
-// QR, and deep link are secret material and must never enter the MCP transcript
-// (a prompt-injected model/client could read them and pair first). The QR/code
-// are shown out-of-band (stderr + pair log) by PrintPairing. If no pairing
-// exists yet it does NOT mint one (lazy-create starts a SPAKE2 handshake the
-// human may never scan).
-// ponytail: upgrade path = lazily call ag.NewPairing here and have pairOnce
-// reuse h.pairing, so the human can pair proactively before the first approval.
+// result. It returns ONLY non-secret status: the SPAKE2 code and room id are
+// secret material and must never enter the MCP transcript (a prompt-injected
+// model/client could read them and pair first). The code is shown out-of-band
+// (stderr + pair log) by PrintCode. It does NOT mint a pairing — use
+// start_pairing for that.
 func (h *MCPServer) pairStatus(_ context.Context, _ *mcp.CallToolRequest, _ PairStatusInput) (*mcp.CallToolResult, any, error) {
 	h.mu.Lock()
 	have := h.havePairing
@@ -158,16 +166,52 @@ func (h *MCPServer) pairStatus(_ context.Context, _ *mcp.CallToolRequest, _ Pair
 	var text string
 	switch {
 	case paired:
-		text = "paired — the phone is connected; no QR needed."
+		text = "paired — the phone is connected; no code needed."
 	case have:
-		// SECURITY: never return secret material (code/room/payload/QR/link) in
-		// an MCP result; a prompt-injected model/client could read it and pair
-		// first. The QR/code stay out-of-band (stderr + pair log). See ADR 0006.
+		// SECURITY: never return secret material (code/room) in an MCP result; a
+		// prompt-injected model/client could read it and pair first. The code
+		// stays out-of-band (stderr + pair log).
 		text = PairingStatusText()
 	default:
-		text = "no active pairing — call request_approval first to start one."
+		text = "no active pairing — call start_pairing to begin one."
 	}
 	return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: text}}}, nil, nil
+}
+
+// StartPairingInput is the start_pairing tool's (empty) input schema.
+type StartPairingInput struct{}
+
+// startPairing begins pairing eagerly: it mints+canonicalizes+derives a code,
+// PrintCode's it to stderr (out-of-band), and runs the A-side handshake in the
+// BACKGROUND so this tool returns immediately. It reuses ensurePaired/pairOnce,
+// so a later request_approval awaits the SAME handshake instead of starting a
+// second one.
+//
+// SECURITY: the result is non-secret status ONLY. The code/room never appear
+// here — a prompt-injected model/client must not be able to read the pairing
+// secret from the MCP transcript and pair first. The code travels only via
+// PrintCode (stderr/log).
+func (h *MCPServer) startPairing(ctx context.Context, _ *mcp.CallToolRequest, _ StartPairingInput) (*mcp.CallToolResult, any, error) {
+	if h.ag.Paired() {
+		return textResult("already paired — the phone is connected; no code needed."), nil, nil
+	}
+
+	// Kick off the handshake in the background on a context detached from this
+	// tool call (the call returns at once; the handshake outlives it, bounded by
+	// pairTTL inside Agent.Pair). A concurrent/later request_approval calls
+	// ensurePaired and joins this same in-flight attempt.
+	go func() {
+		if err := h.ensurePaired(context.WithoutCancel(ctx)); err != nil {
+			_, _ = fmt.Fprintf(h.status, "pairing error: %v\n", err)
+		}
+	}()
+
+	return textResult("pairing started — type the code shown in the agent terminal into the app."), nil, nil
+}
+
+// textResult wraps a plain string as a non-error tool result.
+func textResult(text string) *mcp.CallToolResult {
+	return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: text}}}
 }
 
 // requestApproval is the MCP tool handler.

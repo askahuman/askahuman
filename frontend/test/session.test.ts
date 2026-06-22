@@ -84,15 +84,31 @@ function pairSession(session: Session): { ws: FakeWS; agentKey: Uint8Array } {
   return { ws, agentKey: agentRes.sessionKey };
 }
 
-function newSession(): { session: Session; states: SessionState[] } {
+function newSession(): {
+  session: Session;
+  states: SessionState[];
+  timers: Array<{ fn: () => void; ms: number }>;
+} {
   FakeWS.last = null;
   const states: SessionState[] = [];
+  // Capture backoff timers so reconnect tests fire the timer (which opens a FRESH
+  // socket) rather than reopening the dropped one — a stale socket's onopen is
+  // (correctly) ignored by RelayClient. heartbeat off so backoff is the only timer.
+  const timers: Array<{ fn: () => void; ms: number }> = [];
   const session = new Session(PAYLOAD, {
-    relayOptions: { wsFactory: (url) => new FakeWS(url), setTimer: () => 0, clearTimer: () => {} },
+    relayOptions: {
+      wsFactory: (url) => new FakeWS(url),
+      setTimer: (fn, ms) => {
+        timers.push({ fn, ms });
+        return timers.length - 1;
+      },
+      clearTimer: () => {},
+      heartbeatMs: 0,
+    },
   });
   session.onChange((s) => states.push(s));
   session.start();
-  return { session, states };
+  return { session, states, timers };
 }
 
 describe('Session full round trip', () => {
@@ -200,19 +216,20 @@ describe('Session full round trip', () => {
   });
 
   it('surfaces offline on an unexpected drop after pairing, then recovers', () => {
-    const { session } = newSession();
+    const { session, timers } = newSession();
     const { ws } = pairSession(session);
     expect(session.getState().screen).toBe('listening');
     // Unexpected transport drop.
     ws.close();
     expect(session.getState().screen).toBe('offline');
-    // A fresh socket opens (reconnect); on open we return to listening.
+    // Reconnect: fire the backoff timer -> a FRESH socket opens -> listening.
+    timers.at(-1)!.fn();
     FakeWS.last!.open();
     expect(session.getState().screen).toBe('listening');
   });
 
   it('restores the open card after a transient reconnect (not listening)', () => {
-    const { session } = newSession();
+    const { session, timers } = newSession();
     const { ws, agentKey } = pairSession(session);
     const req: Request = {
       kind: KindRequest,
@@ -229,7 +246,9 @@ describe('Session full round trip', () => {
     expect(session.getState().screen).toBe('offline');
     expect(session.getState().request?.id).toBe('req_open');
 
-    // Reconnect: the pending card is restored, still answerable (not 'listening').
+    // Reconnect: fire the backoff timer -> FRESH socket -> the pending card is
+    // restored, still answerable (not 'listening').
+    timers.at(-1)!.fn();
     FakeWS.last!.open();
     expect(session.getState().screen).toBe('yesno');
     expect(session.getState().request?.id).toBe('req_open');

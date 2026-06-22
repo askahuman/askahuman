@@ -105,9 +105,9 @@ func envInt(name string, def int) int {
 	return n
 }
 
-// roomIDLen is the exact length of a valid room id: 16 hex chars (8 random
-// bytes), as produced by agent.newRoomID and mirrored by the PWA. ref.
-// backend/internal/agent/pair.go newRoomID.
+// roomIDLen is the exact length of a valid room id: 16 hex chars (8 bytes),
+// as produced by paircode.RoomFromCode and mirrored by the PWA. ref.
+// backend/pkg/paircode/paircode.go RoomFromCode.
 const roomIDLen = 16
 
 // validRoomID reports whether id is a well-formed room id: exactly roomIDLen

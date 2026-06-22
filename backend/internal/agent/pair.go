@@ -30,17 +30,6 @@ type envelope struct {
 // confirmation mismatch, or a transport error during pairing).
 var ErrPairing = errors.New("agent: pairing failed")
 
-// PairPayload is the JSON the QR code and deep link encode. The phone reads
-// it from the URL fragment to auto-fill the relay, room, and code.
-type PairPayload struct {
-	// Relay is the relay's WebSocket URL (e.g. ws://host:8080/ws).
-	Relay string `json:"r"`
-	// Room is the 16-hex room id both peers join.
-	Room string `json:"room"`
-	// Code is the short pairing code; the SPAKE2 password.
-	Code string `json:"code"`
-}
-
 // Session is a paired channel: a live relay connection plus the SPAKE2
 // session key. It is the result of Pair and the input to Ask.
 type Session struct {
@@ -66,59 +55,6 @@ func (s *Session) Close() error {
 	return s.conn.close()
 }
 
-// newRoomID returns a random 16-hex (8-byte) room id.
-func newRoomID() (string, error) {
-	var b [8]byte
-	if _, err := rand.Read(b[:]); err != nil {
-		return "", fmt.Errorf("agent: room id: %w", err)
-	}
-	return hex.EncodeToString(b[:]), nil
-}
-
-// codeAlphabet excludes ambiguous characters (0/O, 1/I/L) for manual entry:
-// 31 symbols, so log2(31) ≈ 4.95 bits each.
-const codeAlphabet = "23456789ABCDEFGHJKMNPQRSTUVWXYZ"
-
-// codeLen is the number of code symbols. 8 × log2(31) ≈ 39.6 bits of entropy —
-// the SPAKE2 password's whole strength. The display groups them as "XXXX-XXXX".
-const codeLen = 8
-
-// newCode returns a short pairing code like "4F2K-9QHR" (two groups of four).
-// Symbols are drawn with rejection sampling over the 31-symbol alphabet so each
-// is uniform with NO modulo bias (the old int(b)%31 favored the first 8
-// symbols). The code IS the SPAKE2 password, so it must carry real entropy.
-func newCode() (string, error) {
-	out := make([]byte, 0, codeLen+1)
-	for i := 0; i < codeLen; i++ {
-		if i == codeLen/2 {
-			out = append(out, '-')
-		}
-		c, err := randSymbol()
-		if err != nil {
-			return "", err
-		}
-		out = append(out, c)
-	}
-	return string(out), nil
-}
-
-// randSymbol returns one uniform symbol from codeAlphabet. It rejects bytes in
-// the biased tail (>= the largest multiple of len(codeAlphabet) below 256) so
-// the modulo is unbiased; the expected reject rate is tiny (256 % 31 = 8/256).
-func randSymbol() (byte, error) {
-	const n = len(codeAlphabet)
-	limit := byte(256 - (256 % n)) // 248 for n=31; bytes >= limit are biased.
-	var b [1]byte
-	for {
-		if _, err := rand.Read(b[:]); err != nil {
-			return 0, fmt.Errorf("agent: code: %w", err)
-		}
-		if b[0] < limit {
-			return codeAlphabet[int(b[0])%n], nil
-		}
-	}
-}
-
 // NewReqID returns a collision-resistant request id of the form
 // req_<unixnanos>_<hex>. The nanos give rough ordering; the random suffix
 // removes the collision risk of nanos alone (two requests minted in the same
@@ -131,23 +67,16 @@ func NewReqID() (string, error) {
 	return fmt.Sprintf("req_%d_%s", time.Now().UnixNano(), hex.EncodeToString(b[:])), nil
 }
 
-// encodePairPayload returns base64url(JSON(payload)) for the deep link.
-func encodePairPayload(p PairPayload) (string, error) {
-	b, err := json.Marshal(p)
-	if err != nil {
-		return "", fmt.Errorf("agent: pair payload: %w", err)
-	}
-	return base64.RawURLEncoding.EncodeToString(b), nil
-}
-
 // pairAsA runs the SPAKE2 A-side handshake over the relay and returns a
 // paired Session. Protocol (matches frontend/src/lib/pairing.ts):
 //  1. send {pake: Start()}.
 //  2. on peer {pake} -> Finish -> send {confirm}.
 //  3. on peer {confirm} -> Confirm() -> paired.
 //
-// A peer confirm may race ahead of the peer pake; it is buffered and
-// verified once Finish has run.
+// code MUST already be the canonical code (paircode.Canonicalize): it is the
+// SPAKE2 password and must be byte-identical to the phone's, which derives it
+// from the same canonical form. A peer confirm may race ahead of the peer
+// pake; it is buffered and verified once Finish has run.
 func pairAsA(ctx context.Context, dial dialer, relayURL, roomID, code string) (*Session, error) {
 	conn, err := dial(ctx, relayURL, roomID)
 	if err != nil {

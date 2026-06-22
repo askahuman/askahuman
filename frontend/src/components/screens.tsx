@@ -62,7 +62,7 @@ export function LockScreen({ c, agent, onOpen }: { c: Palette; agent: string; on
         display: 'flex',
         flexDirection: 'column',
         alignItems: 'center',
-        padding: '100px 22px 44px',
+        padding: 'calc(100px + env(safe-area-inset-top)) 22px 44px',
         boxSizing: 'border-box',
         background: `radial-gradient(125% 80% at 50% 0%, ${c.surface2} 0%, ${c.bg} 68%)`,
       }}
@@ -148,7 +148,7 @@ export function HomeScreen({ c, unread, onOpen }: { c: Palette; unread: number; 
     <Frame
       c={c}
       style={{
-        padding: '88px 26px 44px',
+        padding: 'calc(88px + env(safe-area-inset-top)) 26px 44px',
         boxSizing: 'border-box',
         display: 'flex',
         flexDirection: 'column',
@@ -246,7 +246,7 @@ export function ListeningScreen({
   roomID: string;
 }) {
   return (
-    <Frame c={c} style={{ padding: '66px 26px 40px', boxSizing: 'border-box', display: 'flex', flexDirection: 'column' }}>
+    <Frame c={c} style={{ padding: 'calc(66px + env(safe-area-inset-top)) 26px 40px', boxSizing: 'border-box', display: 'flex', flexDirection: 'column' }}>
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
         <div style={{ fontSize: 11, letterSpacing: 2, color: c.muted, textTransform: 'uppercase' }}>ask-a-human</div>
         <div
@@ -445,7 +445,7 @@ export function YesNoScreen({
   const declineOpacity = Math.max(0, Math.min(1, -dx / COMMIT_PX));
 
   return (
-    <Frame c={c} style={{ padding: '60px 20px 28px', boxSizing: 'border-box', display: 'flex', flexDirection: 'column' }}>
+    <Frame c={c} style={{ padding: 'calc(60px + env(safe-area-inset-top)) 20px 28px', boxSizing: 'border-box', display: 'flex', flexDirection: 'column' }}>
       <div style={{ flex: 1, display: 'flex', flexDirection: 'column' }}>
         <div
           data-testid="yesno-card"
@@ -576,7 +576,7 @@ export function ChoiceScreen({
   // Cap the option count so a hostile request can't render thousands of buttons.
   const options = (req.response.options ?? []).slice(0, MAX_OPTIONS);
   return (
-    <Frame c={c} style={{ padding: '60px 20px 28px', boxSizing: 'border-box', display: 'flex', flexDirection: 'column' }}>
+    <Frame c={c} style={{ padding: 'calc(60px + env(safe-area-inset-top)) 20px 28px', boxSizing: 'border-box', display: 'flex', flexDirection: 'column' }}>
       <div style={{ flex: 1, display: 'flex', flexDirection: 'column' }}>
         <div
           style={{
@@ -642,7 +642,7 @@ export function TextScreen({
     if (value.trim()) onSend(value);
   };
   return (
-    <Frame c={c} style={{ padding: '60px 20px 28px', boxSizing: 'border-box', display: 'flex', flexDirection: 'column' }}>
+    <Frame c={c} style={{ padding: 'calc(60px + env(safe-area-inset-top)) 20px 28px', boxSizing: 'border-box', display: 'flex', flexDirection: 'column' }}>
       <div style={{ flex: 1, display: 'flex', flexDirection: 'column' }}>
         <div
           style={{
@@ -742,7 +742,7 @@ export function ConfirmedScreen({
     <Frame
       c={c}
       style={{
-        padding: '60px 26px 40px',
+        padding: 'calc(60px + env(safe-area-inset-top)) 26px 40px',
         boxSizing: 'border-box',
         display: 'flex',
         flexDirection: 'column',
@@ -808,7 +808,7 @@ export function ConfirmedScreen({
 
 export function OfflineScreen({ c, attempt, onRetry }: { c: Palette; attempt: number; onRetry: () => void }) {
   return (
-    <Frame c={c} style={{ padding: '66px 26px 40px', boxSizing: 'border-box', display: 'flex', flexDirection: 'column' }}>
+    <Frame c={c} style={{ padding: 'calc(66px + env(safe-area-inset-top)) 26px 40px', boxSizing: 'border-box', display: 'flex', flexDirection: 'column' }}>
       <div
         data-testid="offline-badge"
         style={{
@@ -930,7 +930,9 @@ export function Roster({
         display: 'flex',
         alignItems: 'center',
         gap: 8,
-        padding: '8px 12px',
+        // Safe-area inset so the strip clears the iOS status bar/notch in the
+        // standalone PWA (viewport-fit=cover + black-translucent status bar).
+        padding: 'calc(8px + env(safe-area-inset-top)) 12px 8px',
         overflowX: 'auto',
         background: c.glass,
         backdropFilter: 'blur(20px)',

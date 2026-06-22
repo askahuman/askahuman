@@ -16,8 +16,7 @@ func runServe(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 	relayURL := fs.String("relay", defaultRelayURL, "relay WebSocket URL the agent dials")
-	publicRelay := fs.String("public-relay", "", "relay URL advertised to the phone (default: --relay; e.g. wss://<lan>:8443/ws for local HTTPS)")
-	webOrigin := fs.String("web", defaultWebOrigin, "PWA origin for the deep link")
+	publicRelay := fs.String("public-relay", "", "relay URL the phone dials when it differs from --relay (e.g. wss://<lan>:8443/ws for local HTTPS)")
 	agentName := fs.String("name", "", "who is asking (shown on the card)")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -27,6 +26,6 @@ func runServe(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	srv := agent.NewMCPServer(ag, *webOrigin, os.Stderr)
+	srv := agent.NewMCPServer(ag, os.Stderr)
 	return srv.Server().Run(ctx, &mcp.StdioTransport{})
 }

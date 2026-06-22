@@ -12,6 +12,7 @@ package paircode
 
 import (
 	"crypto/hkdf"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -61,6 +62,45 @@ func Canonicalize(code string) (string, error) {
 		return "", ErrInvalidCode
 	}
 	return canon, nil
+}
+
+// NewCode mints a fresh pairing code in DISPLAY form: Len symbols drawn
+// uniformly from Alphabet, grouped at the midpoint as "XXXX-XXXX" (e.g.
+// "4F2K-9QHR"). The code IS the SPAKE2 password (~39.6 bits), so symbols are
+// drawn with rejection sampling to avoid the modulo bias that would favor the
+// first 256%len(Alphabet) symbols. Feed the result through Canonicalize before
+// using it as the password / room input — the hyphen and case are presentation
+// only.
+func NewCode() (string, error) {
+	out := make([]byte, 0, Len+1)
+	for i := 0; i < Len; i++ {
+		if i == Len/2 {
+			out = append(out, '-')
+		}
+		c, err := randSymbol()
+		if err != nil {
+			return "", err
+		}
+		out = append(out, c)
+	}
+	return string(out), nil
+}
+
+// randSymbol returns one uniform symbol from Alphabet. It rejects bytes in the
+// biased tail (>= the largest multiple of len(Alphabet) below 256) so the
+// modulo is unbiased; the expected reject rate is tiny (256 % 31 = 8/256).
+func randSymbol() (byte, error) {
+	const n = len(Alphabet)
+	limit := byte(256 - (256 % n)) // 248 for n=31; bytes >= limit are biased.
+	var b [1]byte
+	for {
+		if _, err := rand.Read(b[:]); err != nil {
+			return 0, fmt.Errorf("paircode: code: %w", err)
+		}
+		if b[0] < limit {
+			return Alphabet[int(b[0])%n], nil
+		}
+	}
 }
 
 // RoomFromCode derives the 16-hex rendezvous room id from a canonical code:

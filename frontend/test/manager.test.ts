@@ -219,6 +219,23 @@ describe('SessionManager', () => {
     expect(m.list()).toHaveLength(1);
   });
 
+  it('retryAll forces a reconnect of every session (iOS resume recovery)', () => {
+    const m = newManager();
+    const a = 'ffff000000000000';
+    const b = 'ffff111111111111';
+    m.add(payload(a));
+    m.add(payload(b));
+    pair(a);
+    pair(b);
+    const beforeA = FakeWS.byRoom.get(a);
+    const beforeB = FakeWS.byRoom.get(b);
+
+    // retryNow closes the stale socket + reconnects: a fresh FakeWS replaces each.
+    m.retryAll();
+    expect(FakeWS.byRoom.get(a)).not.toBe(beforeA);
+    expect(FakeWS.byRoom.get(b)).not.toBe(beforeB);
+  });
+
   it('sendPushSubscription fans out to every paired session', () => {
     const m = newManager();
     const a = 'dddd000000000000';

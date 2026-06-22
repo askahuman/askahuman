@@ -55,6 +55,14 @@ export interface RelayOptions {
   /** now/setTimer are injectable for deterministic backoff tests. */
   setTimer?: (fn: () => void, ms: number) => unknown;
   clearTimer?: (h: unknown) => void;
+  /**
+   * heartbeatMs is the client keepalive interval while a socket is open
+   * (default 25000). On iOS the WebSocket dies silently when backgrounded and a
+   * frozen timer never reconnects; a periodic tiny frame keeps the load
+   * balancer's idle timer warm and surfaces a dead socket sooner (its close
+   * fires reconnect). Set 0 to disable (tests). Uses the same injectable timer.
+   */
+  heartbeatMs?: number;
 }
 
 const defaultFactory: WSFactory = (url) => new WebSocket(url) as unknown as WSLike;
@@ -88,12 +96,14 @@ export class RelayClient {
   private readonly maxDelay: number;
   private readonly setTimer: (fn: () => void, ms: number) => unknown;
   private readonly clearTimer: (h: unknown) => void;
+  private readonly heartbeatMs: number;
 
   private ws: WSLike | null = null;
   private state: ConnState = 'closed';
   private attempt = 0;
   private stopped = false;
   private reconnectHandle: unknown = null;
+  private heartbeatHandle: unknown = null;
 
   constructor(relayURL: string, roomID: string, events: RelayEvents, opts: RelayOptions = {}) {
     this.url = roomURL(relayURL, roomID);
@@ -103,6 +113,7 @@ export class RelayClient {
     this.maxDelay = opts.maxDelayMs ?? 15000;
     this.setTimer = opts.setTimer ?? ((fn, ms) => setTimeout(fn, ms));
     this.clearTimer = opts.clearTimer ?? ((h) => clearTimeout(h as ReturnType<typeof setTimeout>));
+    this.heartbeatMs = opts.heartbeatMs ?? 25_000;
   }
 
   /** connect opens the socket and wires handlers; idempotent while open. */
@@ -112,15 +123,28 @@ export class RelayClient {
     this.setState('connecting');
     const ws = this.factory(this.url);
     this.ws = ws;
+    // Guard every handler against a STALE socket. Browsers fire onclose
+    // ASYNCHRONOUSLY, so a socket we already replaced (retryNow on an iOS resume)
+    // can still deliver a late onclose/onmessage; if it ran it would null out or
+    // schedule a reconnect over the live replacement. Ignore any event whose
+    // socket is no longer the current one.
     ws.onopen = () => {
+      if (this.ws !== ws) return;
       this.attempt = 0;
       this.setState('open');
+      this.startHeartbeat();
     };
-    ws.onmessage = (ev) => this.handleMessage(ev.data);
+    ws.onmessage = (ev) => {
+      if (this.ws !== ws) return;
+      this.handleMessage(ev.data);
+    };
     ws.onerror = () => {
       // An error precedes onclose; the close handler drives reconnect.
     };
-    ws.onclose = (ev) => this.handleClose(ev?.code);
+    ws.onclose = (ev) => {
+      if (this.ws !== ws) return;
+      this.handleClose(ev?.code);
+    };
   }
 
   /** send transmits one app frame verbatim; no-op if not open. */
@@ -150,40 +174,55 @@ export class RelayClient {
     return this.attempt;
   }
 
-  /** retryNow forces an immediate reconnect (the offline screen's Retry). */
+  /**
+   * retryNow forces an immediate, clean reconnect — the offline Retry button and
+   * the App's visibility/online recovery (iOS silently kills a backgrounded
+   * socket and its frozen reconnect timer never fires). dropSocket detaches the
+   * old socket's handlers BEFORE closing, so its asynchronous onclose cannot
+   * reconnect over or null out the replacement we open here.
+   */
   retryNow(): void {
     if (this.stopped) return;
     if (this.reconnectHandle !== null) {
       this.clearTimer(this.reconnectHandle);
       this.reconnectHandle = null;
     }
-    if (this.ws) {
-      try {
-        this.ws.close();
-      } catch {
-        /* already closed */
-      }
-      this.ws = null;
-    }
+    this.stopHeartbeat();
+    this.dropSocket();
     this.connect();
   }
 
   /** close stops reconnection and closes the socket for good. */
   close(): void {
     this.stopped = true;
+    this.stopHeartbeat();
     if (this.reconnectHandle !== null) {
       this.clearTimer(this.reconnectHandle);
       this.reconnectHandle = null;
     }
-    if (this.ws) {
-      try {
-        this.ws.close();
-      } catch {
-        /* ignore */
-      }
-      this.ws = null;
-    }
+    this.dropSocket();
     this.setState('closed');
+  }
+
+  /**
+   * dropSocket detaches the current socket's handlers — so a late, asynchronous
+   * onclose/onmessage from it is inert and cannot mutate state — then closes it.
+   * Used by retryNow/close where WE intentionally discard the socket (vs an
+   * unexpected server close, which flows through the guarded onclose).
+   */
+  private dropSocket(): void {
+    const ws = this.ws;
+    if (!ws) return;
+    ws.onopen = null;
+    ws.onclose = null;
+    ws.onerror = null;
+    ws.onmessage = null;
+    this.ws = null;
+    try {
+      ws.close();
+    } catch {
+      /* already closed */
+    }
   }
 
   // --- internals -----------------------------------------------------------
@@ -219,6 +258,7 @@ export class RelayClient {
 
   private handleClose(code?: number): void {
     this.ws = null;
+    this.stopHeartbeat();
     // 4001 = room full (a third joiner). Do not loop on a fatal close.
     if (this.stopped || code === 4001) {
       this.setState('closed');
@@ -226,6 +266,39 @@ export class RelayClient {
     }
     this.setState('closed');
     this.scheduleReconnect();
+  }
+
+  /**
+   * startHeartbeat sends a tiny empty app frame every heartbeatMs while open.
+   * The relay forwards it verbatim to the peer (which ignores an unknown app
+   * frame) and answers `undeliverable` when alone — both harmless. Purpose is
+   * to keep the LB idle timer warm and to fail fast on a half-open socket: a
+   * send on a dead socket throws -> we force a reconnect. Self-reschedules via
+   * the injectable one-shot setTimer so backoff tests stay deterministic.
+   */
+  private startHeartbeat(): void {
+    if (this.heartbeatMs <= 0) return;
+    this.stopHeartbeat();
+    const beat = () => {
+      if (this.stopped || this.state !== 'open' || !this.ws) return;
+      try {
+        this.ws.send('{}'); // empty Frame: relay-forwarded, peer ignores it
+      } catch {
+        // Half-open socket: drop it and reconnect rather than believe it open.
+        this.retryNow();
+        return;
+      }
+      this.heartbeatHandle = this.setTimer(beat, this.heartbeatMs);
+    };
+    this.heartbeatHandle = this.setTimer(beat, this.heartbeatMs);
+  }
+
+  /** stopHeartbeat clears the keepalive timer (close/reconnect). */
+  private stopHeartbeat(): void {
+    if (this.heartbeatHandle !== null) {
+      this.clearTimer(this.heartbeatHandle);
+      this.heartbeatHandle = null;
+    }
   }
 
   private scheduleReconnect(): void {

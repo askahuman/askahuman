@@ -1,12 +1,10 @@
-// codegen mints a roomID + short pairing code for the phone-initiated "Show my
-// code" path. The agent normally mints these; when the phone shows a code, it
-// owns the values and the agent scans them. Crockford-ish base32 (no easily
-// confused chars) keeps the short code legible, grouped XXX-XXX like "4F2-9KQ".
+// codegen turns the typed pairing code into the values the phone needs: the
+// canonical SPAKE2 password and the rendezvous room id. The agent mints + prints
+// the code; the phone only ever receives a typed string and derives from it.
+// Crockford-ish base32 (no easily confused 0/O/1/I/L) keeps the code legible.
 
 import { sha256 } from '@noble/hashes/sha2.js';
 import { hkdf } from '@noble/hashes/hkdf.js';
-
-const ROOM_HEX = '0123456789abcdef';
 
 /** CODE_ALPHABET is the 31-symbol set shared byte-for-byte with the Go agent
  *  (paircode.Alphabet): Crockford-ish, no 0/O/1/I/L. The code IS the SPAKE2
@@ -17,24 +15,6 @@ export const CODE_LEN = 8;
 /** ROOM_INFO domain-separates the room KDF; must match Go paircode.roomInfo. */
 const ROOM_INFO = 'ask-a-human:pair-room:v1';
 const TE = new TextEncoder();
-
-function pick(alphabet: string, n: number): string {
-  const buf = new Uint8Array(n);
-  crypto.getRandomValues(buf);
-  let out = '';
-  for (let i = 0; i < n; i++) out += alphabet[buf[i]! % alphabet.length];
-  return out;
-}
-
-/** newRoomID returns a 16-hex-char room id. */
-export function newRoomID(): string {
-  return pick(ROOM_HEX, 16);
-}
-
-/** newCode returns a grouped short code, e.g. "4F2-9KQ". */
-export function newCode(): string {
-  return `${pick(CODE_ALPHABET, 3)}-${pick(CODE_ALPHABET, 3)}`;
-}
 
 /** defaultRelayURL derives the relay ws url for the phone-shown path.
  *  Prefers PUBLIC_RELAY_URL (build env); falls back to same-origin /ws. */

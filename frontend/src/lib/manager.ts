@@ -156,6 +156,17 @@ export class SessionManager {
   retry(): void {
     this.activeSession()?.retry();
   }
+  /**
+   * retryAll forces an immediate, clean reconnect of EVERY session. The App calls
+   * this on visibilitychange→visible / window 'online': iOS silently kills the
+   * WebSocket when the PWA is backgrounded and the frozen reconnect timer never
+   * fires, so on resume we proactively drop + reopen each socket. retryNow
+   * detaches the old socket first, so this is a single clean reconnect per
+   * session (no orphaned socket, no reconnect storm) even on a healthy one.
+   */
+  retryAll(): void {
+    for (const entry of this.entries.values()) entry.session.retry();
+  }
   /** expire drives the active session's open card out of the actionable state
    *  once its request has timed out (mirrors the agent's own deadline). */
   expire(id: string): void {

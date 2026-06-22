@@ -1,17 +1,14 @@
 // App is the single React island: it owns the Session state machine and routes
-// it to the nine screens. On mount it reads the pairing payload from "#p=<payload>"
-// (fragment) or "?p=<payload>" (query — survives QR scanning) and auto-starts
-// pairing as the phone (role B). Absent a payload, it shows the pair screen with a
-// self-minted code under "Show my code".
-//
-// Phase-3 (Playwright) entry point: visit "/#p=<base64url payload>" to inject a
-// pairing; the App parses the hash and connects to the relay in the payload.
+// it to the nine screens. Pairing is code-only: the agent prints an 8-char code,
+// the user opens /app and TYPES it. The phone canonicalizes the code, derives the
+// relay room from it (HKDF, codegen.roomFromCode), and runs SPAKE2 as role B.
+// NOTHING secret is ever placed in a URL/hash — there is no deep link or QR.
 
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 
-import { newCode, newRoomID, defaultRelayURL } from '../lib/codegen.ts';
+import { canonicalizeCode, roomFromCode } from '../lib/codegen.ts';
 import { SessionManager, type AgentSummary } from '../lib/manager.ts';
-import { type PairPayload, parseHash, parseQuery, scrubbedURL } from '../lib/payload.ts';
+import { type PairPayload } from '../lib/payload.ts';
 import { subscribeForPush } from '../lib/push.ts';
 import { type SessionState } from '../lib/session.ts';
 import { PairScreen } from './PairScreen.tsx';
@@ -32,7 +29,6 @@ import { type Palette, dark, light } from './theme.ts';
 const KEYFRAMES = `
 @keyframes blink { 0%,100% { opacity: 1; } 50% { opacity: 0; } }
 @keyframes pulse { 0% { transform: scale(0.7); opacity: 0.5; } 80%,100% { transform: scale(1.6); opacity: 0; } }
-@keyframes scan { 0% { top: 22%; } 50% { top: 76%; } 100% { top: 22%; } }
 @keyframes spin { to { transform: rotate(360deg); } }
 @keyframes slideDown { from { transform: translateY(-18px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
 `;
@@ -91,39 +87,6 @@ function useExpiryCountdown(state: SessionState, onExpire?: (id: string) => void
 export default function App() {
   const c = usePalette();
 
-  // Parse the deep-link payload once; this fixes the pairing role (phone = B).
-  // Accept both "#p=" (fragment; private, used by clicked links) and "?p=" (query;
-  // survives QR scanning where iOS Camera drops the fragment).
-  const initialPayload = useMemo<PairPayload | null>(() => {
-    if (typeof window === 'undefined') return null;
-    return parseHash(window.location.hash) ?? parseQuery(window.location.search);
-  }, []);
-
-  // Scrub the pairing code out of the address bar/history the instant it is
-  // parsed: ?p= / #p= carry the SPAKE2 password and must not leak via history,
-  // screenshots, referrers, or a shared/copied URL. replaceState (not pushState)
-  // so Back does not restore it. Runs once on mount when a payload was present.
-  useEffect(() => {
-    if (typeof window === 'undefined' || !initialPayload) return;
-    if (!window.location.search && !window.location.hash) return;
-    window.history.replaceState(null, '', scrubbedURL(window.location.href));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  // A self-minted payload for the "Show my code" path when no #p= was provided.
-  const shownPayload = useMemo<PairPayload | null>(() => {
-    if (typeof window === 'undefined') return null;
-    if (initialPayload) return null; // scanned/deep-linked: nothing to show
-    return { r: defaultRelayURL(window.location.origin), room: newRoomID(), code: newCode() };
-  }, [initialPayload]);
-
-  // mintPayload makes a fresh self-shown payload for the add-agent flow (so the
-  // "+" chip can pair a NEW agent even when the first arrived via a deep link).
-  const mintPayload = (): PairPayload | null => {
-    if (typeof window === 'undefined') return null;
-    return { r: defaultRelayURL(window.location.origin), room: newRoomID(), code: newCode() };
-  };
-
   // One SessionManager owns all live agents; the App re-renders off its single
   // onChange. tick forces a re-render when the manager (any session/roster) changes.
   const managerRef = useRef<SessionManager>(null as unknown as SessionManager);
@@ -131,9 +94,11 @@ export default function App() {
   const manager = managerRef.current;
 
   const [, setTick] = useState(0);
-  // addPayload, when set, flips to the add-agent PairScreen ("Show my code" for a
-  // fresh room) without dropping live sessions; null = show the active agent.
-  const [addPayload, setAddPayload] = useState<PairPayload | null>(null);
+  // pairing flips to the code-entry PairScreen ("+ add agent") without dropping
+  // live sessions; false = show the active agent. Starts true ONLY when empty.
+  const [pairing, setPairing] = useState(true);
+  // pairError surfaces a bad typed code inline; never opens a socket.
+  const [pairError, setPairError] = useState<string | null>(null);
   const pushDoneRef = useRef(false);
 
   // Subscribe to the manager once; tear every session down on unmount.
@@ -146,55 +111,74 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Seed the FIRST agent from a deep-link OR self-shown payload (ADD, not replace).
+  // Bug 2 recovery: iOS silently kills the WebSocket when the PWA is
+  // backgrounded and the frozen reconnect timer never fires, leaving a dead
+  // socket believed-open. On resume (tab visible) or network restore, force a
+  // reconnect of every session so the relay link comes back without a manual
+  // Retry. relay.ts adds a heartbeat as defense-in-depth.
   useEffect(() => {
-    const payload = initialPayload ?? shownPayload;
-    if (!payload) return;
-    manager.add(payload);
+    if (typeof document === 'undefined') return;
+    const recover = () => {
+      if (document.visibilityState === 'visible') manager.retryAll();
+    };
+    const onOnline = () => manager.retryAll();
+    document.addEventListener('visibilitychange', recover);
+    window.addEventListener('online', onOnline);
+    return () => {
+      document.removeEventListener('visibilitychange', recover);
+      window.removeEventListener('online', onOnline);
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [initialPayload, shownPayload]);
-
-  // Add-agent "Show my code": start a live Session on the minted room so the
-  // phone can receive the agent's pake when it scans (add is idempotent).
-  useEffect(() => {
-    if (addPayload) manager.add(addPayload);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [addPayload]);
+  }, []);
 
   const activeState = manager.activeState();
   const roster: AgentSummary[] = manager.list();
-  // While adding, pin the pair screen for the minted room (its Session is active,
-  // so activeState supplies live paired/conn truth for the "Show my code" badge);
-  // auto-dismiss once that agent pairs.
-  useEffect(() => {
-    if (addPayload && manager.getActive() === addPayload.room && activeState.paired) {
-      setAddPayload(null);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [addPayload, activeState.paired]);
 
-  const state: SessionState = addPayload ? { ...activeState, screen: 'pair' } : activeState;
-  // The add-agent screen shows its own minted code; otherwise the seed payload.
-  const screenShown = addPayload ?? shownPayload;
-
-  // On first pairing success, best-effort subscribe + fan the push sub to all.
+  // On first pairing success, dismiss the code-entry screen + best-effort
+  // subscribe to push and fan the sub to all agents.
+  const anyPaired = roster.some((a) => a.status === 'paired' || a.status === 'offline');
   useEffect(() => {
-    const anyPaired = roster.some((a) => a.status === 'paired' || a.status === 'offline');
-    if (!anyPaired || pushDoneRef.current) return;
+    if (!anyPaired) return;
+    setPairing(false);
+    if (pushDoneRef.current) return;
     pushDoneRef.current = true;
     (async () => {
       const sub = await subscribeForPush(VAPID_KEY);
       if (sub) manager.sendPushSubscription(sub);
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [roster.some((a) => a.status === 'paired' || a.status === 'offline')]);
+  }, [anyPaired]);
+
+  // While pairing (or with no agents), pin the code-entry screen; otherwise
+  // render the active session's live state.
+  const showPair = pairing || roster.length === 0;
+  const state: SessionState = showPair ? { ...activeState, screen: 'pair' } : activeState;
 
   const expiresIn = useExpiryCountdown(state, (id) => manager.expire(id));
 
-  // onScanned/shownPayload ADD an agent; a successful add foregrounds it.
-  const onScanned = (payload: PairPayload) => {
-    manager.add(payload);
-    setAddPayload(null);
+  // onSubmitCode is the ONLY pairing entry point: canonicalize the typed code
+  // (reject inline on a throw — never open a socket on a bad code), derive the
+  // room, and add a Session. The phone runs SPAKE2 as role B with the canon code.
+  const onSubmitCode = (raw: string, relayURL: string) => {
+    let canon: string;
+    try {
+      canon = canonicalizeCode(raw);
+    } catch {
+      setPairError("that code doesn't look right — check the 8 characters");
+      return;
+    }
+    try {
+      const payload: PairPayload = { r: relayURL, room: roomFromCode(canon), code: canon };
+      setPairError(null);
+      manager.add(payload);
+      manager.setActive(payload.room);
+      setPairing(false);
+    } catch {
+      // Unreachable in practice (PairScreen validates the relay URL before
+      // submit), but a non-WS relay scheme would throw out of roomURL here —
+      // degrade to an inline error instead of an uncaught handler exception.
+      setPairError('could not connect — check the relay URL in Advanced settings');
+    }
   };
 
   return (
@@ -205,21 +189,19 @@ export default function App() {
           c={c}
           agents={roster}
           onSelect={(id) => {
-            setAddPayload(null);
+            setPairing(false);
             manager.setActive(id);
           }}
-          onAdd={() => setAddPayload(mintPayload())}
-          onRemove={(id) => {
-            // Closing the in-progress add-agent also dismisses its pinned pair screen.
-            if (addPayload?.room === id) setAddPayload(null);
-            manager.remove(id);
+          onAdd={() => {
+            setPairError(null);
+            setPairing(true);
           }}
+          onRemove={(id) => manager.remove(id)}
         />
       )}
       {renderScreen(c, state, expiresIn, {
-        onScanned,
-        shownPayload: screenShown,
-        webOrigin: typeof window !== 'undefined' ? window.location.origin : '',
+        onSubmitCode,
+        pairError,
         onApprove: () => manager.approve(),
         onDecline: () => manager.decline(),
         onChoose: (l: string) => manager.choose(l),
@@ -231,9 +213,8 @@ export default function App() {
 }
 
 interface Handlers {
-  onScanned: (p: PairPayload) => void;
-  shownPayload: PairPayload | null;
-  webOrigin: string;
+  onSubmitCode: (code: string, relayURL: string) => void;
+  pairError: string | null;
   onApprove: () => void;
   onDecline: () => void;
   onChoose: (label: string) => void;
@@ -244,15 +225,7 @@ interface Handlers {
 function renderScreen(c: Palette, state: SessionState, expiresIn: number | null, h: Handlers) {
   switch (state.screen) {
     case 'pair':
-      return (
-        <PairScreen
-          c={c}
-          onScanned={h.onScanned}
-          showPayload={h.shownPayload}
-          paired={state.paired}
-          webOrigin={h.webOrigin}
-        />
-      );
+      return <PairScreen c={c} onSubmitCode={h.onSubmitCode} error={h.pairError} />;
     case 'lock':
       return <LockScreen c={c} agent={state.agent} onOpen={() => {}} />;
     case 'home':

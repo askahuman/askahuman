@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"io"
-	"strings"
 	"testing"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -25,7 +24,7 @@ func pairStatusText(t *testing.T, h *MCPServer) string {
 func TestPairStatusNoPairing(t *testing.T) {
 	ag, err := New(Config{})
 	require.NoError(t, err)
-	h := NewMCPServer(ag, "http://web", io.Discard)
+	h := NewMCPServer(ag, io.Discard)
 
 	got := pairStatusText(t, h)
 	assert.Contains(t, got, "no active pairing", "must report no pairing without minting one")
@@ -35,62 +34,29 @@ func TestPairStatusNoPairing(t *testing.T) {
 func TestPairStatusNeverLeaksSecret(t *testing.T) {
 	ag, err := New(Config{})
 	require.NoError(t, err)
-	h := NewMCPServer(ag, "http://web", io.Discard)
-	h.pairing = Pairing{RoomID: "deadbeefdeadbeef", Code: "wisp-otter-9", Payload: "PAYLOAD42"}
+	h := NewMCPServer(ag, io.Discard)
+	h.pairing = Pairing{RoomID: "deadbeefdeadbeef", Display: "WISP-OT3R", Canon: "WISPOT3R"}
 	h.havePairing = true
 
 	got := pairStatusText(t, h)
-	// SECURITY: the MCP result must carry NO secret material (code/room/payload/link).
-	assert.NotContains(t, got, "wisp-otter-9", "must NOT leak the SPAKE2 code")
+	// SECURITY: the MCP result must carry NO secret material (code/room).
+	assert.NotContains(t, got, "WISP-OT3R", "must NOT leak the displayed code")
+	assert.NotContains(t, got, "WISPOT3R", "must NOT leak the canonical code")
 	assert.NotContains(t, got, "deadbeefdeadbeef", "must NOT leak the room id")
-	assert.NotContains(t, got, "PAYLOAD42", "must NOT leak the pairing payload")
-	assert.NotContains(t, got, "#p=", "must NOT leak the deep link")
-	assert.NotContains(t, got, "?p=", "must NOT leak a scan URL")
-	assert.Contains(t, got, "scan the QR", "must give a generic out-of-band instruction")
+	assert.Contains(t, got, "type the code shown in the agent terminal",
+		"must give a generic out-of-band instruction")
 }
 
-func TestDeepLinkKeepsFragment(t *testing.T) {
-	got := DeepLink("http://192.0.2.5:8081", "abc123")
-	require.Equal(t, "http://192.0.2.5:8081/app#p=abc123", got)
-	assert.NotContains(t, got, "?p=", "secret must be in the fragment, never the query")
-}
-
-func TestPrintPairing(t *testing.T) {
+func TestPrintCode(t *testing.T) {
 	var buf bytes.Buffer
-	p := Pairing{RoomID: "deadbeefdeadbeef", Code: "wisp-otter-9", Payload: "PAYLOAD42"}
-	PrintPairing(&buf, "http://lan:8081", p)
+	PrintCode(&buf, "4F2K-9QHR")
 	out := buf.String()
 
-	// Renders a QR block (the private #p= deep link is encoded in its modules,
-	// not printed as text). stderr/log is the out-of-band channel, so code +
-	// room + the #p= link are shown here in full.
-	assert.Contains(t, out, "█", "must render a QR block")
-	assert.Contains(t, out, "link: http://lan:8081/app#p=PAYLOAD42")
-	assert.NotContains(t, out, "/?p=", "QR/link must use the private #p= fragment, not ?p=")
-	assert.Contains(t, out, "wisp-otter-9")
-	assert.Contains(t, out, "deadbeefdeadbeef")
-}
-
-func TestNewCode(t *testing.T) {
-	code, err := newCode()
-	require.NoError(t, err)
-	// Format: "XXXX-XXXX" (codeLen symbols + one separator).
-	require.Len(t, code, codeLen+1)
-	require.Equal(t, byte('-'), code[codeLen/2], "separator at the midpoint")
-	for i, c := range code {
-		if i == codeLen/2 {
-			continue
-		}
-		assert.True(t, strings.ContainsRune(codeAlphabet, c),
-			"symbol %q must be from the unambiguous alphabet", string(c))
-	}
-}
-
-func TestNewReqID(t *testing.T) {
-	a, err := NewReqID()
-	require.NoError(t, err)
-	b, err := NewReqID()
-	require.NoError(t, err)
-	assert.True(t, strings.HasPrefix(a, "req_"), "must be prefixed req_")
-	assert.NotEqual(t, a, b, "random suffix must make ids distinct even back-to-back")
+	// One clear human line: the grouped code + where to enter it. No QR, no
+	// deep link, no room id (it is derivable from the code).
+	assert.Contains(t, out, "Pairing code: 4F2K-9QHR")
+	assert.Contains(t, out, "https://ask-a-human.ai/app")
+	assert.NotContains(t, out, "#p=", "no deep link with a secret fragment")
+	assert.NotContains(t, out, "?p=", "no scan URL with a secret query")
+	assert.NotContains(t, out, "█", "no QR block")
 }

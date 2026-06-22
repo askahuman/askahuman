@@ -43,6 +43,9 @@ function newClient(events = {}, opts = {}) {
     wsFactory: (url) => new FakeWS(url),
     baseDelayMs: 100,
     maxDelayMs: 1000,
+    // Off by default so backoff timers are the only ones captured; the heartbeat
+    // has its own test that turns it on.
+    heartbeatMs: 0,
     setTimer: (fn, ms) => {
       timers.push({ fn, ms });
       return timers.length - 1;
@@ -166,6 +169,55 @@ describe('RelayClient reconnect', () => {
     client.connect();
     FakeWS.instances[0]!.open();
     client.retryNow();
+    expect(FakeWS.instances).toHaveLength(2);
+  });
+
+  it('retryNow detaches the old socket so a late async close cannot clobber the new one (Bug 2 race)', () => {
+    const { client, timers, ws } = newClient();
+    client.connect();
+    const old = ws(); // ws0
+    old.open();
+    client.retryNow(); // detaches ws0, opens ws1
+    const fresh = ws(); // ws1
+    expect(fresh).not.toBe(old);
+    expect(FakeWS.instances).toHaveLength(2);
+    // ws0's handlers were detached -> a late, asynchronous close is inert.
+    expect(old.onclose).toBeNull();
+    old.serverClose(1006); // stale close fires after the replacement is live
+    // No spurious reconnect scheduled, and the fresh socket is still the one.
+    expect(timers).toHaveLength(0);
+    fresh.open();
+    expect(client.sendPake('AAA')).toBe(true);
+    expect(fresh.sent).toEqual(['{"pake":"AAA"}']);
+  });
+});
+
+describe('RelayClient heartbeat (keeps the LB idle timer warm; Bug 2)', () => {
+  it('sends a tiny keepalive every heartbeatMs while open and self-reschedules', () => {
+    const { client, timers, ws } = newClient({}, { heartbeatMs: 25_000 });
+    client.connect();
+    ws().open();
+    // On open, the heartbeat schedules its first beat (no frame sent yet).
+    expect(ws().sent).toEqual([]);
+    expect(timers.at(-1)!.ms).toBe(25_000);
+    // Fire it: a single empty Frame goes out, and the next beat is scheduled.
+    timers.at(-1)!.fn();
+    expect(ws().sent).toEqual(['{}']);
+    expect(timers.at(-1)!.ms).toBe(25_000);
+    timers.at(-1)!.fn();
+    expect(ws().sent).toEqual(['{}', '{}']);
+  });
+
+  it('a beat on a dead socket forces a reconnect instead of believing it open', () => {
+    const { client, timers, ws } = newClient({}, { heartbeatMs: 25_000 });
+    client.connect();
+    const first = ws();
+    first.open();
+    // Make send throw to simulate a half-open socket the OS already killed.
+    first.send = () => {
+      throw new Error('dead socket');
+    };
+    timers.at(-1)!.fn(); // beat -> send throws -> retryNow opens a fresh socket
     expect(FakeWS.instances).toHaveLength(2);
   });
 });

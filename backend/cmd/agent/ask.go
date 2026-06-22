@@ -12,15 +12,14 @@ import (
 	"github.com/askahuman/askahuman/backend/pkg/wire"
 )
 
-// runAsk is the one-shot E2E driver: generate room+code, print the pair
-// payload (for the harness/PWA), pair as A, send one request, print the
+// runAsk is the one-shot E2E driver: mint a code (room derived from it), print
+// the code (for the harness/PWA), pair as A, send one request, print the
 // decision as JSON to stdout, exit 0. Phase-3 Playwright scripts this.
 func runAsk(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("ask", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 	relayURL := fs.String("relay", defaultRelayURL, "relay WebSocket URL the agent dials")
-	publicRelay := fs.String("public-relay", "", "relay URL advertised to the phone (default: --relay; e.g. wss://<lan>:8443/ws for local HTTPS)")
-	webOrigin := fs.String("web", defaultWebOrigin, "PWA origin for the deep link")
+	publicRelay := fs.String("public-relay", "", "relay URL the phone dials when it differs from --relay (e.g. wss://<lan>:8443/ws for local HTTPS)")
 	kind := fs.String("kind", "yesno", "response kind: yesno|choice|text")
 	title := fs.String("title", "Approval request", "request title")
 	summary := fs.String("summary", "", "request summary/body")
@@ -29,7 +28,7 @@ func runAsk(ctx context.Context, args []string) error {
 	placeholder := fs.String("placeholder", "", "text input placeholder (for --kind text)")
 	maxLen := fs.Int("max-len", 0, "text input max length (for --kind text)")
 	expires := fs.Int("expires", 300, "expiry in seconds")
-	printPair := fs.Bool("print-pair", false, "print the base64url pair payload + code to stderr")
+	printPair := fs.Bool("print-pair", false, "print the pairing code + derived room to stderr (for the test harness)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -48,10 +47,12 @@ func runAsk(ctx context.Context, args []string) error {
 		return err
 	}
 	if *printPair {
-		// Machine-readable pair line for the test harness, then the human view.
-		fmt.Fprintf(os.Stderr, "PAIR payload=%s code=%s room=%s relay=%s\n", p.Payload, p.Code, p.RoomID, *relayURL)
+		// Machine-readable pair line for the test harness. The room is derived
+		// from the code; no deep link / payload exists anymore. The harness types
+		// the code into the PWA, which derives the same room.
+		fmt.Fprintf(os.Stderr, "PAIR code=%s room=%s relay=%s\n", p.Display, p.RoomID, *relayURL)
 	}
-	agent.PrintPairing(os.Stderr, *webOrigin, p)
+	agent.PrintCode(os.Stderr, p.Display)
 
 	if err := ag.Pair(ctx, p); err != nil {
 		return err

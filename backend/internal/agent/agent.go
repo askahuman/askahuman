@@ -21,6 +21,7 @@ import (
 
 	webpush "github.com/SherClockHolmes/webpush-go"
 
+	"github.com/askahuman/askahuman/backend/pkg/paircode"
 	"github.com/askahuman/askahuman/backend/pkg/sealedbox"
 	"github.com/askahuman/askahuman/backend/pkg/wire"
 )
@@ -59,14 +60,24 @@ type Asker interface {
 	Ask(ctx context.Context, req wire.Request) (wire.Decision, error)
 }
 
+// pairTTL bounds how long the A-side waits for the phone before abandoning an
+// unpaired room. The room is a deterministic function of the low-entropy code,
+// so an attacker who derives the room could sit in it and online-guess the
+// SPAKE2 password; a short TTL caps that to at most one guess per code
+// lifetime. On expiry Pair returns ErrPairing and the caller re-mints a fresh
+// code (see MCPServer.pairOnce). ref. ADR code-only pairing security review.
+const pairTTL = 3 * time.Minute
+
 // Config holds the agent's runtime settings.
 type Config struct {
 	// RelayURL is the ws:// (or wss://) endpoint the agent dials.
 	RelayURL string
-	// PublicRelayURL is the relay URL advertised to the phone in the pairing
-	// payload when it differs from the URL the agent dials. Used for local
-	// HTTPS: the agent dials the plain local relay while the phone connects over
-	// a wss:// reverse proxy. Defaults to RelayURL.
+	// PublicRelayURL is the relay URL advertised to the phone when it differs
+	// from the URL the agent dials. Used for local HTTPS: the agent dials the
+	// plain local relay while the phone connects over a wss:// reverse proxy.
+	// Defaults to RelayURL. With code-only pairing nothing is advertised in a
+	// URL; this remains only so the agent and phone can dial different relay
+	// hostnames in the same deployment.
 	PublicRelayURL string
 	// AgentName optionally names who is asking (e.g. "cursor @ workstation").
 	AgentName string
@@ -125,41 +136,56 @@ func New(cfg Config) (*Agent, error) {
 	return &Agent{cfg: cfg, dial: dialWS, vapidPriv: priv, vapidPub: pub}, nil
 }
 
-// Pairing holds what the agent must display so the phone can join: the deep
-// link / QR payload and the short code for manual entry.
+// Pairing holds what the agent must show so the phone can join. The human reads
+// Display, types it into the PWA, and both sides canonicalize to Canon — which
+// is both the SPAKE2 password and the input that derives RoomID. Nothing here
+// travels in a URL: RoomID is a one-way function of the code, so it never
+// reveals Canon.
 type Pairing struct {
-	// RoomID is the 16-hex room both peers join.
+	// RoomID is the 16-hex room both peers join, derived from Canon via
+	// paircode.RoomFromCode.
 	RoomID string
-	// Code is the short pairing code (the SPAKE2 password).
-	Code string
-	// Payload is base64url(JSON(PairPayload)) for the deep-link fragment.
-	Payload string
+	// Display is the grouped, human-facing code (e.g. "4F2K-9QHR") for printing.
+	Display string
+	// Canon is the canonical code (paircode.Canonicalize): the SPAKE2 password.
+	// It MUST be fed to the handshake, never the Display form.
+	Canon string
 }
 
-// NewPairing generates a fresh room id, code, and encoded payload without
-// connecting. Used by `pair`/`ask` to print before dialing.
+// NewPairing mints a fresh code, canonicalizes it, and derives the room id from
+// the canonical form — no QR, no link, nothing secret in any URL. Used by
+// `pair`/`ask`/start_pairing to print the code before dialing.
 func (a *Agent) NewPairing() (Pairing, error) {
-	room, err := newRoomID()
+	code, err := paircode.NewCode()
 	if err != nil {
-		return Pairing{}, err
+		return Pairing{}, fmt.Errorf("agent: new code: %w", err)
 	}
-	code, err := newCode()
+	canon, err := paircode.Canonicalize(code)
 	if err != nil {
-		return Pairing{}, err
+		return Pairing{}, fmt.Errorf("agent: canonicalize: %w", err)
 	}
-	payload, err := encodePairPayload(PairPayload{Relay: a.cfg.PublicRelayURL, Room: room, Code: code})
+	room, err := paircode.RoomFromCode(canon)
 	if err != nil {
-		return Pairing{}, err
+		return Pairing{}, fmt.Errorf("agent: room from code: %w", err)
 	}
-	return Pairing{RoomID: room, Code: code, Payload: payload}, nil
+	return Pairing{RoomID: room, Display: code, Canon: canon}, nil
 }
 
-// Pair runs wormhole-style SPAKE2 pairing (A-side) for the given room/code
-// over the relay, derives the session key, and stores the live session. The
-// caller is expected to have already displayed the pairing (QR + code).
+// Pair runs wormhole-style SPAKE2 pairing (A-side) for p's room over the relay,
+// derives the session key, and stores the live session. The CANONICAL code
+// (p.Canon) is the SPAKE2 password. The caller is expected to have already
+// printed the code (PrintCode). Pairing is bounded by pairTTL: if the phone has
+// not paired by then the room is abandoned with ErrPairing so the caller can
+// re-mint a fresh code, capping an attacker to one online guess per lifetime.
 func (a *Agent) Pair(ctx context.Context, p Pairing) error {
-	sess, err := pairAsA(ctx, a.dial, a.cfg.RelayURL, p.RoomID, p.Code)
+	ctx, cancel := context.WithTimeout(ctx, pairTTL)
+	defer cancel()
+
+	sess, err := pairAsA(ctx, a.dial, a.cfg.RelayURL, p.RoomID, p.Canon)
 	if err != nil {
+		if ctx.Err() != nil {
+			return fmt.Errorf("%w: pairing window elapsed", ErrPairing)
+		}
 		return err
 	}
 	a.mu.Lock()

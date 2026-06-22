@@ -7,7 +7,6 @@ require (
 	github.com/coder/websocket v1.8.15
 	github.com/gtank/ristretto255 v0.2.0
 	github.com/modelcontextprotocol/go-sdk v1.6.0
-	github.com/skip2/go-qrcode v0.0.0-20200617195104-da1b6568686e
 	github.com/stretchr/testify v1.11.1
 	golang.org/x/crypto v0.31.0
 )

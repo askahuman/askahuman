@@ -9,22 +9,18 @@ import (
 	"github.com/askahuman/askahuman/backend/internal/agent"
 )
 
-// defaultRelayURL and defaultWebOrigin are vars (not consts) so release builds
-// can bake in the hosted endpoints via -ldflags "-X main.defaultRelayURL=...".
-// A plain `go build` keeps the localhost dev defaults. ref. .goreleaser.yaml
-var (
-	defaultRelayURL  = "ws://127.0.0.1:8080/ws"
-	defaultWebOrigin = "http://127.0.0.1:4321"
-)
+// defaultRelayURL is a var (not a const) so release builds can bake in the
+// hosted endpoint via -ldflags "-X main.defaultRelayURL=...". A plain
+// `go build` keeps the localhost dev default. ref. .goreleaser.yaml
+var defaultRelayURL = "ws://127.0.0.1:8080/ws"
 
-// runPair prints the pairing QR/code/deep-link to stderr and holds the
-// pairing open until the phone connects or ctx is canceled.
+// runPair prints the pairing code to stderr and holds the pairing open until
+// the phone enters the code or ctx is canceled.
 func runPair(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("pair", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 	relayURL := fs.String("relay", defaultRelayURL, "relay WebSocket URL the agent dials")
-	publicRelay := fs.String("public-relay", "", "relay URL advertised to the phone (default: --relay; e.g. wss://<lan>:8443/ws for local HTTPS)")
-	webOrigin := fs.String("web", defaultWebOrigin, "PWA origin for the deep link")
+	publicRelay := fs.String("public-relay", "", "relay URL the phone dials when it differs from --relay (e.g. wss://<lan>:8443/ws for local HTTPS)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -37,9 +33,9 @@ func runPair(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	agent.PrintPairing(os.Stderr, *webOrigin, p)
+	agent.PrintCode(os.Stderr, p.Display)
 
-	fmt.Fprintln(os.Stderr, "waiting for phone to pair...")
+	fmt.Fprintln(os.Stderr, "waiting for the phone to enter the code...")
 	if err := ag.Pair(ctx, p); err != nil {
 		return err
 	}

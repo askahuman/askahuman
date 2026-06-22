@@ -250,7 +250,7 @@ func TestIntegrationRoundTrip(t *testing.T) {
 			p, err := ag.NewPairing()
 			require.NoError(t, err)
 
-			phone, err := dialPhone(ctx, relayURL, p.RoomID, p.Code)
+			phone, err := dialPhone(ctx, relayURL, p.RoomID, p.Canon)
 			require.NoError(t, err)
 			defer phone.conn.CloseNow()
 			done := phone.runPhone(ctx)
@@ -279,7 +279,7 @@ func TestIntegrationRelayBlindness(t *testing.T) {
 	p, err := ag.NewPairing()
 	require.NoError(t, err)
 
-	phone, err := dialPhone(ctx, relayURL, p.RoomID, p.Code)
+	phone, err := dialPhone(ctx, relayURL, p.RoomID, p.Canon)
 	require.NoError(t, err)
 	defer phone.conn.CloseNow()
 	done := phone.runPhone(ctx)

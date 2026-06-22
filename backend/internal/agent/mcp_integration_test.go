@@ -25,7 +25,7 @@ func TestIntegrationMCPRequestApproval(t *testing.T) {
 	ag, err := New(Config{RelayURL: relayURL, AgentName: "test-agent"})
 	require.NoError(t, err)
 
-	h := NewMCPServer(ag, "http://web", io.Discard)
+	h := NewMCPServer(ag, io.Discard)
 
 	// The agent generates the room/code only when the tool is first called.
 	// Pre-generate the pairing, inject it, and stand up the phone-stub so it
@@ -46,7 +46,7 @@ func TestIntegrationMCPRequestApproval(t *testing.T) {
 	defer clientSession.Close()
 
 	// Stand up the phone-stub waiting in the same room the handler will pair.
-	phone, err := dialPhone(ctx, relayURL, p.RoomID, p.Code)
+	phone, err := dialPhone(ctx, relayURL, p.RoomID, p.Canon)
 	require.NoError(t, err)
 	defer phone.conn.CloseNow()
 	done := phone.runPhone(ctx)

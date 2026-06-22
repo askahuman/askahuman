@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/askahuman/askahuman/backend/pkg/paircode"
 	"github.com/askahuman/askahuman/backend/pkg/sealedbox"
 	"github.com/askahuman/askahuman/backend/pkg/wire"
 )
@@ -382,12 +383,22 @@ func TestAskRejectsKindMismatch(t *testing.T) {
 
 func boolPtr(b bool) *bool { return &b }
 
-func TestPairPayloadRoundTrip(t *testing.T) {
+func TestNewPairingDerivesRoomFromCode(t *testing.T) {
 	a, err := New(Config{RelayURL: "ws://host:8080/ws"})
 	require.NoError(t, err)
 	p, err := a.NewPairing()
 	require.NoError(t, err)
+
+	// Room is a deterministic, one-way function of the canonical code — nothing
+	// is carried in a URL.
 	assert.Len(t, p.RoomID, 16)
-	assert.Contains(t, p.Code, "-")
-	assert.NotEmpty(t, p.Payload)
+	assert.Contains(t, p.Display, "-", "display form is grouped XXXX-XXXX")
+
+	canon, err := paircode.Canonicalize(p.Display)
+	require.NoError(t, err)
+	assert.Equal(t, canon, p.Canon, "Canon must be the canonicalized display code")
+
+	wantRoom, err := paircode.RoomFromCode(p.Canon)
+	require.NoError(t, err)
+	assert.Equal(t, wantRoom, p.RoomID, "RoomID must equal RoomFromCode(Canon)")
 }

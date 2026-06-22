@@ -1,6 +1,39 @@
 package paircode
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
+
+func TestNewCode(t *testing.T) {
+	code, err := NewCode()
+	if err != nil {
+		t.Fatalf("NewCode: %v", err)
+	}
+	// Display form: "XXXX-XXXX" (Len symbols + one separator at the midpoint).
+	if len(code) != Len+1 {
+		t.Fatalf("len(code) = %d, want %d", len(code), Len+1)
+	}
+	if code[Len/2] != '-' {
+		t.Fatalf("separator not at midpoint: %q", code)
+	}
+	for i, c := range code {
+		if i == Len/2 {
+			continue
+		}
+		if !strings.ContainsRune(Alphabet, c) {
+			t.Fatalf("symbol %q not from Alphabet", string(c))
+		}
+	}
+	// A minted code must round-trip through Canonicalize to exactly Len symbols.
+	canon, err := Canonicalize(code)
+	if err != nil {
+		t.Fatalf("Canonicalize(%q): %v", code, err)
+	}
+	if len(canon) != Len {
+		t.Fatalf("canon len = %d, want %d", len(canon), Len)
+	}
+}
 
 func TestCanonicalize(t *testing.T) {
 	cases := []struct {
