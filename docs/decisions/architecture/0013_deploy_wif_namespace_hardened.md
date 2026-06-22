@@ -4,24 +4,23 @@
 
 ## Context
 The hosted relay + PWA ([[0012_deploy_hosted_relay_pwa]]) target a private GKE
-cluster that is **shared** with a sibling project (which lives in
-`default`). The follow-on flagged in 0012 was "a CI job to build/push images + apply
+cluster. The follow-on flagged in 0012 was "a CI job to build/push images + apply
 on tag." Standing that job up raises three questions: how does CI authenticate to a
-private GCP project, where do the workloads land on a shared cluster, and how do we
+private GCP project, where do the workloads land on the cluster, and how do we
 not leak the private identifiers / any secrets to a public log once the repo is open
 ([[0014_public_repo_and_distribution_identity]]).
 
-The sibling project's deploy is the cautionary case. Its pipeline runs
+A deploy anti-pattern to avoid: a pipeline that runs
 `sops --decrypt --in-place` then `kubectl apply -k`. On any apply failure the
-plaintext `Secret` manifest is echoed to the (now public) Actions log: GitHub masks
+plaintext `Secret` manifest is echoed to the (now public) Actions log — GitHub masks
 registered secrets, but it does **not** mask values SOPS decrypts at runtime, and
 `set -x` / `-o yaml` dumps make it worse.
 
 ## Decision
-- **Isolated namespace.** Relay + web deploy to a **new** `ask-a-human` namespace, not
-  the shared `default`. The deployer SA is granted `edit` on that namespace only (a
-  RoleBinding, not cluster-admin), so a compromised pipeline can't touch the sibling's
-  workloads.
+- **Isolated namespace.** Relay + web deploy to a **dedicated** `ask-a-human` namespace.
+  The deployer SA is granted `edit` on that namespace only (a
+  RoleBinding, not cluster-admin), so a compromised pipeline can't touch other
+  workloads on the cluster.
 - **Keyless auth via Workload Identity Federation.** CI authenticates through the
   **reused** WIF pool/provider already on the project, impersonating a **dedicated
   deployer SA** — no long-lived JSON key in the repo or in GitHub Secrets. The OIDC
@@ -32,7 +31,7 @@ registered secrets, but it does **not** mask values SOPS decrypts at runtime, an
 - **No SOPS, by construction.** Relay + web carry **zero server-side secrets**. The
   only secret in the system is the VAPID *private* key, which is **agent-side env only**
   ([[0010_push_vapid_configured_shared_key]]) and never ships to the cluster. With no
-  Secret manifest to decrypt, the sibling's SOPS-leak path does not exist here.
+  Secret manifest to decrypt, the SOPS-leak path above does not exist here.
 - **Hardened pipeline.** No `set -x`, no `env` dumps, no `kubectl ... -o yaml` on
   manifests in the logged steps. Private project / Artifact Registry / cluster
   identifiers are injected from GitHub Secrets (masked), never committed.
@@ -40,7 +39,7 @@ registered secrets, but it does **not** mask values SOPS decrypts at runtime, an
 ## Consequences
 - A `v*` tag now builds, pushes, and rolls out relay + web with no human cloud step —
   closing the manual gap 0012 left open.
-- Blast radius on the shared cluster is one namespace; the sibling in `default` is
+- Blast radius is confined to the one namespace; other workloads on the cluster are
   unaffected by our deploys and vice-versa.
 - We avoid that secret-leak class entirely *because* the relay is
   secret-free — this is a property to preserve: do not add a server-side Secret without
