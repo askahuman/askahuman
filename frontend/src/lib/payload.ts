@@ -4,7 +4,7 @@
 // app; the phone canonicalizes it (codegen.canonicalizeCode), derives the room
 // (codegen.roomFromCode) and the relay URL (codegen.defaultRelayURL), and builds
 // this PairPayload internally. NOTHING secret is ever placed in a URL/hash —
-// there is no deep link, no QR, and the code is never written to location.
+// there is no deep link, and the code is never written to location.
 
 /** PairPayload is the internal pairing parameter set for one Session. */
 export interface PairPayload {

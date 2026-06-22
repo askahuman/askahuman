@@ -7,7 +7,7 @@
 > which, so it cannot read, log, or forge a decision. No accounts, no database, nothing to install.
 
 How it works: the MCP server runs locally next to your agent over stdio. On the first `request_approval`
-it prints a QR code + deep link to stderr; you scan it with your phone to pair over a Magic-Wormhole-style
+it prints a short code to stderr; you type it into the app on your phone to pair over a Magic-Wormhole-style
 SPAKE2 handshake — an in-house, RFC 9382-style construction in which a short pairing code becomes a strong
 shared key. After that, each approval is sealed with NaCl secretbox on one side and opened on the other.
 The relay in between sees only `base64(nonce‖ciphertext)` and which room talks to which — never the
@@ -40,7 +40,7 @@ pass `--relay <wss-url>` and `--web <https-origin>`.
   - `max_len` (integer, optional) — max input length, when `response_kind` is `text`.
   - `expires_in_s` (integer, optional) — countdown in seconds before the request times out.
 - `pair_status` — Report whether the agent is paired, waiting to pair, or idle. Read-only; returns only
-  non-secret status (the pairing QR/code are shown out-of-band in the terminal, never in the result). It
+  non-secret status (the pairing code is shown out-of-band in the terminal, never in the result). It
   does not start pairing — until the first `request_approval`, it reports idle.
 
 ## When to use it
@@ -56,7 +56,7 @@ or any judgment call you are not authorized to make alone. Treat anything other 
 - Content-blind relay — forwards ciphertext verbatim; it cannot read, log, or replay approvals, and holds
   no database (pairing lives in RAM for the server's lifetime; a restart means re-pair).
 - Pairing is a SPAKE2-style handshake — an in-house construction following RFC 9382 over the ristretto255
-  group (RFC 9496). A short code (delivered out-of-band, by scanning) becomes a strong shared key with no
+  group (RFC 9496). A short code (delivered out-of-band, typed into the app) becomes a strong shared key with no
   relay-in-the-middle. App traffic is then sealed with NaCl secretbox (XSalsa20-Poly1305).
 - The MCP server runs on your machine on purpose: it is the only party holding the key + plaintext, so it
   is never hosted. It never auto-approves.

@@ -1,5 +1,7 @@
 # 0001 — Pairing UX: SPAKE2, QR + short code, no manual SAS
 
+> **Superseded by [0015](../architecture/0015_code_only_pairing.md) (2026-06-22): the QR + deep-link pairing UX was dropped for a typed code the human enters at `/app`; the room is derived from the code (nothing in any URL). Kept for decision history.**
+
 **Status:** accepted · 2026-06-20
 
 ## Context

@@ -3,7 +3,7 @@
 // Spawns the real `agent ask` (role A), reads the typed pairing CODE it prints, drives
 // the REAL PWA in headless Chromium (role B) to TYPE the code + answer the request, and
 // asserts the agent receives the decision. Nothing is mocked: relay + web run in kind, the
-// agent is the real binary, the browser runs the real bundle. There is no QR / deep link:
+// agent is the real binary, the browser runs the real bundle. There is no deep link:
 // the phone derives the relay room from the typed code alone (App: roomFromCode).
 //
 // Usage: node e2e/pwa-live.mjs

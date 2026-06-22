@@ -12,7 +12,7 @@ require a secure context (HTTPS) and benefit from aggressive static caching + SR
 - Mirror the reference app's stack (Astro 5 + React 19 islands + Tailwind 4 + bun) but set
   `output: 'static'` — `astro build` emits a pure static `dist/`.
 - Add what the reference app lacks: `vite-plugin-pwa` (service worker + Web App Manifest), client crypto
-  (`@noble/curves`, `tweetnacl`), QR generate + camera scan.
+  (`@noble/curves`, `tweetnacl`). *(QR generate + camera scan were later dropped for code-only pairing — [0015](0015_code_only_pairing.md).)*
 - Serve `dist/` from a minimal hardened static container; no Node server at runtime.
 - Design tokens (fonts JetBrains Mono + IBM Plex Sans, accent approve `#39d98a` /
   decline `#ff5d52`, category badge palette, dark+light) come from the initial design in

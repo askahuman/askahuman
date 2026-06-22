@@ -83,7 +83,7 @@ func NewMCPServer(ag *Agent, status io.Writer) *MCPServer {
 func (h *MCPServer) Server() *mcp.Server { return h.srv }
 
 // SetPairFunc overrides the pairing step (tests inject a pairing that
-// completes against a phone-stub without a real QR scan).
+// completes against a phone-stub instead of a real phone).
 func (h *MCPServer) SetPairFunc(pair func(ctx context.Context) error) { h.pair = pair }
 
 // pairOnce runs one pairing attempt: the test override if set, else mint a
