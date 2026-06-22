@@ -14,6 +14,9 @@ paths = [
   '''backend/pkg/wire/wire_test\.go''',
   '''backend/internal/agent/agent_test\.go''',
   '''backend/cmd/spake2vectors/main\.go''',
+  # Stub Web Push subscription keys (testP256dh/testAuth): a real P-256 point +
+  # 16 random test bytes so webpush can encrypt in tests — entropy, not secrets.
+  '''backend/internal/agent/agent_test\.go''',
   '''frontend/test/spake2-interop\.mjs''',
   '''frontend/test/payload\.test\.ts''',
 ]

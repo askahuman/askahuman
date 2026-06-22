@@ -12,6 +12,10 @@ import { hkdf } from '@noble/hashes/hkdf.js';
 export const CODE_ALPHABET = '23456789ABCDEFGHJKMNPQRSTUVWXYZ';
 /** CODE_LEN is the number of code symbols (paircode.Len). */
 export const CODE_LEN = 8;
+/** CODE_GROUP is the display grouping: the hyphen sits between two groups of
+ *  this many symbols (CODE_GROUP must divide CODE_LEN). Display-only — the
+ *  hyphen carries no entropy and canonicalizeCode strips it back out. */
+export const CODE_GROUP = 4;
 /** ROOM_INFO domain-separates the room KDF; must match Go paircode.roomInfo. */
 const ROOM_INFO = 'ask-a-human:pair-room:v1';
 const TE = new TextEncoder();
@@ -49,6 +53,36 @@ export function canonicalizeCode(code: string): string {
     throw new Error('codegen: code must be 8 symbols from the pairing alphabet');
   }
   return canon;
+}
+
+/**
+ * formatCodeInput renders a partially- or fully-typed code for the input field:
+ * ASCII-uppercase, keep only in-alphabet symbols (drops separators AND the
+ * deliberately-excluded look-alikes 0/O/1/I/L), cap at CODE_LEN, then regroup as
+ * XXXX-XXXX. This is what makes the separating hyphen appear on its own as the
+ * user types — they never type a dash or space. Purely cosmetic: canonicalizeCode
+ * strips the hyphen again, so the SPAKE2 password is byte-identical with or
+ * without it. Use codeSymbolsBefore to keep the caret in place across regrouping.
+ */
+export function formatCodeInput(raw: string): string {
+  const canon = codeSymbolsBefore(raw, raw.length);
+  if (canon.length <= CODE_GROUP) return canon;
+  return canon.slice(0, CODE_GROUP) + '-' + canon.slice(CODE_GROUP);
+}
+
+/**
+ * codeSymbolsBefore returns the in-alphabet, uppercased symbols found in the
+ * first `cut` UTF-16 units of `raw`, capped at CODE_LEN. Its length is the count
+ * of real code symbols before a caret at `cut` — formatCodeInput uses it for the
+ * whole string; PairScreen uses the count to restore the caret after regrouping.
+ */
+export function codeSymbolsBefore(raw: string, cut: number): string {
+  let out = '';
+  for (const ch of raw.slice(0, cut).toUpperCase()) {
+    if (CODE_ALPHABET.includes(ch)) out += ch;
+    if (out.length === CODE_LEN) break;
+  }
+  return out;
 }
 
 /**

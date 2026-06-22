@@ -8,7 +8,7 @@
 
 import { useEffect, useRef, useState } from 'react';
 
-import { defaultRelayURL } from '../lib/codegen.ts';
+import { codeSymbolsBefore, defaultRelayURL, formatCodeInput } from '../lib/codegen.ts';
 import { validRelayURL } from '../lib/payload.ts';
 import type { Palette } from './theme.ts';
 
@@ -39,6 +39,7 @@ export function PairScreen({ c, onSubmitCode, error }: PairScreenProps) {
   const [waiting, setWaiting] = useState(false);
   const [waitedTooLong, setWaitedTooLong] = useState(false);
   const waitTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const codeInput = useRef<HTMLInputElement>(null);
 
   // Load any self-hoster relay override once.
   useEffect(() => {
@@ -64,6 +65,42 @@ export function PairScreen({ c, onSubmitCode, error }: PairScreenProps) {
       if (waitTimer.current) clearTimeout(waitTimer.current);
     };
   }, []);
+
+  // onCodeChange formats the typed code to XXXX-XXXX live (the hyphen appears on
+  // its own — the user never types a dash or space) and restores the caret after
+  // the controlled re-render, so the auto-inserted hyphen never bumps the cursor.
+  const onCodeChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const el = e.currentTarget;
+    let raw = el.value;
+    let caret = el.selectionStart ?? raw.length;
+
+    // A Backspace that lands on the auto-inserted hyphen would just re-insert it
+    // (a dead keystroke). Detect "only the hyphen was deleted" and eat the real
+    // symbol before it instead, so one Backspace deletes a symbol at the boundary.
+    const dashAt = code.indexOf('-');
+    if (dashAt > 0 && caret === dashAt && raw === code.slice(0, dashAt) + code.slice(dashAt + 1)) {
+      raw = raw.slice(0, dashAt - 1) + raw.slice(dashAt);
+      caret = dashAt - 1;
+    }
+
+    // Caret lands after the same number of real symbols it preceded, skipping the
+    // hyphen — so mid-string edits stay put too.
+    const symbolsBefore = codeSymbolsBefore(raw, caret).length;
+    const formatted = formatCodeInput(raw);
+    let pos = formatted.length;
+    for (let i = 0, seen = 0; i < formatted.length; i++) {
+      if (seen >= symbolsBefore) {
+        pos = i;
+        break;
+      }
+      if (formatted[i] !== '-') seen++;
+    }
+    setCode(formatted);
+    // rAF so the caret set wins even when the keystroke maps back to the SAME
+    // formatted string (a dropped look-alike / over-cap symbol): React skips that
+    // re-render and would otherwise leave the cursor stranded at the end.
+    requestAnimationFrame(() => codeInput.current?.setSelectionRange(pos, pos));
+  };
 
   const submit = () => {
     const relayURL = relay.trim() || originRelayURL();
@@ -121,8 +158,9 @@ export function PairScreen({ c, onSubmitCode, error }: PairScreenProps) {
         <input
           id="pair-code"
           data-testid="code-input"
+          ref={codeInput}
           value={code}
-          onChange={(e) => setCode(e.target.value.toUpperCase())}
+          onChange={onCodeChange}
           onKeyDown={(e) => {
             if (e.key === 'Enter') submit();
           }}
@@ -133,7 +171,9 @@ export function PairScreen({ c, onSubmitCode, error }: PairScreenProps) {
           autoCorrect="off"
           autoComplete="off"
           spellCheck={false}
-          maxLength={20}
+          // No maxLength: the browser would clamp a PASTE (separators included)
+          // before onChange runs, dropping real symbols. formatCodeInput already
+          // caps the displayed value at 8 symbols + the one auto-inserted hyphen.
           style={{
             marginTop: 9,
             width: '100%',
