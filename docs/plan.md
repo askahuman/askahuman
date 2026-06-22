@@ -264,7 +264,7 @@ Resolves §14 and sets scope. Full rationale in `docs/decisions/`.
 - **Local dev:** `ctlptl` + `kind` + local registry, `ko` for the relay image, `Tiltfile`
   orchestrates. → `architecture/0003`.
 - **Prod:** scaffold kustomize + GKE ingress/managed-cert targeting
-  `europe-central2-docker.pkg.dev/<gcp-project>/...` (cluster `<gke-cluster>`),
+  `<region>-docker.pkg.dev/<gcp-project>/...` (cluster `<gke-cluster>`),
   but **deploy + E2E-test only on local kind** — do not push to the real registry or cluster.
 - **Static assets:** in the web image (not GCS+CDN) for v1.
 - **Push:** contentless nudge; agent sends; subscription sealed to the agent. → `product/0002`.

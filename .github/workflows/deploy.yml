@@ -82,7 +82,7 @@ jobs:
             -t "${GAR_REGISTRY}/web:latest" \
             frontend
 
-      # Private cluster reached through fleet Connect Gateway (same as the sibling).
+      # Private cluster reached through fleet Connect Gateway.
       - name: Get cluster credentials
         run: |
           gcloud container fleet memberships get-credentials "$GKE_CLUSTER" \
