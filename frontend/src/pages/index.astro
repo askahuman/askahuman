@@ -2,7 +2,9 @@
 import LandingLayout from "../layouts/LandingLayout.astro";
 
 // Single static marketing landing. No React island: nothing here is interactive
-// beyond plain links, so it ships as pure HTML/CSS (the PWA lives at /app).
+// beyond plain links + one tiny copy script, so it ships as pure HTML/CSS (the
+// PWA lives at /app). Section order: hero -> copy-paste config -> the wormhole
+// (how it works, with a diagram) -> features -> footer.
 
 const REPO_URL = "https://github.com/askahuman/askahuman";
 const APP_URL = "/app";
@@ -39,9 +41,7 @@ const features = [
 <LandingLayout>
   <main class="relative isolate">
     <!-- Hero -->
-    <section
-      class="relative overflow-hidden border-b border-border-soft"
-    >
+    <section class="relative overflow-hidden border-b border-border-soft">
       <!-- Gradient glow -->
       <div
         aria-hidden="true"
@@ -53,7 +53,7 @@ const features = [
       >
       </div>
 
-      <div class="mx-auto max-w-5xl px-6 pt-24 pb-20 sm:pt-32 sm:pb-28 text-center">
+      <div class="mx-auto max-w-5xl px-6 pt-24 pb-20 sm:pt-32 sm:pb-24 text-center">
         <span
           class="inline-flex items-center gap-2 rounded-full border border-border bg-surface/60 px-3 py-1 text-xs font-medium text-muted"
         >
@@ -98,104 +98,9 @@ const features = [
       </div>
     </section>
 
-    <!-- Trust story -->
-    <section class="mx-auto max-w-5xl px-6 py-20 sm:py-24">
-      <div class="max-w-2xl">
-        <h2 class="font-sans text-2xl font-semibold tracking-tight text-text sm:text-3xl">
-          The server never sees your data.
-        </h2>
-        <p class="mt-3 text-pretty text-muted">
-          The MCP server runs locally next to your agent (Cursor, Claude, Codex).
-          Everything that crosses the network is sealed — the relay is a dumb pipe
-          that just passes bytes between two rooms.
-        </p>
-      </div>
-
-      <div class="mt-10 grid gap-4 sm:grid-cols-2">
-        {
-          features.map((f) => (
-            <div class="rounded-2xl border border-border bg-surface/50 p-6 transition hover:border-border hover:bg-surface">
-              <h3 class="font-sans text-base font-semibold text-text">{f.title}</h3>
-              <p class="mt-2 text-sm leading-relaxed text-muted">{f.body}</p>
-            </div>
-          ))
-        }
-      </div>
-    </section>
-
-    <!-- Magic wormhole / how pairing works -->
-    <section class="border-t border-border-soft">
-      <div class="mx-auto max-w-5xl px-6 py-20 sm:py-24">
-        <div class="max-w-2xl">
-          <span
-            class="inline-flex items-center gap-2 rounded-full border border-border bg-surface/60 px-3 py-1 text-xs font-medium text-muted"
-          >
-            <span class="size-1.5 rounded-full bg-cat-access"></span>
-            For the curious
-          </span>
-          <h2 class="mt-4 font-sans text-2xl font-semibold tracking-tight text-text sm:text-3xl">
-            Pairing is a magic wormhole.
-          </h2>
-          <p class="mt-3 text-pretty text-muted">
-            You scan a short code; it becomes a strong shared key. That handshake is
-            <strong class="text-text">SPAKE2</strong>, a password-authenticated key exchange — the same
-            trick
-            <a
-              href="https://github.com/magic-wormhole/magic-wormhole"
-              target="_blank"
-              rel="noopener noreferrer"
-              class="text-text underline decoration-border underline-offset-4 transition hover:decoration-approve"
-              >Magic Wormhole</a
-            > uses to beam files between two machines with three words. A passive
-            <em>or</em> active relay can never read or forge the channel — and even if the short code
-            leaks, an attacker still gets only <strong class="text-text">one</strong> online guess against
-            the live handshake. From there every approval is sealed with NaCl
-            <code class="rounded bg-surface px-1.5 py-0.5 text-sm text-text"
-              >secretbox</code
-            > — end to end, your machine to your phone.
-          </p>
-        </div>
-
-        <div class="mt-8 flex flex-wrap gap-3 text-xs">
-          <a
-            href="https://www.rfc-editor.org/rfc/rfc9382.html"
-            target="_blank"
-            rel="noopener noreferrer"
-            class="inline-flex items-center gap-2 rounded-full border border-border bg-surface/40 px-3 py-1.5 font-sans font-medium text-muted transition hover:bg-surface hover:text-text"
-          >
-            SPAKE2 · RFC 9382
-          </a>
-          <a
-            href="https://www.rfc-editor.org/rfc/rfc9496.html"
-            target="_blank"
-            rel="noopener noreferrer"
-            class="inline-flex items-center gap-2 rounded-full border border-border bg-surface/40 px-3 py-1.5 font-sans font-medium text-muted transition hover:bg-surface hover:text-text"
-          >
-            ristretto255 · RFC 9496
-          </a>
-          <a
-            href="https://github.com/magic-wormhole/magic-wormhole"
-            target="_blank"
-            rel="noopener noreferrer"
-            class="inline-flex items-center gap-2 rounded-full border border-border bg-surface/40 px-3 py-1.5 font-sans font-medium text-muted transition hover:bg-surface hover:text-text"
-          >
-            magic-wormhole
-          </a>
-          <a
-            href="https://doi.org/10.1007/978-3-540-30574-3_14"
-            target="_blank"
-            rel="noopener noreferrer"
-            class="inline-flex items-center gap-2 rounded-full border border-border bg-surface/40 px-3 py-1.5 font-sans font-medium text-muted transition hover:bg-surface hover:text-text"
-          >
-            Abdalla–Pointcheval, CT-RSA 2005
-          </a>
-        </div>
-      </div>
-    </section>
-
-    <!-- Add to your agent -->
-    <section class="border-t border-border-soft bg-bg/40">
-      <div class="mx-auto max-w-5xl px-6 py-20 sm:py-24">
+    <!-- Add it to your agent (copy-paste config, right after the intro) -->
+    <section class="border-b border-border-soft bg-bg/40">
+      <div class="mx-auto max-w-5xl px-6 py-16 sm:py-20">
         <div class="max-w-2xl">
           <h2 class="font-sans text-2xl font-semibold tracking-tight text-text sm:text-3xl">
             Add it to your agent.
@@ -271,6 +176,157 @@ const features = [
             });
           }
         </script>
+      </div>
+    </section>
+
+    <!-- Magic wormhole: how pairing + sealing works, with a diagram -->
+    <section class="border-b border-border-soft">
+      <div class="mx-auto max-w-5xl px-6 py-20 sm:py-24">
+        <div class="max-w-2xl">
+          <span
+            class="inline-flex items-center gap-2 rounded-full border border-border bg-surface/60 px-3 py-1 text-xs font-medium text-muted"
+          >
+            <span class="size-1.5 rounded-full bg-cat-access"></span>
+            For the curious
+          </span>
+          <h2 class="mt-4 font-sans text-2xl font-semibold tracking-tight text-text sm:text-3xl">
+            Pairing is a magic wormhole.
+          </h2>
+          <p class="mt-3 text-pretty text-muted">
+            You scan a short code; it becomes a strong shared key. That handshake is
+            <strong class="text-text">SPAKE2</strong>, a password-authenticated key exchange — the same
+            trick
+            <a
+              href="https://github.com/magic-wormhole/magic-wormhole"
+              target="_blank"
+              rel="noopener noreferrer"
+              class="text-text underline decoration-border underline-offset-4 transition hover:decoration-approve"
+              >Magic Wormhole</a
+            > uses to beam files between two machines with three words. A passive
+            <em>or</em> active relay can never read or forge the channel — and even if the short code
+            leaks, an attacker still gets only <strong class="text-text">one</strong> online guess against
+            the live handshake. From there every approval is sealed with NaCl
+            <code class="rounded bg-surface px-1.5 py-0.5 text-sm text-text"
+              >secretbox</code
+            > — end to end, your machine to your phone.
+          </p>
+        </div>
+
+        <!-- Diagram: agent <-sealed-> relay <-sealed-> phone, with the SPAKE2
+             shared key the relay never sees. Theme-aware (fill-*/stroke-* map to
+             the design tokens), pure SVG (no image request, no CSP font issue). -->
+        <div class="mt-10 rounded-2xl border border-border bg-surface/30 p-6 sm:p-8">
+          <svg
+            viewBox="0 0 720 250"
+            role="img"
+            aria-labelledby="wh-title wh-desc"
+            class="mx-auto h-auto w-full max-w-3xl font-sans"
+          >
+            <title id="wh-title">How ask-a-human pairs and seals approvals</title>
+            <desc id="wh-desc">
+              Your agent and your phone derive a shared key from a short code via SPAKE2; the
+              relay in the middle only ever forwards ciphertext.
+            </desc>
+            <defs>
+              <marker id="wh-arrow" markerWidth="7" markerHeight="7" refX="5.5" refY="3" orient="auto">
+                <path d="M0,0 L6,3 L0,6 Z" class="fill-faint"></path>
+              </marker>
+            </defs>
+
+            <!-- top caption: what the relay sees -->
+            <text x="360" y="32" text-anchor="middle" class="fill-text" font-size="13.5" font-weight="600">
+              The relay only forwards ciphertext.
+            </text>
+            <text x="360" y="52" text-anchor="middle" class="fill-faint" font-size="11">
+              base64(nonce‖ciphertext) + which room talks to which — never the data
+            </text>
+
+            <!-- sealed wires (both directions) -->
+            <line x1="210" y1="116" x2="268" y2="116" class="stroke-border" stroke-width="1.5" marker-start="url(#wh-arrow)" marker-end="url(#wh-arrow)"></line>
+            <line x1="452" y1="116" x2="510" y2="116" class="stroke-border" stroke-width="1.5" marker-start="url(#wh-arrow)" marker-end="url(#wh-arrow)"></line>
+            <text x="239" y="104" text-anchor="middle" class="fill-muted" font-size="11">sealed</text>
+            <text x="481" y="104" text-anchor="middle" class="fill-muted" font-size="11">sealed</text>
+
+            <!-- nodes -->
+            <rect x="28" y="84" width="180" height="72" rx="14" class="fill-surface-2 stroke-border" stroke-width="1.5"></rect>
+            <text x="118" y="116" text-anchor="middle" class="fill-text" font-size="15" font-weight="600">Your agent</text>
+            <text x="118" y="136" text-anchor="middle" class="fill-muted" font-size="11.5">MCP · holds the key</text>
+
+            <rect x="270" y="84" width="180" height="72" rx="14" class="fill-surface-2 stroke-border" stroke-width="1.5"></rect>
+            <text x="360" y="116" text-anchor="middle" class="fill-text" font-size="15" font-weight="600">Relay</text>
+            <text x="360" y="136" text-anchor="middle" class="fill-muted" font-size="11.5">content-blind</text>
+
+            <rect x="512" y="84" width="180" height="72" rx="14" class="fill-surface-2 stroke-border" stroke-width="1.5"></rect>
+            <text x="602" y="116" text-anchor="middle" class="fill-text" font-size="15" font-weight="600">Your phone</text>
+            <text x="602" y="136" text-anchor="middle" class="fill-muted" font-size="11.5">holds the key</text>
+
+            <!-- the SPAKE2 shared key, derived end-to-end, that the relay never sees -->
+            <path d="M118,160 C118,202 602,202 602,160" fill="none" class="stroke-approve" stroke-width="1.5" stroke-dasharray="5 5"></path>
+            <text x="360" y="230" text-anchor="middle" class="fill-approve" font-size="11.5" font-weight="600">
+              SPAKE2 — short code → a key the relay never learns
+            </text>
+          </svg>
+        </div>
+
+        <div class="mt-8 flex flex-wrap gap-3 text-xs">
+          <a
+            href="https://www.rfc-editor.org/rfc/rfc9382.html"
+            target="_blank"
+            rel="noopener noreferrer"
+            class="inline-flex items-center gap-2 rounded-full border border-border bg-surface/40 px-3 py-1.5 font-sans font-medium text-muted transition hover:bg-surface hover:text-text"
+          >
+            SPAKE2 · RFC 9382
+          </a>
+          <a
+            href="https://www.rfc-editor.org/rfc/rfc9496.html"
+            target="_blank"
+            rel="noopener noreferrer"
+            class="inline-flex items-center gap-2 rounded-full border border-border bg-surface/40 px-3 py-1.5 font-sans font-medium text-muted transition hover:bg-surface hover:text-text"
+          >
+            ristretto255 · RFC 9496
+          </a>
+          <a
+            href="https://github.com/magic-wormhole/magic-wormhole"
+            target="_blank"
+            rel="noopener noreferrer"
+            class="inline-flex items-center gap-2 rounded-full border border-border bg-surface/40 px-3 py-1.5 font-sans font-medium text-muted transition hover:bg-surface hover:text-text"
+          >
+            magic-wormhole
+          </a>
+          <a
+            href="https://doi.org/10.1007/978-3-540-30574-3_14"
+            target="_blank"
+            rel="noopener noreferrer"
+            class="inline-flex items-center gap-2 rounded-full border border-border bg-surface/40 px-3 py-1.5 font-sans font-medium text-muted transition hover:bg-surface hover:text-text"
+          >
+            Abdalla–Pointcheval, CT-RSA 2005
+          </a>
+        </div>
+      </div>
+    </section>
+
+    <!-- Features -->
+    <section class="mx-auto max-w-5xl px-6 py-20 sm:py-24">
+      <div class="max-w-2xl">
+        <h2 class="font-sans text-2xl font-semibold tracking-tight text-text sm:text-3xl">
+          The server never sees your data.
+        </h2>
+        <p class="mt-3 text-pretty text-muted">
+          The MCP server runs locally next to your agent (Cursor, Claude, Codex).
+          Everything that crosses the network is sealed — the relay is a dumb pipe
+          that just passes bytes between two rooms.
+        </p>
+      </div>
+
+      <div class="mt-10 grid gap-4 sm:grid-cols-2">
+        {
+          features.map((f) => (
+            <div class="rounded-2xl border border-border bg-surface/50 p-6 transition hover:border-border hover:bg-surface">
+              <h3 class="font-sans text-base font-semibold text-text">{f.title}</h3>
+              <p class="mt-2 text-sm leading-relaxed text-muted">{f.body}</p>
+            </div>
+          ))
+        }
       </div>
     </section>
 

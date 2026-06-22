@@ -23,6 +23,10 @@ export default defineConfig({
       directives: [
         "default-src 'none'",
         "img-src 'self' data:",
+        // Fonts ship both inlined (data:) and as /_astro/*.woff2 ('self'); without
+        // this they fall back to default-src 'none' and the whole UI loses its
+        // typeface. Keep in sync with nginx.conf $sec_csp.
+        "font-src 'self' data:",
         "manifest-src 'self'",
         "worker-src 'self'",
         // wss: for the dynamic relay (host not known at build time); ws: for localhost dev.
