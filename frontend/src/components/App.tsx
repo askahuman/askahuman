@@ -134,13 +134,37 @@ export default function App() {
   const activeState = manager.activeState();
   const roster: AgentSummary[] = manager.list();
 
+  // The agent delivers its OWN VAPID public key sealed during pairing; the phone
+  // MUST subscribe with exactly that key so the push signer == subscribe key
+  // (one prebuilt PWA, many laptop agents — a build-time key can't match). When
+  // an agent's key arrives, subscribe with it and route the subscription back to
+  // THAT room (room A's key produces room A's subscription). pushDoneRef keeps it
+  // to a single subscribe across both this path and the build-time fallback.
+  useEffect(() => {
+    manager.onVapidKey((publicKey, room) => {
+      if (pushDoneRef.current) return;
+      pushDoneRef.current = true;
+      (async () => {
+        const sub = await subscribeForPush(publicKey);
+        if (sub) manager.sendPushSubscriptionTo(room, sub);
+      })();
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   // On first pairing success, dismiss the code-entry screen + best-effort
-  // subscribe to push and fan the sub to all agents.
+  // subscribe to push. The agent's OWN VAPID key (handled by the onVapidKey
+  // path above, routed back to its own room) is the preferred source. Here we
+  // only fall back to the build-time VAPID_KEY for an agent that never sends a
+  // key (older agent); if there is no build key either, we wait for onVapidKey.
+  // pushDoneRef keeps the subscribe to a single fire across both paths.
   const anyPaired = roster.some((a) => a.status === 'paired' || a.status === 'offline');
   useEffect(() => {
     if (!anyPaired) return;
     setPairing(false);
     if (pushDoneRef.current) return;
+    if (manager.firstVapidKey()) return; // an agent key arrived — onVapidKey owns it
+    if (!VAPID_KEY) return; // no build-time key: wait for the agent's sealed key
     pushDoneRef.current = true;
     (async () => {
       const sub = await subscribeForPush(VAPID_KEY);

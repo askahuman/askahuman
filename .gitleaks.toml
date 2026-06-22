@@ -12,6 +12,7 @@ paths = [
   '''backend/pkg/spake2/spake2_test\.go''',
   '''backend/pkg/sealedbox/sealedbox_test\.go''',
   '''backend/pkg/wire/wire_test\.go''',
+  '''backend/internal/agent/agent_test\.go''',
   '''backend/cmd/spake2vectors/main\.go''',
   '''frontend/test/spake2-interop\.mjs''',
   '''frontend/test/payload\.test\.ts''',

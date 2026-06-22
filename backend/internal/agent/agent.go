@@ -15,6 +15,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -110,13 +111,19 @@ type Agent struct {
 
 var _ Asker = (*Agent)(nil)
 
-// New returns an Agent configured from cfg. The VAPID keypair is taken from
-// AAH_VAPID_PUBLIC_KEY/AAH_VAPID_PRIVATE_KEY when both are set — the public half
-// MUST equal the PWA's build-time PUBLIC_VAPID_KEY or the push service rejects
-// the agent's signed wake-up. Absent the env, a fresh RAM-only pair is generated;
-// pushes then won't reach a phone subscribed under a different key, but pairing
-// and decisions still work (push is best-effort). See ADR 0010. It errors only
-// if key generation fails.
+// New returns an Agent configured from cfg. The VAPID keypair is chosen in
+// priority order:
+//  1. AAH_VAPID_PUBLIC_KEY/AAH_VAPID_PRIVATE_KEY when both are set — the
+//     highest-priority override for self-hosters who pin a specific key.
+//  2. a keypair persisted under the user config dir (vapidStatePath), so the
+//     agent signs with the SAME public key across restarts — the phone, which
+//     subscribed under the key the agent sent during pairing, keeps receiving
+//     wake-ups after a restart.
+//  3. a freshly generated pair, written to (2) for next time.
+//
+// Persistence is best-effort: any read/write error falls back to an in-RAM
+// pair so New never fails for push reasons (pairing and decisions still work;
+// push is best-effort). It errors only if key generation itself fails.
 func New(cfg Config) (*Agent, error) {
 	if cfg.RelayURL == "" {
 		cfg.RelayURL = defaultRelayURL
@@ -128,12 +135,95 @@ func New(cfg Config) (*Agent, error) {
 	priv := os.Getenv("AAH_VAPID_PRIVATE_KEY")
 	if pub == "" || priv == "" {
 		var err error
-		priv, pub, err = webpush.GenerateVAPIDKeys()
+		priv, pub, err = loadOrCreateVAPIDKeys()
 		if err != nil {
 			return nil, fmt.Errorf("agent: vapid: %w", err)
 		}
 	}
 	return &Agent{cfg: cfg, dial: dialWS, vapidPriv: priv, vapidPub: pub}, nil
+}
+
+// vapidKeypair is the persisted VAPID keypair (both halves base64url). Only the
+// public half is ever sent over the wire; the private half stays on disk under
+// 0600 and never leaves the agent.
+type vapidKeypair struct {
+	PublicKey  string `json:"public_key"`
+	PrivateKey string `json:"private_key"`
+}
+
+// vapidStatePath returns the on-disk path for the persisted VAPID keypair:
+// <user config dir>/ask-a-human/vapid.json. It errors if the user config dir
+// cannot be resolved (honors XDG_CONFIG_HOME / HOME via os.UserConfigDir).
+func vapidStatePath() (string, error) {
+	dir, err := os.UserConfigDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "ask-a-human", "vapid.json"), nil
+}
+
+// loadOrCreateVAPIDKeys returns a stable VAPID keypair: it loads the persisted
+// one when present, else generates a fresh pair and atomically writes it (0600)
+// for next time. Persistence is best-effort — a generated pair is returned even
+// when it could not be persisted, so push degrades gracefully rather than
+// failing New. Returns (priv, pub) to match webpush.GenerateVAPIDKeys.
+func loadOrCreateVAPIDKeys() (priv, pub string, err error) {
+	path, perr := vapidStatePath()
+	if perr == nil {
+		if kp, rerr := readVAPIDKeypair(path); rerr == nil {
+			return kp.PrivateKey, kp.PublicKey, nil
+		}
+	}
+	priv, pub, err = webpush.GenerateVAPIDKeys()
+	if err != nil {
+		return "", "", err
+	}
+	if perr == nil {
+		// Best-effort persist: a write failure is non-fatal (push stays
+		// best-effort), the in-RAM pair is still returned and usable this run.
+		_ = writeVAPIDKeypair(path, vapidKeypair{PublicKey: pub, PrivateKey: priv})
+	}
+	return priv, pub, nil
+}
+
+// readVAPIDKeypair loads and validates the persisted keypair at path. A missing
+// file, unreadable bytes, malformed JSON, or an empty half are all errors so the
+// caller regenerates.
+func readVAPIDKeypair(path string) (vapidKeypair, error) {
+	raw, err := os.ReadFile(path) // #nosec G304 -- path is vapidStatePath() under os.UserConfigDir, not user-supplied
+	if err != nil {
+		return vapidKeypair{}, err
+	}
+	var kp vapidKeypair
+	if err := json.Unmarshal(raw, &kp); err != nil {
+		return vapidKeypair{}, err
+	}
+	if kp.PublicKey == "" || kp.PrivateKey == "" {
+		return vapidKeypair{}, errors.New("agent: vapid state: empty key")
+	}
+	return kp, nil
+}
+
+// writeVAPIDKeypair atomically writes kp to path with 0600 perms: it creates the
+// parent dir, writes a sibling temp file, then renames it into place so a reader
+// never sees a partial file. The private key never leaves disk (0600).
+func writeVAPIDKeypair(path string, kp vapidKeypair) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	raw, err := json.Marshal(kp)
+	if err != nil {
+		return err
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, raw, 0o600); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	return nil
 }
 
 // Pairing holds what the agent must show so the phone can join. The human reads
@@ -191,6 +281,34 @@ func (a *Agent) Pair(ctx context.Context, p Pairing) error {
 	a.mu.Lock()
 	a.sess = sess
 	a.mu.Unlock()
+
+	// Hand the phone the public key the agent signs wake-ups with, so it
+	// subscribes for Web Push under EXACTLY that key (signer == subscribe-key).
+	// Sent once, right after pairing, independent of the first request. Only the
+	// PUBLIC key crosses the (sealed) wire. Best-effort: a send failure never
+	// fails pairing — push is best-effort and the first request still re-wakes.
+	if err := a.sendVAPIDKey(ctx, sess); err != nil {
+		fmt.Fprintf(os.Stderr, "ask-a-human: could not send vapid key: %v\n", err)
+	}
+	return nil
+}
+
+// sendVAPIDKey seals the agent's VAPID PUBLIC key as a wire.VAPIDKey and sends
+// it on sess using the same sealedbox path as app messages. The private key is
+// never included. The plaintext is padded to a fixed block by EncodeVAPIDKey so
+// its length does not leak to the relay (mirrors EncodeRequest).
+func (a *Agent) sendVAPIDKey(ctx context.Context, sess *Session) error {
+	plain, err := wire.EncodeVAPIDKey(a.vapidPub)
+	if err != nil {
+		return fmt.Errorf("agent: encode vapid key: %w", err)
+	}
+	box, err := sealedbox.Seal(sess.key, plain)
+	if err != nil {
+		return fmt.Errorf("agent: seal vapid key: %w", err)
+	}
+	if err := writeEnvelope(ctx, sess.conn, envelope{Box: box}); err != nil {
+		return fmt.Errorf("agent: send vapid key: %w", err)
+	}
 	return nil
 }
 
@@ -272,7 +390,12 @@ func (a *Agent) Ask(ctx context.Context, req wire.Request) (wire.Decision, error
 			}
 			backoff = baseBackoff
 		} else {
-			_ = a.Notify(ctx) // best-effort wake; no subscription -> no-op.
+			// Best-effort wake. A real failure (push service rejected the
+			// signed push, bad endpoint) is worth surfacing; the benign "no
+			// subscription yet" case is not — the phone simply hasn't sent one.
+			if nerr := a.Notify(ctx); nerr != nil && !errors.Is(nerr, errNoPushSub) {
+				fmt.Fprintf(os.Stderr, "ask-a-human: push wake-up failed: %v\n", nerr)
+			}
 		}
 		if waitErr := sleep(ctx, backoff); waitErr != nil {
 			return wire.Decision{}, ErrTimeout
@@ -417,14 +540,21 @@ func (a *Agent) reconnect(ctx context.Context, sess *Session) error {
 	return nil
 }
 
-// Notify sends a contentless wake-up Web Push to the paired phone using the
-// RAM VAPID keypair. It returns an error if no subscription has arrived yet.
+// errNoPushSub is returned by Notify before any subscription has arrived. It is
+// a benign, expected state (the phone hasn't sent its subscription yet), so the
+// Ask loop skips logging it while still surfacing real push failures.
+var errNoPushSub = errors.New("agent: no push subscription")
+
+// Notify sends a contentless wake-up Web Push to the paired phone, signing with
+// the agent's VAPID keypair (the same public half the phone subscribed under).
+// It returns errNoPushSub if no subscription has arrived yet; a push-service
+// rejection includes the HTTP status to aid diagnosis.
 func (a *Agent) Notify(ctx context.Context) error {
 	a.mu.Lock()
 	sub := a.sub
 	a.mu.Unlock()
 	if sub == nil {
-		return errors.New("agent: no push subscription")
+		return errNoPushSub
 	}
 	resp, err := webpush.SendNotificationWithContext(ctx, []byte("New approval request"), sub, &webpush.Options{
 		Subscriber:      vapidSubject,
@@ -435,7 +565,14 @@ func (a *Agent) Notify(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("agent: push: %w", err)
 	}
+	// A 2xx is success; anything else means the push service rejected the
+	// signed wake-up (e.g. a key mismatch is a 401/403). Surface the status
+	// before closing the body so the caller can log it.
+	status := resp.StatusCode
 	_ = resp.Body.Close()
+	if status < 200 || status >= 300 {
+		return fmt.Errorf("agent: push: rejected with status %d", status)
+	}
 	return nil
 }
 
