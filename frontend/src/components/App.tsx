@@ -6,6 +6,7 @@
 
 import { useEffect, useRef, useState } from 'react';
 
+import { syncBadge } from '../lib/badge.ts';
 import { canonicalizeCode, roomFromCode } from '../lib/codegen.ts';
 import { SessionManager, type AgentSummary } from '../lib/manager.ts';
 import { type PairPayload } from '../lib/payload.ts';
@@ -121,7 +122,13 @@ export default function App() {
   useEffect(() => {
     if (typeof document === 'undefined') return;
     const recover = () => {
-      if (document.visibilityState === 'visible') manager.retryAll();
+      if (document.visibilityState !== 'visible') return;
+      manager.retryAll();
+      // Reconcile the app-icon badge to the live truth: while backgrounded the
+      // service worker only ever incremented it (per wake-up push), so on resume
+      // we re-assert the real pending count — clearing any over-count and any
+      // requests resolved/expired elsewhere while we were away.
+      syncBadge(manager.pendingCount());
     };
     const onOnline = () => manager.retryAll();
     document.addEventListener('visibilitychange', recover);
@@ -135,6 +142,16 @@ export default function App() {
 
   const activeState = manager.activeState();
   const roster: AgentSummary[] = manager.list();
+
+  // Mirror the count of unanswered requests onto the OS app-icon badge (the red
+  // number on the home-screen icon): two agents each waiting on a request show a
+  // "2", and it clears as they are answered. The foreground page is the source of
+  // truth here; the service worker keeps the badge counting up while the PWA is
+  // closed (see badge.ts / sw.ts). Re-runs only when the count actually changes.
+  const pending = manager.pendingCount();
+  useEffect(() => {
+    syncBadge(pending);
+  }, [pending]);
 
   // The agent delivers its OWN VAPID public key sealed during pairing; the phone
   // MUST subscribe with exactly that key so the push signer == subscribe key
