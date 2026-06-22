@@ -892,9 +892,9 @@ export function OfflineScreen({ c, attempt, onRetry }: { c: Palette; attempt: nu
 
 // --- roster (multi-agent switcher strip) ------------------------------------
 
-/** dotColor maps a roster chip's state to its status-dot color.
- *  Exported for the pure unit test (mirrors swipeOutcome). */
-export function dotColor(c: Palette, status: AgentSummary['status']): string {
+/** dotColor maps a roster status to the strip dot color (the connection dot;
+ *  the separate red request dot is rendered independently when hasRequest). */
+function dotColor(c: Palette, status: AgentSummary['status']): string {
   if (status === 'paired') return c.approve;
   if (status === 'offline') return c.decline;
   return '#f5a524'; // connecting | waiting -> amber (matches deploy cat)
