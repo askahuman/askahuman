@@ -290,4 +290,30 @@ describe('SessionManager', () => {
     expect(wsA.sent.some((f) => typeof f.box === 'string')).toBe(true);
     expect(wsB.sent.some((f) => typeof f.box === 'string')).toBe(false); // B untouched
   });
+
+  it('list() sorts an agent with a pending request to the leftmost slot', () => {
+    const m = newManager();
+    const a = 'aaaa0000aaaa0000';
+    const b = 'bbbb0000bbbb0000';
+    const c = 'cccc0000cccc0000';
+    m.add(payload(a));
+    m.add(payload(b));
+    m.add(payload(c));
+    pair(a);
+    const { ws: wsB, agentKey: keyB } = pair(b);
+    pair(c);
+
+    // No request yet -> pure insertion order.
+    expect(m.list().map((x) => x.id)).toEqual([a, b, c]);
+
+    // A request on the MIDDLE agent b moves it to the front (leftmost); the rest
+    // keep their relative insertion order behind it (stable sort).
+    wsB.recv(sealReq(keyB, yesno('rb')));
+    const list = m.list();
+    expect(list[0]!.id).toBe(b);
+    expect(list[0]!.hasRequest).toBe(true);
+    expect(list.map((x) => x.id)).toEqual([b, a, c]);
+    // Only b carries a request -> only b's chip shows the red request dot.
+    expect(list.filter((x) => x.hasRequest).map((x) => x.id)).toEqual([b]);
+  });
 });

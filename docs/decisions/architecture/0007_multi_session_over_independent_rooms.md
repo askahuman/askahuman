@@ -24,8 +24,9 @@ need to. Each room still enforces "exactly two peers" (`len(rm.peers) >= 2` ⇒ 
     stores it under `payload.room`; first add becomes active. Idempotent on a duplicate room id
     (returns the existing id, no second socket).
   - `remove(roomID)` — `close()`s the Session and drops it; re-picks `active` if it was active.
-  - `list(): AgentSummary[]` — `{ id, label, status, unread, hasRequest }` per agent, stable order
-    (insertion order). `label = Request.agent` (the `--name` flag) else a short room id
+  - `list(): AgentSummary[]` — `{ id, label, status, unread, hasRequest }` per agent, ordered
+    **requests-first** (an agent with a live `hasRequest` sorts to the front/left), then
+    insertion order — a stable sort keeps same-state agents in add order. `label = Request.agent` (the `--name` flag) else a short room id
     (`roomID.slice(0,4)`). `status` derives from each `SessionState`:
     `paired && conn==='open'` ⇒ `paired`; `paired && conn!=='open'` ⇒ `offline`;
     `conn==='connecting'||'open'` pre-pair ⇒ `connecting`; else `waiting`.

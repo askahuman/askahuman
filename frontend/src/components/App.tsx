@@ -31,6 +31,8 @@ const KEYFRAMES = `
 @keyframes pulse { 0% { transform: scale(0.7); opacity: 0.5; } 80%,100% { transform: scale(1.6); opacity: 0; } }
 @keyframes spin { to { transform: rotate(360deg); } }
 @keyframes slideDown { from { transform: translateY(-18px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
+@keyframes requestPulse { 0%,100% { opacity: 0.55; box-shadow: 0 0 0 0 currentColor; } 50% { opacity: 1; box-shadow: 0 0 6px 1px currentColor; } }
+@media (prefers-reduced-motion: reduce) { [data-testid^="roster-request-"] { animation: none !important; opacity: 1 !important; } }
 `;
 
 /** PUBLIC_VAPID_KEY is a build-time placeholder; the agent may also send one. */

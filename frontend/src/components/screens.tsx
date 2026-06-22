@@ -892,7 +892,8 @@ export function OfflineScreen({ c, attempt, onRetry }: { c: Palette; attempt: nu
 
 // --- roster (multi-agent switcher strip) ------------------------------------
 
-/** dotColor maps a roster status to the strip dot color. */
+/** dotColor maps a roster status to the strip dot color (the connection dot;
+ *  the separate red request dot is rendered independently when hasRequest). */
 function dotColor(c: Palette, status: AgentSummary['status']): string {
   if (status === 'paired') return c.approve;
   if (status === 'offline') return c.decline;
@@ -964,6 +965,21 @@ export function Roster({
               border: `1px solid ${a.active ? c.border : 'transparent'}`,
             }}
           >
+            {a.hasRequest && (
+              <span
+                data-testid={`roster-request-${a.id}`}
+                aria-label="has a pending request"
+                style={{
+                  width: 8,
+                  height: 8,
+                  borderRadius: '50%',
+                  flexShrink: 0,
+                  background: c.decline,
+                  color: c.decline,
+                  animation: 'requestPulse 1.4s ease-in-out infinite',
+                }}
+              />
+            )}
             <span style={{ width: 7, height: 7, borderRadius: '50%', background: dotColor(c, a.status) }} />
             <span style={{ whiteSpace: 'nowrap' }}>{a.label}</span>
             {a.unread > 0 && (
