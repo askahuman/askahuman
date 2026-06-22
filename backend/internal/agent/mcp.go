@@ -45,6 +45,13 @@ type MCPServer struct {
 	// pair, when set, overrides the default Agent.Pair (tests inject a stub
 	// pairing that completes against the phone-stub without manual entry).
 	pair func(ctx context.Context) error
+	// surface, when set, opens a local browser page that shows the pairing code
+	// to the human (for clients that bury stderr) and reflects pairing success so
+	// the tab self-closes. nil disables it: the code then travels only via
+	// PrintCode (stderr). NewMCPServer sets the real opener (openCodePage); the
+	// SetPairFunc path returns from pairOnce before it is ever used, so tests
+	// stay headless without touching this field.
+	surface func(displayCode string) (*pairPage, error)
 
 	mu       sync.Mutex
 	pairedCh chan struct{}
@@ -61,7 +68,7 @@ func NewMCPServer(ag *Agent, status io.Writer) *MCPServer {
 	if status == nil {
 		status = os.Stderr
 	}
-	h := &MCPServer{ag: ag, status: status}
+	h := &MCPServer{ag: ag, status: status, surface: openCodePage}
 
 	h.srv = mcp.NewServer(&mcp.Implementation{Name: "ask-a-human", Version: "v0"}, nil)
 	mcp.AddTool(h.srv, &mcp.Tool{
@@ -104,15 +111,37 @@ func (h *MCPServer) pairOnce(ctx context.Context) error {
 	h.mu.Unlock()
 	PrintCode(h.status, p.Display)
 	_, _ = fmt.Fprintln(h.status, "waiting for the phone to enter the code...")
+
+	// Also surface the code on a loopback browser page for clients (Cursor,
+	// Codex) that bury stderr. This is a convenience layer ONLY: a failure to
+	// open it never fails pairing — the code is already on stderr above.
+	var page *pairPage
+	if h.surface != nil {
+		if pg, perr := h.surface(p.Display); perr != nil {
+			_, _ = fmt.Fprintf(h.status, "(could not open the pairing page: %v — use the code above)\n", perr)
+		} else {
+			page = pg
+		}
+	}
+
 	if err := h.ag.Pair(ctx, p); err != nil {
 		// Abandon this code so a fresh one is minted on the next attempt; never
 		// retry the same low-entropy code against a possibly-watching room.
+		if page != nil {
+			page.close() // stop serving the now-void code at once.
+		}
 		h.mu.Lock()
 		h.havePairing = false
 		h.pairing = Pairing{}
 		h.mu.Unlock()
 		_, _ = fmt.Fprintln(h.status, "pairing failed; the code is now void — call start_pairing for a new one.")
 		return err
+	}
+	if page != nil {
+		// Flip the tab to "connected", then let it linger briefly so it polls the
+		// state and self-closes before the loopback server shuts down.
+		page.markPaired()
+		page.closeAfter(pageGrace)
 	}
 	_, _ = fmt.Fprintln(h.status, "paired.")
 	return nil

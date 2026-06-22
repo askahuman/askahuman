@@ -39,9 +39,10 @@ Paste into Cursor `~/.cursor/mcp.json`, Claude Desktop `claude_desktop_config.js
 }}}
 ```
 No checkout, no build, no flags — the published binary defaults to `wss://ask-a-human.ai/ws` +
-`https://ask-a-human.ai`. The first `request_approval` prints a short pairing **code** to stderr;
-open the PWA at [ask-a-human.ai/app](https://ask-a-human.ai/app) on your phone and **type the code**
-(RAM-only, restart ⇒ re-pair). Override `--relay`/`--public-relay` to self-host.
+`https://ask-a-human.ai`. The first `request_approval` opens a local browser page showing a short
+pairing **code** (and also prints it to stderr); open the PWA at
+[ask-a-human.ai/app](https://ask-a-human.ai/app) on your phone and **type the code** (RAM-only,
+restart ⇒ re-pair). Override `--relay`/`--public-relay` to self-host.
 
 The MCP server runs **on your machine** (stdio) on purpose: it holds the SPAKE2 key + plaintext, so it is
 never hosted — only the content-blind relay is. See `docs/decisions/architecture/0011`.
@@ -135,9 +136,10 @@ Cursor `~/.cursor/mcp.json`, Claude Desktop `claude_desktop_config.json`, or Cod
 ```
 That exposes one tool — `request_approval(title, category, summary, response_kind, options?,
 placeholder?, max_len?, expires_in_s?)` — which **blocks until the human answers** (or times out;
-never auto-approves). First call pairs: the pairing **code** prints to the server's stderr **and** to
-`$TMPDIR/ask-a-human-pair.log` — `tail -f` it and **type the code** into the PWA on your phone. Pairing is
-held in RAM for that server's lifetime (no DB); restart ⇒ re-pair.
+never auto-approves). First call pairs: the pairing **code** is shown on an auto-opened local browser
+page (loopback-only; the code is in the page body, never in a URL) **and** printed to the server's
+stderr — **type the code** into the PWA on your phone. Pairing is held in RAM for that server's
+lifetime (no DB); restart ⇒ re-pair.
 
 Localhost-only (no phone)? Skip the launcher and point `command` at `./bin/agent` with
 `"args": ["serve", "--relay", "ws://127.0.0.1:8080/ws"]`.
