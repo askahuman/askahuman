@@ -18,7 +18,9 @@ import {
   type PushSubscription,
   type Request,
   KindPushSub,
+  KindVAPIDKey,
   decodeRequest,
+  decodeVapidKey,
   encodeDecision,
   encodePushSub,
 } from './wire.ts';
@@ -68,6 +70,12 @@ export type SessionRelayFactory = (
 export interface SessionOptions {
   relayOptions?: RelayOptions;
   relayFactory?: SessionRelayFactory;
+  /**
+   * onVapidKey fires when the agent delivers its VAPID public key (sealed). The
+   * App subscribes for Web Push with this exact key so the signer == subscribe
+   * key; the resulting subscription is sent back via sendPushSubscription.
+   */
+  onVapidKey?: (publicKey: string) => void;
 }
 
 /** initialState is the pre-pairing snapshot (the pair screen). */
@@ -95,12 +103,17 @@ export class Session {
   private readonly relay: RelayClient;
   private readonly pairing: Pairing;
   private sessionKey?: Uint8Array;
+  // vapidKey is the agent-delivered VAPID public key (sealed during pairing); the
+  // App subscribes for Web Push with exactly this key. Undefined until received.
+  private vapidKey?: string;
+  private readonly onVapidKey?: (publicKey: string) => void;
   private readonly seenIDs = new Set<string>();
   private readonly listeners = new Set<(s: SessionState) => void>();
   private confirmedTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(payload: PairPayload, opts: SessionOptions = {}) {
     this.state = { ...initialState(), roomID: payload.room };
+    this.onVapidKey = opts.onVapidKey;
 
     const relayEvents: RelayEvents = {
       onState: (conn, attempt) => this.onConnState(conn, attempt),
@@ -128,6 +141,12 @@ export class Session {
   /** getState returns the current snapshot. */
   getState(): SessionState {
     return this.state;
+  }
+
+  /** getVapidKey returns the agent-delivered VAPID public key, or undefined if
+   *  the agent has not sent one yet (App falls back to the build-time key). */
+  getVapidKey(): string | undefined {
+    return this.vapidKey;
   }
 
   /** onChange subscribes to state snapshots; returns an unsubscribe. */
@@ -288,6 +307,19 @@ export class Session {
     } catch {
       return; // authentication failed: drop silently (never trust it)
     }
+    // The agent's VAPID public key arrives sealed during pairing: store it and
+    // notify so the App subscribes for Web Push with exactly this key. Decode
+    // best-effort; a malformed frame is ignored (push stays best-effort).
+    if (peekKind(plaintext) === KindVAPIDKey) {
+      try {
+        const vk = decodeVapidKey(plaintext);
+        this.vapidKey = vk.public_key;
+        this.onVapidKey?.(vk.public_key);
+      } catch {
+        /* not a usable vapid_key — ignore */
+      }
+      return;
+    }
     let req: Request;
     try {
       req = decodeRequest(plaintext);
@@ -321,6 +353,17 @@ export class Session {
   private set(patch: Partial<SessionState>): void {
     this.state = { ...this.state, ...patch };
     for (const fn of this.listeners) fn(this.state);
+  }
+}
+
+/** peekKind reads just the `kind` tag off a sealed-box plaintext so onBox can
+ *  route to the right decoder. Returns '' if it isn't parseable JSON / no kind. */
+function peekKind(plaintext: Uint8Array): string {
+  try {
+    const v = JSON.parse(new TextDecoder().decode(plaintext)) as { kind?: unknown };
+    return typeof v.kind === 'string' ? v.kind : '';
+  } catch {
+    return '';
   }
 }
 

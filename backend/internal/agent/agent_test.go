@@ -4,10 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
+	"os"
 	"sync"
 	"testing"
 	"time"
 
+	webpush "github.com/SherClockHolmes/webpush-go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -402,3 +406,104 @@ func TestNewPairingDerivesRoomFromCode(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, wantRoom, p.RoomID, "RoomID must equal RoomFromCode(Canon)")
 }
+
+// TestSendVAPIDKeyMatchesSigner asserts the public key the agent hands the
+// phone during pairing is EXACTLY the key it signs wake-up pushes with: the
+// vapid_key frame's public_key equals a.vapidPub, and Notify's VAPID
+// Authorization header carries that same public key. This is the whole point of
+// the design — signer == subscribe-key — so the push service never rejects.
+func TestSendVAPIDKeyMatchesSigner(t *testing.T) {
+	key := make([]byte, sealedbox.KeySize)
+	conn := newFakeConn()
+	a := pairedAgent(t, key, conn, nil)
+
+	// 1) The sealed vapid_key frame carries a.vapidPub (only the PUBLIC key).
+	require.NoError(t, a.sendVAPIDKey(context.Background(), a.sess))
+	require.Equal(t, 1, conn.writeCount())
+
+	var env envelope
+	require.NoError(t, json.Unmarshal(conn.writes[0], &env))
+	require.NotEmpty(t, env.Box)
+	plain, err := sealedbox.Open(key, env.Box)
+	require.NoError(t, err)
+	var vk wire.VAPIDKey
+	require.NoError(t, json.Unmarshal(plain, &vk))
+	assert.Equal(t, wire.KindVAPIDKey, vk.Kind)
+	assert.Equal(t, a.vapidPub, vk.PublicKey, "frame public_key must equal a.vapidPub")
+	assert.NotContains(t, string(plain), a.vapidPriv, "private key must never cross the wire")
+
+	// 2) Notify signs with that same public key: capture the VAPID Authorization
+	// header at a stub push endpoint and assert it carries k=<a.vapidPub>. The
+	// webpush lib emits "vapid t=<jwt>, k=<rawurl(pubkey)>", and our keys come
+	// from GenerateVAPIDKeys (RawURLEncoding), so it equals a.vapidPub verbatim.
+	var gotAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		w.WriteHeader(http.StatusCreated)
+	}))
+	defer srv.Close()
+
+	a.mu.Lock()
+	a.sub = &webpush.Subscription{
+		Endpoint: srv.URL,
+		Keys:     webpush.Keys{P256dh: testP256dh, Auth: testAuth},
+	}
+	a.mu.Unlock()
+
+	require.NoError(t, a.Notify(context.Background()))
+	assert.Contains(t, gotAuth, "k="+a.vapidPub,
+		"the push must be signed with the same public key handed to the phone")
+}
+
+// TestNotifyNoSubscription asserts Notify returns the benign errNoPushSub
+// sentinel (which the Ask loop intentionally does NOT log) when no subscription
+// has arrived yet.
+func TestNotifyNoSubscription(t *testing.T) {
+	a, err := New(Config{})
+	require.NoError(t, err)
+	err = a.Notify(context.Background())
+	require.ErrorIs(t, err, errNoPushSub)
+}
+
+// TestVAPIDKeysPersistAcrossNew asserts the VAPID keypair is stable across two
+// New() calls: with the env override unset and the user config dir pointed at a
+// temp dir (via os.UserConfigDir's XDG_CONFIG_HOME), the second agent loads the
+// pair the first one persisted instead of minting a fresh random one.
+func TestVAPIDKeysPersistAcrossNew(t *testing.T) {
+	dir := t.TempDir()
+	// os.UserConfigDir honors XDG_CONFIG_HOME on linux and HOME elsewhere; set
+	// both so the test is platform-independent. Clear the env override so the
+	// persistence path is exercised.
+	t.Setenv("XDG_CONFIG_HOME", dir)
+	t.Setenv("HOME", dir)
+	t.Setenv("AAH_VAPID_PUBLIC_KEY", "")
+	t.Setenv("AAH_VAPID_PRIVATE_KEY", "")
+
+	a1, err := New(Config{})
+	require.NoError(t, err)
+	require.NotEmpty(t, a1.vapidPub)
+	require.NotEmpty(t, a1.vapidPriv)
+
+	a2, err := New(Config{})
+	require.NoError(t, err)
+
+	assert.Equal(t, a1.vapidPub, a2.vapidPub, "public key must be stable across restarts")
+	assert.Equal(t, a1.vapidPriv, a2.vapidPriv, "private key must be stable across restarts")
+
+	// And the on-disk file is the source of stability: removing it forces a new,
+	// different keypair.
+	path, err := vapidStatePath()
+	require.NoError(t, err)
+	require.NoError(t, os.Remove(path))
+	a3, err := New(Config{})
+	require.NoError(t, err)
+	assert.NotEqual(t, a1.vapidPub, a3.vapidPub, "a fresh pair is minted once the state file is gone")
+}
+
+// testP256dh and testAuth are well-formed (base64url) client keys for a stub
+// subscription: testP256dh is a real uncompressed P-256 point and testAuth is
+// 16 random bytes, so webpush can build (encrypt) the push payload.
+const (
+	testP256dh = "BJINtcGg1K_0knrtHoburzRnrdJH1gpuACeg4JDROOhSJ7D6x4NS25OxQ6qwvRTe3A5S3lQ3WB00ZDdEPJp-PoY"
+	testAuth   = "tu2pewRVkyFW06hUToHs8g"
+)

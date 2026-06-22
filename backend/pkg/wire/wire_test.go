@@ -23,6 +23,7 @@ func TestValidEnums(t *testing.T) {
 
 		{"msg request", true, ValidMessageKind(KindRequest)},
 		{"msg push_sub", true, ValidMessageKind(KindPushSub)},
+		{"msg vapid_key", true, ValidMessageKind(KindVAPIDKey)},
 		{"msg unknown", false, ValidMessageKind(MessageKind("nope"))},
 
 		{"response yesno", true, ValidResponseKind(ResponseYesNo)},
@@ -105,6 +106,24 @@ func TestRequestRoundTrip(t *testing.T) {
 	assert.Equal(t, req, got)
 	assert.Contains(t, string(raw), `"expires_in_s":300`)
 	assert.NotContains(t, string(raw), "placeholder")
+}
+
+// TestVAPIDKeyRoundTrip pins the vapid_key message keys and proves the padded
+// encoder round-trips: only the public key crosses the wire, the padded length
+// is a multiple of padBlock, and the padded plaintext still decodes.
+func TestVAPIDKeyRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	pub := "BJ_aG_x0kVpZ-2example-vapid-public-key"
+	raw, err := EncodeVAPIDKey(pub)
+	require.NoError(t, err)
+	assert.Zero(t, len(raw)%padBlock, "padded length must be a multiple of padBlock")
+	assert.Contains(t, string(raw), `"public_key":"`+pub+`"`)
+	assert.NotContains(t, string(raw), "private")
+
+	var got VAPIDKey
+	require.NoError(t, json.Unmarshal(raw, &got), "trailing-space padding must still decode")
+	assert.Equal(t, VAPIDKey{Kind: KindVAPIDKey, PublicKey: pub}, got)
 }
 
 // TestDecisionResults verifies each response kind's result field maps to

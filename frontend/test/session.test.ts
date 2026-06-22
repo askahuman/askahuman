@@ -14,6 +14,7 @@ import {
   type Decision,
   type Request,
   KindRequest,
+  encodeVapidKey,
 } from '../src/lib/wire.ts';
 
 const b64 = {
@@ -298,5 +299,34 @@ describe('Session full round trip', () => {
     ws.recv({ _relay: 'peer_left' });
     expect(session.getState().peerPresent).toBe(false);
     expect(session.getState().screen).toBe('offline'); // card no longer actionable
+  });
+
+  it('stores + reports the agent VAPID key on a sealed vapid_key frame', () => {
+    FakeWS.last = null;
+    const keys: string[] = [];
+    const session = new Session(PAYLOAD, {
+      relayOptions: {
+        wsFactory: (url) => new FakeWS(url),
+        setTimer: () => 0,
+        clearTimer: () => {},
+        heartbeatMs: 0,
+      },
+      onVapidKey: (pub) => keys.push(pub),
+    });
+    session.start();
+    const { ws, agentKey } = pairSession(session);
+
+    expect(session.getVapidKey()).toBeUndefined(); // none until the agent sends one
+
+    // Agent seals its VAPID PUBLIC key; the phone stores it + fires onVapidKey so
+    // the App subscribes for Web Push with EXACTLY this key (signer == subscribe).
+    const pub = 'BPublicVapidKeyAgentDeliveredBase64Url';
+    ws.recv({ box: boxSeal(agentKey, encodeVapidKey(pub)) });
+
+    expect(session.getVapidKey()).toBe(pub);
+    expect(keys).toEqual([pub]);
+    // A vapid_key frame is not a request: the UI stays on listening, no card.
+    expect(session.getState().screen).toBe('listening');
+    expect(session.getState().request).toBeNull();
   });
 });

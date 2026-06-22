@@ -53,6 +53,18 @@ func EncodeDecision(d Decision) ([]byte, error) {
 	return pad(raw), nil
 }
 
+// EncodeVAPIDKey JSON-encodes the agent's VAPID public key and pads the
+// plaintext to a fixed block, matching the other sealed encoders. Only the
+// public key crosses the wire; the private key never leaves the agent. Seal
+// the result.
+func EncodeVAPIDKey(pub string) ([]byte, error) {
+	raw, err := json.Marshal(VAPIDKey{Kind: KindVAPIDKey, PublicKey: pub})
+	if err != nil {
+		return nil, err
+	}
+	return pad(raw), nil
+}
+
 // RelaySignal is a relay-injected control value carried in Frame.Relay.
 // The relay is the only party that may set it; clients never send it.
 type RelaySignal string
@@ -103,12 +115,15 @@ const (
 	KindDecision MessageKind = "decision"
 	// KindPushSub delivers the phone's sealed push subscription to the agent.
 	KindPushSub MessageKind = "push_sub"
+	// KindVAPIDKey delivers the agent's VAPID public key to the phone so it
+	// subscribes with exactly the key the agent signs wake-up pushes with.
+	KindVAPIDKey MessageKind = "vapid_key"
 )
 
 // ValidMessageKind reports whether k is a known application message kind.
 func ValidMessageKind(k MessageKind) bool {
 	switch k {
-	case KindRequest, KindDecision, KindPushSub:
+	case KindRequest, KindDecision, KindPushSub, KindVAPIDKey:
 		return true
 	default:
 		return false
@@ -244,4 +259,15 @@ type PushSub struct {
 	Kind MessageKind `json:"kind"`
 	// Subscription is the sealed Web Push subscription.
 	Subscription PushSubscription `json:"subscription"`
+}
+
+// VAPIDKey delivers the agent's VAPID public key to the phone, sealed
+// inside a Box so the phone subscribes for Web Push with exactly the key
+// the agent signs wake-up pushes with (signer == subscribe-key). Only the
+// PUBLIC key ever crosses the wire; the private key never leaves the agent.
+type VAPIDKey struct {
+	// Kind is always KindVAPIDKey.
+	Kind MessageKind `json:"kind"`
+	// PublicKey is the agent's VAPID public key (base64url, uncompressed P-256).
+	PublicKey string `json:"public_key"`
 }

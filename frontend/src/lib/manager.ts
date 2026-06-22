@@ -53,8 +53,23 @@ export class SessionManager {
   // lastSub is the phone's most recent Web Push subscription, retained so an
   // agent added AFTER the phone subscribed still receives it (fanout on add).
   private lastSub: PushSubscription | null = null;
+  // vapidKeyHandler is the App's per-session push-subscribe callback: when an
+  // agent delivers its VAPID public key, the App subscribes with exactly that
+  // key and delivers the resulting subscription back to THAT room (room A's key
+  // must produce the subscription sent to room A — never cross-wired).
+  private vapidKeyHandler: ((publicKey: string, room: string) => void) | null = null;
 
   constructor(private readonly opts: SessionOptions = {}) {}
+
+  /**
+   * onVapidKey registers the App's handler invoked (with the room id) when any
+   * agent delivers its VAPID public key. The App subscribes for Web Push with
+   * that key and routes the subscription back to the same room via
+   * sendPushSubscriptionTo. Set once on mount.
+   */
+  onVapidKey(handler: (publicKey: string, room: string) => void): void {
+    this.vapidKeyHandler = handler;
+  }
 
   /**
    * add constructs a Session for the payload, starts it, and stores it under the
@@ -65,7 +80,12 @@ export class SessionManager {
     const room = payload.room;
     if (this.entries.has(room)) return room; // idempotent: no second socket
 
-    const session = new Session(payload, this.opts);
+    // Inject a per-room VAPID-key receiver so the agent's key is forwarded to
+    // the App tagged with THIS room (so its subscription routes back here).
+    const session = new Session(payload, {
+      ...this.opts,
+      onVapidKey: (publicKey) => this.vapidKeyHandler?.(publicKey, room),
+    });
     const entry: Entry = { session, unsub: () => {}, unread: 0, lastReqID: null, pushSent: false };
     entry.unsub = session.onChange(() => this.onSessionChange(room));
     this.entries.set(room, entry);
@@ -124,6 +144,17 @@ export class SessionManager {
   /** getActive returns the foreground room id ('' when empty). */
   getActive(): string {
     return this.active;
+  }
+
+  /** firstVapidKey returns the earliest agent-delivered VAPID public key across
+   *  sessions (insertion order), or undefined if no agent has sent one. The App
+   *  uses it to subscribe at first-paired time, preferring it over the build key. */
+  firstVapidKey(): string | undefined {
+    for (const room of this.order) {
+      const key = this.entries.get(room)?.session.getVapidKey();
+      if (key) return key;
+    }
+    return undefined;
   }
 
   /** activeState returns the active session's snapshot, or the pre-pair state. */
@@ -185,6 +216,21 @@ export class SessionManager {
       }
     }
     return any;
+  }
+
+  /**
+   * sendPushSubscriptionTo delivers a push subscription to exactly one room. It
+   * is used when an agent's OWN VAPID key produced this subscription: the sub is
+   * bound to that key's signer, so it is delivered back to that agent only and
+   * NOT retained for fanout (another agent signs with a different key and would
+   * be rejected). Each agent supplies its own key and gets its own subscription.
+   */
+  sendPushSubscriptionTo(room: string, sub: PushSubscription): boolean {
+    const entry = this.entries.get(room);
+    if (!entry) return false;
+    const sent = entry.session.sendPushSubscription(sub);
+    if (sent) entry.pushSent = true;
+    return sent;
   }
 
   /** closeAll tears down every session (unmount). */

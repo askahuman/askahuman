@@ -41,15 +41,16 @@ export interface Frame {
 }
 
 /** MessageKind tags an application message inside a box. */
-export type MessageKind = 'request' | 'decision' | 'push_sub';
+export type MessageKind = 'request' | 'decision' | 'push_sub' | 'vapid_key';
 
 export const KindRequest: MessageKind = 'request';
 export const KindDecision: MessageKind = 'decision';
 export const KindPushSub: MessageKind = 'push_sub';
+export const KindVAPIDKey: MessageKind = 'vapid_key';
 
 /** validMessageKind reports whether k is a known app message kind. */
 export function validMessageKind(k: string): k is MessageKind {
-  return k === KindRequest || k === KindDecision || k === KindPushSub;
+  return k === KindRequest || k === KindDecision || k === KindPushSub || k === KindVAPIDKey;
 }
 
 /** ResponseKind is the answer shape a request asks the human for. */
@@ -126,8 +127,18 @@ export interface PushSub {
   subscription: PushSubscription;
 }
 
+/**
+ * VapidKey delivers the agent's VAPID public key to the phone, sealed, so the
+ * phone subscribes for Web Push with exactly the key the agent signs wake-up
+ * pushes with (signer == subscribe-key). Only the PUBLIC key crosses the wire.
+ */
+export interface VapidKey {
+  kind: MessageKind; // always KindVAPIDKey
+  public_key: string;
+}
+
 /** AppMessage is any plaintext message that lives sealed inside Frame.box. */
-export type AppMessage = Request | Decision | PushSub;
+export type AppMessage = Request | Decision | PushSub | VapidKey;
 
 /**
  * parseFrame parses one WebSocket text frame into a Frame, or null if it is
@@ -186,6 +197,7 @@ const MAX_OPTION_LEN = 256;
 const MAX_TEXT_LEN = 4096;
 const MAX_EXPIRES_S = 86_400; // 24h
 const MAX_INPUT_LEN = 16_384;
+const MAX_VAPID_KEY_LEN = 256; // base64url uncompressed P-256 is ~88 chars
 
 function checkStr(v: unknown, name: string, max: number, required: boolean): string {
   if (v === undefined || v === '') {
@@ -267,6 +279,22 @@ export function encodeRequest(r: Request): Uint8Array {
 /** encodePushSub serializes a PushSub to UTF-8 bytes for sealing, padded. */
 export function encodePushSub(p: PushSub): Uint8Array {
   return new TextEncoder().encode(pad(JSON.stringify(p)));
+}
+
+/** decodeVapidKey validates a sealed-box plaintext as a wire.VapidKey. */
+export function decodeVapidKey(plaintext: Uint8Array): VapidKey {
+  const msg = JSON.parse(new TextDecoder().decode(plaintext)) as Partial<VapidKey>;
+  if (!validMessageKind(msg.kind ?? '') || msg.kind !== KindVAPIDKey) {
+    throw new Error(`wire: not a vapid_key (kind=${String(msg.kind)})`);
+  }
+  checkStr(msg.public_key, 'vapid_key public_key', MAX_VAPID_KEY_LEN, true);
+  return msg as VapidKey;
+}
+
+/** encodeVapidKey serializes a VapidKey to UTF-8 bytes for sealing, padded. */
+export function encodeVapidKey(publicKey: string): Uint8Array {
+  const v: VapidKey = { kind: KindVAPIDKey, public_key: publicKey };
+  return new TextEncoder().encode(pad(JSON.stringify(v)));
 }
 
 /** newYesNoDecision builds a yesno Decision for request id. */

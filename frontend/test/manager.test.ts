@@ -9,7 +9,7 @@ import { Handshake, open as boxOpen, seal as boxSeal } from '../src/lib/crypto.t
 import { SessionManager } from '../src/lib/manager.ts';
 import { type WSLike } from '../src/lib/relay.ts';
 import { type PairPayload } from '../src/lib/payload.ts';
-import { type Decision, type Request, KindRequest } from '../src/lib/wire.ts';
+import { type Decision, type Request, KindRequest, encodeVapidKey } from '../src/lib/wire.ts';
 
 const b64 = {
   encode(bytes: Uint8Array): string {
@@ -249,5 +249,45 @@ describe('SessionManager', () => {
     expect(m.sendPushSubscription(sub)).toBe(true);
     expect(wsA.sent.some((f) => typeof f.box === 'string')).toBe(true);
     expect(wsB.sent.some((f) => typeof f.box === 'string')).toBe(true);
+  });
+
+  it('routes an agent vapid_key to onVapidKey tagged with its room', () => {
+    const m = newManager();
+    const a = 'a1a1a1a1a1a1a1a1';
+    const b = 'b2b2b2b2b2b2b2b2';
+    m.add(payload(a));
+    m.add(payload(b));
+    const { ws: wsA, agentKey: keyA } = pair(a);
+    const { agentKey: keyB } = pair(b);
+
+    const got: Array<{ pub: string; room: string }> = [];
+    m.onVapidKey((pub, room) => got.push({ pub, room }));
+
+    // Only agent A delivers a key -> the handler fires with A's room id, and
+    // firstVapidKey reflects A's key (used by the App's first-paired fallback).
+    wsA.recv({ box: boxSeal(keyA, encodeVapidKey('Akey')) });
+    expect(got).toEqual([{ pub: 'Akey', room: a }]);
+    expect(m.firstVapidKey()).toBe('Akey');
+    void keyB; // B intentionally sends no key in this case
+  });
+
+  it('sendPushSubscriptionTo delivers the agent-keyed sub back to ONLY that room', () => {
+    const m = newManager();
+    const a = 'c3c3c3c3c3c3c3c3';
+    const b = 'd4d4d4d4d4d4d4d4';
+    m.add(payload(a));
+    m.add(payload(b));
+    const { ws: wsA, agentKey: keyA } = pair(a);
+    const { ws: wsB } = pair(b);
+
+    // Drive the real App wiring: a vapid_key on A produces a subscription that is
+    // routed back to A (room A's key must yield room A's subscription, never B's).
+    m.onVapidKey((_pub, room) => {
+      m.sendPushSubscriptionTo(room, { endpoint: 'https://push/a', keys: { p256dh: 'p', auth: 'au' } });
+    });
+    wsA.recv({ box: boxSeal(keyA, encodeVapidKey('Akey')) });
+
+    expect(wsA.sent.some((f) => typeof f.box === 'string')).toBe(true);
+    expect(wsB.sent.some((f) => typeof f.box === 'string')).toBe(false); // B untouched
   });
 });

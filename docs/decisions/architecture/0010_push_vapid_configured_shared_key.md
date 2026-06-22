@@ -1,6 +1,11 @@
 # 0010 — Web Push uses a configured, deployment-shared VAPID key
 
-**Status:** accepted · 2026-06-21
+> **Superseded by [0016](0016_per_agent_vapid_key_sealed_at_pairing.md) (2026-06-22): the single
+> configured shared key cannot match one prebuilt PWA against many laptop agents in the hosted flow;
+> the agent now delivers its own VAPID public key sealed during pairing and the phone subscribes with
+> exactly that key. Kept for decision history.**
+
+**Status:** superseded · accepted 2026-06-21
 
 ## Context
 The agent wakes the phone with a contentless Web Push. VAPID (RFC 8292) signs that push with a

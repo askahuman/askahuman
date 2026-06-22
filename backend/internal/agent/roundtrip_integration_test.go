@@ -166,6 +166,9 @@ func (p *phoneStub) answer(ctx context.Context) error {
 		if err := json.Unmarshal(plain, &req); err != nil {
 			return err
 		}
+		if req.Kind == wire.KindVAPIDKey {
+			continue // agent's sealed VAPID public-key frame; not a request
+		}
 		if req.Kind != wire.KindRequest {
 			return fmt.Errorf("phone: unexpected kind %q", req.Kind)
 		}
