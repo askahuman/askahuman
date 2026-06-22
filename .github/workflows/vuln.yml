@@ -13,8 +13,11 @@
 # 2026 supply-chain incident, so we pull the trivy binary from a pinned release.
 #
 # Severity policy: govulncheck fails on any REACHABLE vuln (its default — that's the
-# whole point); `bun audit` and trivy SURFACE everything but only FAIL the build on
-# high/critical, so a low/moderate advisory is visible without blocking a merge.
+# whole point) and ALSO surfaces every advisory it finds (including fixable-but-
+# unreachable ones in indirect deps) as non-blocking warnings, so a stale dep gets
+# noticed without false-failing a merge; `bun audit` and trivy SURFACE everything but
+# only FAIL the build on high/critical, so a low/moderate advisory is visible without
+# blocking a merge.
 name: vuln
 
 on:
@@ -37,12 +40,59 @@ jobs:
         with:
           go-version-file: backend/go.mod
           cache-dependency-path: backend/go.sum
-      # govulncheck cross-references go.mod/go.sum against the Go vuln DB and reports
-      # only vulns your code can actually reach. Non-zero exit if any are reachable.
-      - name: govulncheck
+      # govulncheck cross-references go.mod/go.sum against the Go vuln DB. The default
+      # SYMBOL scan reports only vulns your code can actually reach and exits non-zero
+      # if any are — that's the hard gate.
+      - name: govulncheck (reachability gate — fails on any vuln your code can call)
         run: |
           go install golang.org/x/vuln/cmd/govulncheck@v1.1.4
           "$(go env GOPATH)/bin/govulncheck" ./...
+      # The gate above only fails on REACHABLE vulns; it does NOT fail on a CVE in a
+      # module we pull in but never call into (e.g. x/crypto's SSH advisories — nothing
+      # here reaches x/crypto/ssh). Gating on an uncallable vuln is a false positive that
+      # trains devs to ignore the scanner. But we still want stale deps visible, so this
+      # step re-scans every package (./...) and surfaces each advisory govulncheck reports
+      # — reachable or not — as a non-blocking ::warning::. (Reachable ones already failed
+      # the gate; this just makes the fixable-but-unreachable ones noticeable so they get
+      # bumped over time.) Runs even if the gate failed; never fails the build itself.
+      - name: govulncheck (surface advisories as warnings — non-blocking)
+        if: ${{ !cancelled() }}
+        run: |
+          bin="$(go env GOPATH)/bin/govulncheck"
+          # -format json exits 0 even with findings, so a non-zero status here means an
+          # operational error (e.g. the install above failed) — warn rather than go silent.
+          if "$bin" -format json ./... > /tmp/gvc.json 2> /tmp/gvc.err; then
+            node -e '
+              const { readFileSync } = require("fs");
+              let buf = ""; try { buf = readFileSync("/tmp/gvc.json", "utf8"); } catch {}
+              // govulncheck -json is a stream of pretty-printed objects; split on top-level
+              // braces, ignoring any brace that appears inside a JSON string literal.
+              let depth = 0, start = -1, inStr = false, esc = false; const objs = [];
+              for (let i = 0; i < buf.length; i++) { const c = buf[i];
+                if (esc) { esc = false; continue; }
+                if (inStr) { if (c === "\\") esc = true; else if (c === "\"") inStr = false; continue; }
+                if (c === "\"") { inStr = true; continue; }
+                if (c === "{") { if (depth === 0) start = i; depth++; }
+                else if (c === "}") { depth--; if (depth === 0) objs.push(buf.slice(start, i + 1)); } }
+              const osv = {}, findings = [];
+              for (const o of objs) { let j; try { j = JSON.parse(o); } catch { continue; }
+                if (j.osv) osv[j.osv.id] = j.osv; if (j.finding) findings.push(j.finding); }
+              const seen = new Set(), rows = [];
+              for (const f of findings) { if (seen.has(f.osv)) continue; seen.add(f.osv);
+                const o = osv[f.osv] || {}, t = (f.trace && f.trace[0]) || {};
+                rows.push({ id: f.osv, mod: t.module || "?", from: t.version || "?",
+                  fixed: f.fixed_version || "(none)", sum: (o.summary || "").replace(/\s+/g, " ").slice(0, 90) }); }
+              if (!rows.length) { console.log("govulncheck: no known advisories in the dependency graph."); process.exit(0); }
+              console.log("::group::govulncheck advisories (non-blocking; the reachability gate above is authoritative)");
+              for (const r of rows) console.log(r.id + "  " + r.mod + " " + r.from + " -> fixed " + r.fixed + "  " + r.sum);
+              console.log("::endgroup::");
+              for (const r of rows) console.error("::warning::" + r.id + ": " + r.mod + " " + r.from + " has a known advisory (fixed in " + r.fixed + "); bump when convenient.");
+              console.log(rows.length + " advisory(ies) surfaced as warnings (this step does NOT fail the build).");
+            '
+          else
+            echo "::warning::govulncheck could not run for the advisory-surfacing step; the reachability gate above is authoritative."
+            cat /tmp/gvc.err || true
+          fi
 
   frontend:
     runs-on: ubuntu-24.04
@@ -69,29 +119,45 @@ jobs:
           # deployment. The PWA is output:'static' served by nginx — no Astro server
           # runtime runs in prod, and both highs require it (SSR / on-demand rendering).
           # Every OTHER high/critical (including any NEW astro one) still fails the build.
-          # TODO: clear by upgrading to astro >=6.4.6 — BLOCKED until @vite-pwa/astro
-          # supports Astro 6 (as of 2026-06 it peer-caps at astro ^5; it builds our
-          # service worker + manifest, so we can't force the bump). Then drop this allowlist.
+          # The remaining moderate/low advisories (astro spread-prop + define:vars XSS,
+          # astro server-island replay, esbuild Windows dev-server read) only WARN — all
+          # SSR/build/dev-only, also unreachable in a static nginx deploy. The yaml
+          # advisory is already cleared via the "yaml" override in package.json; esbuild
+          # is left at 0.27.x because forcing >=0.28.1 breaks `astro build` and the bug is
+          # Windows-dev-server-only (we build static in Linux CI).
+          #
+          # The clean fix for the two highs is astro >=6.4.6, but it is BLOCKED: the
+          # latest @vite-pwa/astro (1.2.0) peer-caps at astro ^5 and builds our service
+          # worker + manifest (injectManifest), so we can't force the bump. Re-evaluate
+          # when @vite-pwa/astro ships Astro 6 support, then drop this allowlist + the
+          # REVIEW_BY nag. (Astro 6 also moves experimental.csp -> security.csp.)
+          #   tracking:  https://github.com/vite-pwa/astro/pull/73 (open) + issue #72
+          #   review-by: 2026-12-01  (CI nags, non-blocking, once this date passes)
           #   GHSA-2pvr-wf23-7pc7  Astro SSRF in prerendered error-page fetch (SSR-only)
           #   GHSA-8hv8-536x-4wqp  Astro reflected XSS via unescaped slot name (SSR-only)
-          ALLOW="GHSA-2pvr-wf23-7pc7 GHSA-8hv8-536x-4wqp" node -e '
+          ALLOW="GHSA-2pvr-wf23-7pc7 GHSA-8hv8-536x-4wqp" REVIEW_BY="2026-12-01" node -e '
             const { readFileSync } = require("fs");
             const allow = new Set((process.env.ALLOW || "").split(/\s+/).filter(Boolean));
             let data = {};
             try { data = JSON.parse(readFileSync("/tmp/audit.json", "utf8")); } catch {}
-            const blocking = [];
+            const blocking = [], suppressed = [];
             for (const advs of Object.values(data)) {
               if (!Array.isArray(advs)) continue;
               for (const a of advs) {
                 const sev = (a.severity || "").toLowerCase();
                 if (sev !== "high" && sev !== "critical") continue;
-                if ([...allow].some((g) => (a.url || "").includes(g))) continue;
+                if ([...allow].some((g) => (a.url || "").includes(g))) { suppressed.push(a.url); continue; }
                 blocking.push(sev + ": " + a.title + " (" + a.url + ")");
               }
             }
             if (blocking.length) {
               console.error("::error::bun audit: " + blocking.length + " blocking high/critical advisory(ies):\n" + blocking.join("\n"));
               process.exit(1);
+            }
+            // Self-expiry: nag (never fail) once the allowlist has outlived its review date.
+            const reviewBy = process.env.REVIEW_BY || "";
+            if (reviewBy && suppressed.length && new Date() > new Date(reviewBy)) {
+              console.error("::warning::vuln allowlist is past its review-by date (" + reviewBy + "). Re-check whether astro can finally upgrade (@vite-pwa/astro Astro 6 support, vite-pwa/astro#73) and drop the allowlist.");
             }
             console.log("No blocking high/critical advisories (allowlisted: " + [...allow].join(", ") + ").");
           '

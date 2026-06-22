@@ -33,5 +33,8 @@
     "typescript": "^6.0.3",
     "vite-plugin-pwa": "^1.3.0",
     "vitest": "^4.1.9"
+  },
+  "overrides": {
+    "yaml": "^2.8.3"
   }
 }
