@@ -13,8 +13,10 @@
 # 2026 supply-chain incident, so we pull the trivy binary from a pinned release.
 #
 # Severity policy: govulncheck fails on any REACHABLE vuln (its default — that's the
-# whole point); `bun audit` and trivy SURFACE everything but only FAIL the build on
-# high/critical, so a low/moderate advisory is visible without blocking a merge.
+# whole point) and, via -show verbose, also LISTS every known-but-unreachable advisory
+# in a required module so a stale dep is visible without false-failing a merge; `bun
+# audit` and trivy SURFACE everything but only FAIL the build on high/critical, so a
+# low/moderate advisory is visible without blocking a merge.
 name: vuln
 
 on:
@@ -37,12 +39,16 @@ jobs:
         with:
           go-version-file: backend/go.mod
           cache-dependency-path: backend/go.sum
-      # govulncheck cross-references go.mod/go.sum against the Go vuln DB and reports
-      # only vulns your code can actually reach. Non-zero exit if any are reachable.
-      - name: govulncheck
+      # govulncheck cross-references go.mod/go.sum against the Go vuln DB. It exits
+      # non-zero ONLY on a vuln your code can actually reach (its default symbol scan) —
+      # that's the hard gate. -show verbose additionally LISTS every known-but-unreachable
+      # advisory in a required module (module, found-in, fixed-in) in the log, so a stale
+      # indirect dep is visible without false-failing the merge on a vuln we can't call
+      # (e.g. x/crypto's SSH advisories — nothing here reaches x/crypto/ssh).
+      - name: govulncheck (fails on reachable vulns; lists all advisories)
         run: |
           go install golang.org/x/vuln/cmd/govulncheck@v1.1.4
-          "$(go env GOPATH)/bin/govulncheck" ./...
+          "$(go env GOPATH)/bin/govulncheck" -show verbose ./...
 
   frontend:
     runs-on: ubuntu-24.04
@@ -69,29 +75,45 @@ jobs:
           # deployment. The PWA is output:'static' served by nginx — no Astro server
           # runtime runs in prod, and both highs require it (SSR / on-demand rendering).
           # Every OTHER high/critical (including any NEW astro one) still fails the build.
-          # TODO: clear by upgrading to astro >=6.4.6 — BLOCKED until @vite-pwa/astro
-          # supports Astro 6 (as of 2026-06 it peer-caps at astro ^5; it builds our
-          # service worker + manifest, so we can't force the bump). Then drop this allowlist.
+          # The remaining moderate/low advisories (astro spread-prop + define:vars XSS,
+          # astro server-island replay, esbuild Windows dev-server read) only WARN — all
+          # SSR/build/dev-only, also unreachable in a static nginx deploy. The yaml
+          # advisory is already cleared via the "yaml" override in package.json; esbuild
+          # is left at 0.27.x because forcing >=0.28.1 breaks `astro build` and the bug is
+          # Windows-dev-server-only (we build static in Linux CI).
+          #
+          # The clean fix for the two highs is astro >=6.4.6, but it is BLOCKED: the
+          # latest @vite-pwa/astro (1.2.0) peer-caps at astro ^5 and builds our service
+          # worker + manifest (injectManifest), so we can't force the bump. Re-evaluate
+          # when @vite-pwa/astro ships Astro 6 support, then drop this allowlist + the
+          # REVIEW_BY nag. (Astro 6 also moves experimental.csp -> security.csp.)
+          #   tracking:  https://github.com/vite-pwa/astro/pull/73 (open) + issue #72
+          #   review-by: 2026-12-01  (CI nags, non-blocking, once this date passes)
           #   GHSA-2pvr-wf23-7pc7  Astro SSRF in prerendered error-page fetch (SSR-only)
           #   GHSA-8hv8-536x-4wqp  Astro reflected XSS via unescaped slot name (SSR-only)
-          ALLOW="GHSA-2pvr-wf23-7pc7 GHSA-8hv8-536x-4wqp" node -e '
+          ALLOW="GHSA-2pvr-wf23-7pc7 GHSA-8hv8-536x-4wqp" REVIEW_BY="2026-12-01" node -e '
             const { readFileSync } = require("fs");
             const allow = new Set((process.env.ALLOW || "").split(/\s+/).filter(Boolean));
             let data = {};
             try { data = JSON.parse(readFileSync("/tmp/audit.json", "utf8")); } catch {}
-            const blocking = [];
+            const blocking = [], suppressed = [];
             for (const advs of Object.values(data)) {
               if (!Array.isArray(advs)) continue;
               for (const a of advs) {
                 const sev = (a.severity || "").toLowerCase();
                 if (sev !== "high" && sev !== "critical") continue;
-                if ([...allow].some((g) => (a.url || "").includes(g))) continue;
+                if ([...allow].some((g) => (a.url || "").includes(g))) { suppressed.push(a.url); continue; }
                 blocking.push(sev + ": " + a.title + " (" + a.url + ")");
               }
             }
             if (blocking.length) {
               console.error("::error::bun audit: " + blocking.length + " blocking high/critical advisory(ies):\n" + blocking.join("\n"));
               process.exit(1);
+            }
+            // Self-expiry: nag (never fail) once the allowlist has outlived its review date.
+            const reviewBy = process.env.REVIEW_BY || "";
+            if (reviewBy && suppressed.length && new Date() > new Date(reviewBy)) {
+              console.error("::warning::vuln allowlist is past its review-by date (" + reviewBy + "). Re-check whether astro can finally upgrade (@vite-pwa/astro Astro 6 support, vite-pwa/astro#73) and drop the allowlist.");
             }
             console.log("No blocking high/critical advisories (allowlisted: " + [...allow].join(", ") + ").");
           '
