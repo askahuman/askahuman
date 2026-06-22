@@ -1,6 +1,10 @@
 # 0009 — QR pairing surfacing: scannable `?p=` terminal QR + `pair_status` MCP tool
 
-**Status:** accepted · 2026-06-21
+> **Superseded by [0015](0015_code_only_pairing.md) (2026-06-22): the terminal QR was dropped;
+> the agent now prints a short code the human types at `/app`. `pair_status` remains; a new
+> `start_pairing` tool was added. Kept for decision history.**
+
+**Status:** superseded · accepted 2026-06-21
 
 ## Context
 Pairing was unscannable from an iPhone and only surfaced via a fragile bash watcher.

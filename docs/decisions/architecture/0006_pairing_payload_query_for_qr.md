@@ -1,6 +1,10 @@
 # 0006 — Carry the pairing payload in `?p=` (query) for QR, `#p=` (fragment) for links
 
-**Status:** accepted · 2026-06-21
+> **Superseded by [0015](0015_code_only_pairing.md) (2026-06-22): the QR + `#p=`/`?p=`
+> deep link was dropped for a typed code; the room is now derived from the code (no payload
+> in any URL). Kept for decision history.**
+
+**Status:** superseded · accepted 2026-06-21
 
 ## Context
 The pairing payload (`{r, room, code}`) was delivered only in the URL **fragment**

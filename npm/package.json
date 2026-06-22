@@ -1,6 +1,6 @@
 {
   "name": "@askahuman/mcp",
-  "version": "0.0.0",
+  "version": "0.1.4",
   "publishConfig": {
     "access": "public"
   },
