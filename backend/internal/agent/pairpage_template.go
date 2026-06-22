@@ -138,6 +138,21 @@ const pairHTML = `<!doctype html>
       .catch(function () { setTimeout(wait, 1500); /* server gone/blip: back off */ });
   }
 
+  // Re-check the instant the human returns to this tab. While they typed the code
+  // on their phone this tab was backgrounded and may have been throttled, so a
+  // held long-poll might not have observed the flip yet — a one-shot check on
+  // focus/visibility catches up immediately (the server stays up for this).
+  function kick() {
+    if (stopped || document.visibilityState !== 'visible') return;
+    fetch(STATUS, { cache: 'no-store' })
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (s) { if (s && s.paired) connected(); })
+      .catch(function () { /* ignore: the wait() loop keeps trying */ });
+  }
+  document.addEventListener('visibilitychange', kick);
+  window.addEventListener('focus', kick);
+  window.addEventListener('pageshow', kick);
+
   if ({{ .Paired }}) { connected(); }
   else { wait(); }
 })();

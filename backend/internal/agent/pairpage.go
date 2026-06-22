@@ -51,10 +51,12 @@ type pairPage struct {
 // closes it on pair-success or failure well before this.
 const pageTTL = 10 * time.Minute
 
-// pageGrace is the window kept open AFTER pairing succeeds so the tab's held
-// long-poll resolves and it can self-close before the server shuts down. The
-// flip itself is instant (pairedCh wakeup); this is just teardown slack.
-const pageGrace = 10 * time.Second
+// pageGrace is how long the server stays up AFTER pairing succeeds. It is
+// generous on purpose: while the human types the code on their PHONE this desktop
+// tab is backgrounded, so the tab must still find a live server when they look
+// back at it (then it flips via the held long-poll or the on-focus re-check). The
+// flip itself is instant; this only bounds how long a now-spent code page lingers.
+const pageGrace = 5 * time.Minute
 
 // statusWait caps how long a single /status long-poll blocks before returning
 // so the browser re-issues; it does not gate the flip, which fires the instant
