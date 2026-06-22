@@ -12,6 +12,7 @@
 
 # macOS Finder noise
 .DS_Store
+.claude
 
 # private — agent instructions, never publish
 CLAUDE.md
