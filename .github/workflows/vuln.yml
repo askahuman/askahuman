@@ -1,0 +1,112 @@
+# Dependency + IaC vulnerability scanning. Runs alongside ci.yml (tests/lint) and
+# secret-scan.yml (credentials) — this is the supply-chain / known-CVE guard.
+#
+# Three jobs, one per surface:
+#   backend  — govulncheck over the Go module (go.mod/go.sum + reachable code).
+#   frontend — `bun audit` over bun.lock (the lockfile is the source of truth).
+#   infra    — trivy config scan over the Dockerfiles + k8s/kustomize manifests.
+#
+# Style mirrors the repo's existing workflows: SHA-pinned actions (with a `# vX.Y.Z`
+# comment) and OSS scanners installed as PINNED binaries via curl rather than
+# third-party actions — same as gitleaks in secret-scan.yml. We deliberately do NOT
+# use aquasecurity/trivy-action: its version tags were force-pushed to malware in a
+# 2026 supply-chain incident, so we pull the trivy binary from a pinned release.
+#
+# Severity policy: govulncheck fails on any REACHABLE vuln (its default — that's the
+# whole point); `bun audit` and trivy SURFACE everything but only FAIL the build on
+# high/critical, so a low/moderate advisory is visible without blocking a merge.
+name: vuln
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  backend:
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: backend/go.mod
+          cache-dependency-path: backend/go.sum
+      # govulncheck cross-references go.mod/go.sum against the Go vuln DB and reports
+      # only vulns your code can actually reach. Non-zero exit if any are reachable.
+      - name: govulncheck
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@v1.1.4
+          "$(go env GOPATH)/bin/govulncheck" ./...
+
+  frontend:
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: "1.2.15"
+      # `bun audit` (in 1.2.15) checks bun.lock against the GitHub Advisory DB. It has
+      # no --audit-level flag until 1.2.21, so we gate severity ourselves: print the
+      # full human report (every advisory is visible in the log), then parse the JSON
+      # and fail ONLY when a high/critical advisory is present. Low/moderate => warn.
+      - name: bun audit (fail on high/critical; allowlist analyzed non-exploitable)
+        run: |
+          bun install --frozen-lockfile
+          echo "::group::bun audit (full report)"
+          bun audit || true
+          echo "::endgroup::"
+          bun audit --json > /tmp/audit.json 2>/dev/null || true
+          # Allowlist: high/critical advisories analyzed as NON-EXPLOITABLE for THIS
+          # deployment. The PWA is output:'static' served by nginx — no Astro server
+          # runtime runs in prod, and both highs require it (SSR / on-demand rendering).
+          # Every OTHER high/critical (including any NEW astro one) still fails the build.
+          # TODO: upgrade to astro >=6.4.6, then delete this allowlist.
+          #   GHSA-2pvr-wf23-7pc7  Astro SSRF in prerendered error-page fetch (SSR-only)
+          #   GHSA-8hv8-536x-4wqp  Astro reflected XSS via unescaped slot name (SSR-only)
+          ALLOW="GHSA-2pvr-wf23-7pc7 GHSA-8hv8-536x-4wqp" node -e '
+            const { readFileSync } = require("fs");
+            const allow = new Set((process.env.ALLOW || "").split(/\s+/).filter(Boolean));
+            let data = {};
+            try { data = JSON.parse(readFileSync("/tmp/audit.json", "utf8")); } catch {}
+            const blocking = [];
+            for (const advs of Object.values(data)) {
+              if (!Array.isArray(advs)) continue;
+              for (const a of advs) {
+                const sev = (a.severity || "").toLowerCase();
+                if (sev !== "high" && sev !== "critical") continue;
+                if ([...allow].some((g) => (a.url || "").includes(g))) continue;
+                blocking.push(sev + ": " + a.title + " (" + a.url + ")");
+              }
+            }
+            if (blocking.length) {
+              console.error("::error::bun audit: " + blocking.length + " blocking high/critical advisory(ies):\n" + blocking.join("\n"));
+              process.exit(1);
+            }
+            console.log("No blocking high/critical advisories (allowlisted: " + [...allow].join(", ") + ").");
+          '
+
+  infra:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      # trivy OSS binary, pinned. `config` mode scans Dockerfiles + k8s/kustomize
+      # YAML for misconfigurations. --exit-code 0 keeps it advisory-but-visible
+      # (kustomize strategic-merge overlay fragments can't be resolved standalone, so
+      # they trip false positives we don't want to gate merges on). node_modules/dist
+      # are build artifacts, not infra — skip them.
+      - name: trivy config scan (infra + Dockerfiles, advisory)
+        run: |
+          VER=0.71.2
+          curl -sSfL "https://github.com/aquasecurity/trivy/releases/download/v${VER}/trivy_${VER}_Linux-64bit.tar.gz" \
+            | tar -xz trivy
+          ./trivy config --severity HIGH,CRITICAL --exit-code 0 \
+            --skip-dirs frontend/node_modules --skip-dirs frontend/dist .

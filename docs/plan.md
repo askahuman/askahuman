@@ -257,7 +257,7 @@ Resolves §14 and sets scope. Full rationale in `docs/decisions/`.
   → `architecture/0002`, `product/0001`.
 - **Layout:** `backend/` + `frontend/` + `infra/`, **two images** (`ask-a-human-relay`,
   `ask-a-human-web`); the MCP agent is a distributed **binary**, not an image. → `architecture/0001`.
-- **Frontend:** static Astro PWA (mirror `platia`, `output: 'static'`), add `vite-plugin-pwa`,
+- **Frontend:** static Astro PWA (mirror `the reference app`, `output: 'static'`), add `vite-plugin-pwa`,
   client crypto, QR. Served from a static container. → `architecture/0004`, `product/0002`.
 - **Local dev:** `ctlptl` + `kind` + local registry, `ko` for the relay image, `Tiltfile`
   orchestrates. → `architecture/0003`.

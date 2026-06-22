@@ -43,7 +43,7 @@ const THEME_COLOR = "#08090c";
     <link rel="apple-touch-icon" href="/icons/icon-192.png" />
     {pwaInfo && <Fragment set:html={pwaInfo.webManifest.linkTag} />}
 
-    <!-- Anti-FOUC: apply the dark class before paint (mirror platia). -->
+    <!-- Anti-FOUC: apply the dark class before paint (mirror the reference app). -->
     <script is:inline>
       (function () {
         const theme = localStorage.getItem("theme");

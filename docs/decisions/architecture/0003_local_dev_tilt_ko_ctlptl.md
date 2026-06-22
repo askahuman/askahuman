@@ -12,7 +12,7 @@ live-reload. We have no database to spin up, which removes most of a typical dev
   (`ctlptl` cluster + registry yaml in `infra/local/`).
 - **Go image:** `ko` builds the relay (distroless, reproducible, no Dockerfile) — see
   `.ko.yaml`. The MCP agent is a plain `go build` binary (not an image).
-- **Web image:** multi-stage Docker build of the Astro static bundle (mirrors platia's
+- **Web image:** multi-stage Docker build of the Astro static bundle (mirrors the reference app's
   hardened Node-alpine pattern, but serving static files).
 - **Orchestrator:** a `Tiltfile` builds both images, applies `infra/local`, port-forwards the
   relay and web, and live-updates on source change.
