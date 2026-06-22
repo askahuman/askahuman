@@ -120,9 +120,6 @@ const pairHTML = `<!doctype html>
     document.body.classList.add('paired');
     statusEl.classList.remove('waiting');
     textEl.textContent = 'Connected — you can close this tab';
-    // Best effort: browsers only let a script close a tab it opened, so this may
-    // be ignored. The "you can close this tab" copy covers that case.
-    setTimeout(function () { try { window.close(); } catch (e) { /* ignore */ } }, 1200);
   }
 
   // Self-rescheduling poll. Each request long-polls server-side so the flip is

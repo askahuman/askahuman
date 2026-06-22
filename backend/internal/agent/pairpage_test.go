@@ -12,6 +12,26 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// TestPairPageConnectedStaysOpen: once paired, the rendered page shows the
+// "Connected — you can close this tab" copy and DOES NOT script-close the tab.
+// The page must linger on the connected state for the human to close it — a
+// self-close (window.close) would bounce them to a blank tab.
+func TestPairPageConnectedStaysOpen(t *testing.T) {
+	var sb strings.Builder
+	err := pageTmpl.Execute(&sb, pageData{
+		Code:       "4F2K-9QHR",
+		AppURL:     appURL,
+		StatusPath: "/p/nonce/status",
+		Paired:     true,
+	})
+	require.NoError(t, err)
+	html := sb.String()
+
+	assert.Contains(t, html, "Connected", "paired page must keep the connected copy")
+	assert.Contains(t, html, "close this tab", "paired page must tell the human to close it")
+	assert.NotContains(t, html, "window.close", "the page must never script-close the tab")
+}
+
 // get fetches url via a client.Do (not http.Get) so the loopback URL the test
 // mints does not trip gosec's variable-URL check, and always closes the body.
 func get(t *testing.T, url string) (status int, body string, hdr http.Header) {

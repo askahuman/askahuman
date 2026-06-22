@@ -47,10 +47,10 @@ type MCPServer struct {
 	pair func(ctx context.Context) error
 	// surface, when set, opens a local browser page that shows the pairing code
 	// to the human (for clients that bury stderr) and reflects pairing success so
-	// the tab self-closes. nil disables it: the code then travels only via
-	// PrintCode (stderr). NewMCPServer sets the real opener (openCodePage); the
-	// SetPairFunc path returns from pairOnce before it is ever used, so tests
-	// stay headless without touching this field.
+	// the tab stays on the "Connected" state for the human to close. nil disables
+	// it: the code then travels only via PrintCode (stderr). NewMCPServer sets the
+	// real opener (openCodePage); the SetPairFunc path returns from pairOnce before
+	// it is ever used, so tests stay headless without touching this field.
 	surface func(displayCode string) (*pairPage, error)
 
 	mu       sync.Mutex
@@ -138,8 +138,9 @@ func (h *MCPServer) pairOnce(ctx context.Context) error {
 		return err
 	}
 	if page != nil {
-		// Flip the tab to "connected", then let it linger briefly so it polls the
-		// state and self-closes before the loopback server shuts down.
+		// Flip the tab to "connected", then let the loopback server linger within
+		// pageGrace so the tab can poll the state and show "Connected" — it stays
+		// there for the human to close — before the server shuts down.
 		page.markPaired()
 		page.closeAfter(pageGrace)
 	}

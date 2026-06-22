@@ -17,7 +17,8 @@ import (
 )
 
 // pairPage is a loopback-only, single-tab web page that shows the pairing code
-// to the human and reflects pairing success so the browser tab can self-close.
+// to the human and reflects pairing success so the tab stays on the "Connected"
+// state for the human to close.
 // It is the convenience surface for clients (Cursor, Codex) that bury the MCP
 // server's stderr where a non-engineer can never find it; the stderr PrintCode
 // line remains the always-on floor beneath it.
@@ -116,8 +117,8 @@ func newPairPage(displayCode string) (*pairPage, error) {
 }
 
 // markPaired flips the page to its "connected" state and wakes every held
-// /status long-poll at once, so the tab shows "Connected" and self-closes the
-// instant pairing completes — no poll-interval lag.
+// /status long-poll at once, so the tab shows "Connected" the instant pairing
+// completes — no poll-interval lag — and stays there for the human to close.
 func (p *pairPage) markPaired() {
 	p.mu.Lock()
 	p.paired = true
