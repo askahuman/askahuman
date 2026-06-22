@@ -24,6 +24,7 @@ import {
   sealWithNonce,
   open,
 } from '../src/lib/crypto.ts';
+import { canonicalizeCode, roomFromCode } from '../src/lib/codegen.ts';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const backendDir = resolve(here, '../../backend');
@@ -114,6 +115,14 @@ eq('JS opens Go ciphertext', Buffer.from(opened).toString('utf8'), v.secretbox.p
 
 const reSealed = sealWithNonce(key, hexBytes(v.secretbox.nonce), utf8(v.secretbox.plaintext));
 eq('JS reproduces Go ciphertext', reSealed, v.secretbox.ciphertext);
+
+// --- code-only pairing: room derivation Go <-> JS ---------------------------
+// The phone derives the rendezvous room from ONLY the typed code; this must be
+// byte-identical to the Go agent or the two never meet in the same relay room.
+console.log('pairing code (room derivation):');
+eq('canonicalize(code)', canonicalizeCode(v.room_code), v.room_canon);
+eq('roomFromCode(canon)', roomFromCode(v.room_canon), v.room_id);
+eq('roomFromCode(canonicalize(code))', roomFromCode(canonicalizeCode(v.room_code)), v.room_id);
 
 // --- secretbox: JS -> Go ----------------------------------------------------
 console.log('secretbox JS -> Go:');

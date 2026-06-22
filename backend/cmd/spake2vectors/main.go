@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/askahuman/askahuman/backend/pkg/paircode"
 	"github.com/askahuman/askahuman/backend/pkg/sealedbox"
 	"github.com/askahuman/askahuman/backend/pkg/spake2"
 )
@@ -24,6 +25,10 @@ import (
 // values; do not change without regenerating the JS expectations.
 const (
 	fixedCode = "4F2-9KQ"
+	// fixedRoomCode pins the code-only room derivation (paircode). It is given in
+	// lowercase WITH a hyphen on purpose so the interop check also exercises
+	// Canonicalize (uppercase + strip separators) Go<->JS, not just RoomFromCode.
+	fixedRoomCode = "4f2k-9qhr"
 	// xSeed/ySeed are 64-byte uniform seeds for A's x and B's y, reduced mod l.
 	xSeedHex = "11111111111111111111111111111111111111111111111111111111111111112222222222222222222222222222222222222222222222222222222222222222"
 	ySeedHex = "33333333333333333333333333333333333333333333333333333333333333334444444444444444444444444444444444444444444444444444444444444444"
@@ -47,6 +52,11 @@ type vectors struct {
 	ConfirmA   string `json:"confirm_a"`
 	ConfirmB   string `json:"confirm_b"`
 	Secretbox  sample `json:"secretbox"`
+	// Code-only pairing room derivation (paircode): RoomCode is the raw typed
+	// form, RoomCanon its canonical form, RoomID = RoomFromCode(RoomCanon).
+	RoomCode  string `json:"room_code"`
+	RoomCanon string `json:"room_canon"`
+	RoomID    string `json:"room_id"`
 }
 
 type sample struct {
@@ -140,6 +150,15 @@ func handshake() ([]byte, vectors, error) {
 		return nil, vectors{}, fmt.Errorf("seal sample: %w", err)
 	}
 
+	roomCanon, err := paircode.Canonicalize(fixedRoomCode)
+	if err != nil {
+		return nil, vectors{}, fmt.Errorf("room canonicalize: %w", err)
+	}
+	roomID, err := paircode.RoomFromCode(roomCanon)
+	if err != nil {
+		return nil, vectors{}, fmt.Errorf("room from code: %w", err)
+	}
+
 	m, n, w := spake2.Vectors(fixedCode)
 	v := vectors{
 		Code:       fixedCode,
@@ -160,6 +179,9 @@ func handshake() ([]byte, vectors, error) {
 			Plaintext:  samplePlaintext,
 			Ciphertext: ciphertext,
 		},
+		RoomCode:  fixedRoomCode,
+		RoomCanon: roomCanon,
+		RoomID:    roomID,
 	}
 	return keyA, v, nil
 }
