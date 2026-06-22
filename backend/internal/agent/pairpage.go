@@ -39,6 +39,10 @@ type pairPage struct {
 
 	mu        sync.Mutex
 	paired    bool
+	pairedCh  chan struct{} // closed once when pairing succeeds — long-poll wakeup
+	closingCh chan struct{} // closed once when the server is shutting down
+
+	pairOnce  sync.Once
 	closeOnce sync.Once
 }
 
@@ -47,9 +51,15 @@ type pairPage struct {
 // closes it on pair-success or failure well before this.
 const pageTTL = 10 * time.Minute
 
-// pageGrace is the window kept open AFTER pairing succeeds so the tab can poll
-// the "connected" state once and self-close before the server shuts down.
-const pageGrace = 3 * time.Second
+// pageGrace is the window kept open AFTER pairing succeeds so the tab's held
+// long-poll resolves and it can self-close before the server shuts down. The
+// flip itself is instant (pairedCh wakeup); this is just teardown slack.
+const pageGrace = 10 * time.Second
+
+// statusWait caps how long a single /status long-poll blocks before returning
+// so the browser re-issues; it does not gate the flip, which fires the instant
+// pairedCh closes.
+const statusWait = 20 * time.Second
 
 // openCodePage mints a loopback pair page for displayCode and opens it in the
 // host's default browser. It returns the page handle (so the caller can mark it
@@ -84,10 +94,12 @@ func newPairPage(displayCode string) (*pairPage, error) {
 		return nil, err
 	}
 	p := &pairPage{
-		nonce:   nonce,
-		path:    "/p/" + nonce,
-		url:     "http://" + ln.Addr().String() + "/p/" + nonce,
-		display: displayCode,
+		nonce:     nonce,
+		path:      "/p/" + nonce,
+		url:       "http://" + ln.Addr().String() + "/p/" + nonce,
+		display:   displayCode,
+		pairedCh:  make(chan struct{}),
+		closingCh: make(chan struct{}),
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", p.handle)
@@ -100,12 +112,14 @@ func newPairPage(displayCode string) (*pairPage, error) {
 	return p, nil
 }
 
-// markPaired flips the page to its "connected" state; the tab's next status
-// poll observes it, shows "Connected", and attempts to self-close.
+// markPaired flips the page to its "connected" state and wakes every held
+// /status long-poll at once, so the tab shows "Connected" and self-closes the
+// instant pairing completes — no poll-interval lag.
 func (p *pairPage) markPaired() {
 	p.mu.Lock()
 	p.paired = true
 	p.mu.Unlock()
+	p.pairOnce.Do(func() { close(p.pairedCh) })
 }
 
 // closeAfter tears the server down after d, off the caller's goroutine, so the
@@ -118,13 +132,39 @@ func (p *pairPage) closeAfter(d time.Duration) {
 }
 
 // close shuts the loopback server down. It is idempotent and safe to call from
-// the success path, the failure path, and the TTL watchdog concurrently.
+// the success path, the failure path, and the TTL watchdog concurrently. It
+// first releases any held /status long-poll so Shutdown is not blocked waiting
+// on an in-flight request.
 func (p *pairPage) close() {
 	p.closeOnce.Do(func() {
+		close(p.closingCh)
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
 		_ = p.srv.Shutdown(ctx)
 	})
+}
+
+// waitPaired long-polls: it returns true as soon as the page is marked paired,
+// or false if the request is canceled, the server is closing, or statusWait
+// elapses (the browser then re-issues). This makes the "connected" flip instant
+// and removes the poll-lag/teardown race that a fixed-interval poll has.
+func (p *pairPage) waitPaired(ctx context.Context) bool {
+	p.mu.Lock()
+	paired := p.paired
+	p.mu.Unlock()
+	if paired {
+		return true
+	}
+	select {
+	case <-p.pairedCh:
+		return true
+	case <-p.closingCh:
+		return false
+	case <-ctx.Done():
+		return false
+	case <-time.After(statusWait):
+		return false
+	}
 }
 
 // handle serves the code page at /p/<nonce> and the poll endpoint at
@@ -164,11 +204,10 @@ func (p *pairPage) handle(w http.ResponseWriter, r *http.Request) {
 			Paired:     paired,
 		})
 	case "status":
-		p.mu.Lock()
-		paired := p.paired
-		p.mu.Unlock()
+		// Long-poll: block until paired (instant flip), the browser gives up, or
+		// the server closes. r.Context() is canceled if the tab navigates away.
 		h.Set("Content-Type", "application/json")
-		_, _ = fmt.Fprintf(w, "{\"paired\":%t}", paired)
+		_, _ = fmt.Fprintf(w, "{\"paired\":%t}", p.waitPaired(r.Context()))
 	default:
 		http.NotFound(w, r)
 	}

@@ -108,7 +108,7 @@ const pairHTML = `<!doctype html>
   var STATUS = {{ .StatusPath }};
   var statusEl = document.getElementById('status');
   var textEl = document.getElementById('status-text');
-  var timer = null;
+  var stopped = false;
 
   document.getElementById('copy').addEventListener('click', function () {
     var code = document.getElementById('code').textContent;
@@ -116,7 +116,7 @@ const pairHTML = `<!doctype html>
   });
 
   function connected() {
-    if (timer) clearInterval(timer);
+    stopped = true;
     document.body.classList.add('paired');
     statusEl.classList.remove('waiting');
     textEl.textContent = 'Connected — you can close this tab';
@@ -125,15 +125,21 @@ const pairHTML = `<!doctype html>
     setTimeout(function () { try { window.close(); } catch (e) { /* ignore */ } }, 1200);
   }
 
-  function poll() {
+  // Long-poll: each request blocks on the server until pairing completes, so the
+  // flip is instant. A returned {paired:false} is a long-poll timeout — re-issue.
+  function wait() {
+    if (stopped) return;
     fetch(STATUS, { cache: 'no-store' })
       .then(function (r) { return r.ok ? r.json() : null; })
-      .then(function (s) { if (s && s.paired) connected(); })
-      .catch(function () { /* keep last state on a blip */ });
+      .then(function (s) {
+        if (s && s.paired) { connected(); }
+        else { setTimeout(wait, 400); }
+      })
+      .catch(function () { setTimeout(wait, 1500); /* server gone/blip: back off */ });
   }
 
   if ({{ .Paired }}) { connected(); }
-  else { timer = setInterval(poll, 1200); poll(); }
+  else { wait(); }
 })();
 </script>
 </body>
