@@ -1,10 +1,12 @@
 package agent
 
 import (
+	"context"
 	"io"
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -56,20 +58,46 @@ func TestPairPageRejectsWithoutNonce(t *testing.T) {
 	}
 }
 
-// TestPairPageStatusFlipsOnMarkPaired: the poll endpoint reports false until the
-// handshake completes, then true — this is what flips the tab to "connected".
-func TestPairPageStatusFlipsOnMarkPaired(t *testing.T) {
+// TestPairPageStatusLongPollsUntilPaired: while unpaired, /status holds the
+// request open (long-poll) instead of returning promptly; the instant markPaired
+// fires, the held request returns paired:true — the wakeup that flips the tab to
+// "connected" with no poll lag and no teardown race.
+func TestPairPageStatusLongPollsUntilPaired(t *testing.T) {
+	p, err := newPairPage("4F2K-9QHR")
+	require.NoError(t, err)
+	defer p.close()
+	statusURL := p.url + "/status"
+
+	// Unpaired: a short-deadline request times out rather than returning false —
+	// proof the endpoint is holding the connection open.
+	shortCtx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	req, err := http.NewRequestWithContext(shortCtx, http.MethodGet, statusURL, nil)
+	require.NoError(t, err)
+	_, err = http.DefaultClient.Do(req) //nolint:bodyclose // request is canceled by the deadline; there is no body to close.
+	require.Error(t, err, "unpaired long-poll must not return promptly")
+
+	// markPaired wakes the held long-poll: this blocking GET returns ~immediately
+	// with paired:true.
+	go func() { time.Sleep(150 * time.Millisecond); p.markPaired() }()
+	start := time.Now()
+	status, body, _ := get(t, statusURL)
+	require.Equal(t, http.StatusOK, status)
+	assert.JSONEq(t, `{"paired":true}`, body)
+	assert.Less(t, time.Since(start), statusWait, "must wake on markPaired, not on the long-poll timeout")
+}
+
+// TestPairPageStatusImmediateWhenAlreadyPaired: once paired, /status returns true
+// without blocking (covers a reload after pairing).
+func TestPairPageStatusImmediateWhenAlreadyPaired(t *testing.T) {
 	p, err := newPairPage("4F2K-9QHR")
 	require.NoError(t, err)
 	defer p.close()
 
-	statusURL := p.url + "/status"
-	status, body, _ := get(t, statusURL)
-	require.Equal(t, http.StatusOK, status)
-	assert.JSONEq(t, `{"paired":false}`, body)
-
 	p.markPaired()
-	status, body, _ = get(t, statusURL)
+	start := time.Now()
+	status, body, _ := get(t, p.url+"/status")
 	require.Equal(t, http.StatusOK, status)
 	assert.JSONEq(t, `{"paired":true}`, body)
+	assert.Less(t, time.Since(start), time.Second, "already-paired status must not block")
 }
