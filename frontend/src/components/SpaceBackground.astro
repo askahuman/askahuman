@@ -1,0 +1,52 @@
+---
+// Shared animated "space-green" background: a fixed starfield + green aurora that
+// sits behind the page content. Used by the marketing landing AND the app shell so
+// both share the same backdrop. Scoped CSS (bundled/hashed by Astro) keeps it
+// CSP-safe (no inline style= attributes). The cosmic layers only paint under
+// html.dark (the brand theme); in light mode they stay hidden so light app
+// surfaces sit on the plain page color.
+---
+
+<div class="bg-layer stars" aria-hidden="true"></div>
+<div class="bg-layer nebula" aria-hidden="true"></div>
+
+<style>
+  .bg-layer {
+    position: fixed;
+    inset: 0;
+    z-index: 0;
+    pointer-events: none;
+  }
+
+  :global(html.dark) .stars {
+    background-image:
+      radial-gradient(1.5px 1.5px at 20px 30px, rgba(255, 255, 255, 0.7), transparent),
+      radial-gradient(1.5px 1.5px at 40px 70px, rgba(255, 255, 255, 0.45), transparent),
+      radial-gradient(1px 1px at 90px 40px, rgba(255, 255, 255, 0.5), transparent),
+      radial-gradient(1.5px 1.5px at 130px 80px, rgba(255, 255, 255, 0.35), transparent),
+      radial-gradient(1px 1px at 160px 120px, rgba(255, 255, 255, 0.6), transparent),
+      radial-gradient(1.5px 1.5px at 200px 60px, rgba(57, 217, 138, 0.65), transparent),
+      radial-gradient(1px 1px at 250px 150px, rgba(255, 255, 255, 0.4), transparent),
+      radial-gradient(1.5px 1.5px at 300px 40px, rgba(45, 212, 191, 0.5), transparent);
+    background-size: 340px 200px;
+    animation: aah-twinkle 8s ease-in-out infinite alternate;
+  }
+
+  :global(html.dark) .nebula {
+    background:
+      radial-gradient(ellipse 75% 50% at 22% 8%, rgba(57, 217, 138, 0.16), transparent 55%),
+      radial-gradient(ellipse 55% 55% at 82% 18%, rgba(45, 212, 191, 0.1), transparent 55%),
+      radial-gradient(ellipse 90% 65% at 50% 100%, rgba(57, 217, 138, 0.08), transparent 55%);
+  }
+
+  @keyframes aah-twinkle {
+    0% { opacity: 0.4; }
+    100% { opacity: 0.85; }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    :global(html.dark) .stars {
+      animation: none !important;
+    }
+  }
+</style>

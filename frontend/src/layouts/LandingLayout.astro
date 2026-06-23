@@ -13,8 +13,8 @@ interface Props {
 }
 
 const {
-  title = "ask-a-human — let your AI agent ask a human, on your phone",
-  description = "End-to-end encrypted approvals for your AI agent. No accounts, no database. A content-blind relay and a SPAKE2 handshake — the server never sees your data.",
+  title = "ask-a-human: let your AI agent ask a human, on your phone",
+  description = "End-to-end encrypted approvals for your AI agent. No accounts, no database. A content-blind relay and a SPAKE2 handshake; the server never sees your data.",
 } = Astro.props;
 
 const THEME_COLOR = "#08090c";
@@ -47,20 +47,13 @@ const OG_IMAGE = "/icons/icon-512.png";
     <meta name="twitter:image" content={OG_IMAGE} />
 
     <meta name="theme-color" content={THEME_COLOR} />
-    <link rel="icon" type="image/svg+xml" href="/icons/icon.svg" />
+    <link rel="icon" type="image/svg+xml" href="/icons/pager-favicon.svg" />
     <link rel="apple-touch-icon" href="/icons/icon-192.png" />
 
-    <!-- Anti-FOUC: apply the dark class before paint (mirror the app shell). -->
-    <script is:inline>
-      (function () {
-        const theme = localStorage.getItem("theme");
-        if (theme === "light") {
-          document.documentElement.classList.remove("dark");
-        } else {
-          document.documentElement.classList.add("dark");
-        }
-      })();
-    </script>
+    <!-- The marketing landing is dark-only: <html class="dark"> above pins it before
+         paint (no FOUC), so there's no theme-toggle script here. A localStorage-based
+         <script is:inline> would also be blocked by the strict CSP (is:inline scripts
+         aren't hashed into script-src), so omitting it keeps the console clean. -->
   </head>
   <body class="min-h-screen overflow-x-hidden">
     <slot />
