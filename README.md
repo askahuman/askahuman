@@ -242,6 +242,8 @@ Or in your MCP client config:
 
 The `serve` flags are `--relay <wss-url>` (the relay the agent dials), `--public-relay <wss-url>` (the relay the phone dials, when it differs from `--relay`), and `--name <text>` (who is asking, shown on the card). The MCP server still runs locally (it has to: it holds the key and the plaintext). Only the content-blind relay and the static PWA move to your infra. Both are in this repo, MIT-licensed, with deploy manifests under `infra/`.
 
+**Mirroring the binary.** The postinstall verifies the downloaded binary's sha256 before installing it, so a custom `AAH_BINARY_BASEURL` mirror must serve `checksums.txt` over **https** alongside the archives, **or** you must pin the digest out of band with `AAH_BINARY_SHA256=<sha256>`. Plain `http://` mirrors are rejected. To place the binary yourself, set `AAH_SKIP_DOWNLOAD=1` and drop it in `node_modules/@askahuman/mcp/bin/`.
+
 ## Repo layout
 
 | Path | What's inside |
