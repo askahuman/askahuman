@@ -150,7 +150,11 @@ export class RelayClient {
   /** send transmits one app frame verbatim; no-op if not open. */
   send(frame: Frame): boolean {
     if (this.state !== 'open' || !this.ws) return false;
-    this.ws.send(JSON.stringify(frame));
+    try {
+      this.ws.send(JSON.stringify(frame));
+    } catch {
+      return false; // half-open socket: report drop (mirror heartbeat path)
+    }
     return true;
   }
 

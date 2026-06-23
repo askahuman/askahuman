@@ -25,6 +25,7 @@ import {
   open,
 } from '../src/lib/crypto.ts';
 import { canonicalizeCode, roomFromCode } from '../src/lib/codegen.ts';
+import { ristretto255 } from '@noble/curves/ed25519.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const backendDir = resolve(here, '../../backend');
@@ -106,6 +107,24 @@ eq('confirm A', hex(resA.confirm), v.confirm_a);
 eq('confirm B', hex(resB.confirm), v.confirm_b);
 ok('A verifies B confirm', a.confirmPeer(resB.confirm));
 ok('B verifies A confirm', b.confirmPeer(resA.confirm));
+
+// --- constant-time mulCT: the 0-scalar guard (m5-crypto-consttime) ----------
+// The constant-time multiply() rejects scalar 0, so mulCT maps 0 -> identity to
+// match Go's ScalarMult (0*P = identity). With an all-zero seed, x reduces to 0,
+// so msg = 0*G + w*M collapses to w*M. Assert it does NOT throw and equals w*M
+// (the blinding term) exactly — proving the guard is byte-faithful to Go.
+console.log('mulCT 0-scalar guard:');
+{
+  const zeroSeed = new Uint8Array(64); // reduces to scalar 0
+  const w = passwordScalar(v.code);
+  // w*M computed independently via noble (the same lib mulCT delegates to).
+  const M = ristretto255.Point.fromBytes(mPoint());
+  const wM = hex(M.multiply(w).toBytes());
+  const az = Handshake.newA(v.code);
+  const msg = az.startDeterministic(zeroSeed); // must not throw
+  ok('zero-seed message is 32 bytes', msg.length === 32);
+  eq('zero-seed msg == w*M (0*G vanishes)', hex(msg), wM);
+}
 
 // --- secretbox: Go -> JS ----------------------------------------------------
 console.log('secretbox Go -> JS:');

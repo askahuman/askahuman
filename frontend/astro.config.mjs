@@ -30,6 +30,11 @@ export default defineConfig({
         "manifest-src 'self'",
         "worker-src 'self'",
         // wss: for the dynamic relay (host not known at build time); ws: for localhost dev.
+        // This stays a scheme-wildcard ON PURPOSE: this one prebuilt bundle is served to
+        // self-hosters / Advanced-relay users whose relay origin is unknown at build time,
+        // and to astro dev/preview on localhost (ws:). The prod nginx header pins
+        // connect-src to wss://ask-a-human.ai (it knows the hosted origin); the browser
+        // enforces the intersection. ref. frontend/nginx.conf $sec_csp (m6-csp-egress).
         "connect-src 'self' wss: ws:",
         "object-src 'none'",
         "base-uri 'none'",

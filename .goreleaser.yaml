@@ -36,6 +36,27 @@ archives:
 checksum:
   name_template: "checksums.txt"
 
+# Keyless (OIDC) cosign signature over checksums.txt. checksums.txt already
+# chains to every archive via sha256, so signing it covers the whole release.
+# The npm installer (B2) today fetches checksums.txt and verifies the archive's
+# sha256 against it before extract (no signature check yet). Verifying this
+# cosign signature of checksums.txt is the deferred upgrade this signing enables.
+# ref. npm/install.js, ADR 0019 (install checksum verify).
+# ponytail: signs only the checksum, not each archive, and ships no SBOM —
+# the checksum is the single verification anchor B2 needs. Upgrade path: add
+# `artifacts: archive` + a `sboms:` (syft) block if per-artifact attestation
+# or dependency provenance is later required.
+signs:
+  - cmd: cosign
+    artifacts: checksum
+    signature: "${artifact}.sigstore.json"
+    args:
+      - "sign-blob"
+      - "--bundle=${signature}"
+      - "${artifact}"
+      - "--yes"
+    output: true
+
 release:
   github:
     owner: askahuman

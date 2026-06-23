@@ -234,7 +234,13 @@ export class Session {
   private sendDecision(id: string, decision: Decision, result: ConfirmedResult): void {
     if (!this.sessionKey) return;
     const bytes = encodeDecision(decision);
-    this.relay.sendBox(boxSeal(this.sessionKey, bytes));
+    if (!this.relay.sendBox(boxSeal(this.sessionKey, bytes))) {
+      // Send dropped (socket not open / threw): do NOT claim "sent". Keep the
+      // request so it stays answerable, leave id OUT of seenIDs so a resend is
+      // accepted, and surface offline (its copy: no answer was sent).
+      this.set({ screen: 'offline' });
+      return;
+    }
     // De-dupe: a re-announced request with this id won't reopen the card.
     this.seenIDs.add(id);
     this.set({ screen: 'confirmed', result, request: null });

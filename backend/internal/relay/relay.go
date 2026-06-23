@@ -18,6 +18,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -38,13 +39,51 @@ func logf(format string, args ...any) {
 	}
 }
 
-// clientIP returns the peer IP (sans port) for dev logging.
+// trustProxy, when AAH_RELAY_TRUST_PROXY=1, makes clientIP read the rightmost
+// X-Forwarded-For hop (the IP the trusted L7 LB observed) instead of RemoteAddr.
+// Default OFF: direct-exposure deployments must NOT trust a client-supplied XFF.
+var trustProxy = os.Getenv("AAH_RELAY_TRUST_PROXY") == "1"
+
+// clientIP returns the key for the per-IP cap (and dev logging): the rightmost
+// X-Forwarded-For hop when behind a trusted proxy (the IP the trusted LB saw),
+// else the direct TCP peer. ref. m3-relay-xff: never trust a client-supplied
+// leftmost XFF; the rightmost hop is the one the trusted LB appended.
 func clientIP(req *http.Request) string {
-	h, _, err := net.SplitHostPort(req.RemoteAddr)
+	host := remoteHost(req.RemoteAddr)
+	if !trustProxy {
+		return host
+	}
+	if ip := rightmostXFF(req.Header.Get("X-Forwarded-For")); ip != "" {
+		return ip
+	}
+	return host
+}
+
+// remoteHost strips the port from a host:port, returning addr unchanged if it
+// has none.
+func remoteHost(addr string) string {
+	h, _, err := net.SplitHostPort(addr)
 	if err != nil {
-		return req.RemoteAddr
+		return addr
 	}
 	return h
+}
+
+// rightmostXFF returns the last syntactically-valid IP in an X-Forwarded-For
+// header value, or "" when none parses. The rightmost hop is the one the
+// trusted proxy appended; earlier (leftmost) hops are client-controllable and
+// must not be trusted as the cap key. ponytail: trusts exactly one proxy hop —
+// for N chained trusted proxies, skip N-1 from the right.
+func rightmostXFF(xff string) string {
+	parts := strings.Split(xff, ",")
+	for i := len(parts) - 1; i >= 0; i-- {
+		h := strings.TrimSpace(parts[i])
+		// Tolerate an accidental host:port hop.
+		if hh := remoteHost(h); net.ParseIP(hh) != nil {
+			return hh
+		}
+	}
+	return ""
 }
 
 // StatusRoomFull is the WebSocket close code returned when a third peer

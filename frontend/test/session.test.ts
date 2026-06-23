@@ -301,6 +301,40 @@ describe('Session full round trip', () => {
     expect(session.getState().screen).toBe('offline'); // card no longer actionable
   });
 
+  it('does NOT show confirmed when the decision send drops; keeps card answerable + resend accepted', () => {
+    const { session, timers } = newSession();
+    const { ws, agentKey } = pairSession(session);
+    const req: Request = {
+      kind: KindRequest,
+      id: 'req_drop',
+      title: 'T',
+      summary: 'S',
+      response: { kind: 'yesno' },
+    };
+    ws.recv({ box: boxSeal(agentKey, new TextEncoder().encode(JSON.stringify(req))) });
+    expect(session.getState().screen).toBe('yesno');
+
+    // Socket drops between rendering the card and the user approving -> offline,
+    // request kept in RAM (so the card stays answerable on reconnect).
+    ws.close();
+    expect(session.getState().screen).toBe('offline');
+    expect(session.getState().request?.id).toBe('req_drop');
+
+    // User approves on the dropped socket: relay.state !== 'open' so sendBox
+    // returns false. We must NOT claim 'sent' and must NOT remember the id.
+    session.approve();
+    expect(session.getState().screen).not.toBe('confirmed');
+    expect(session.getState().result).toBeNull();
+
+    // Resend must still be accepted: reconnect, then the agent re-announces the
+    // SAME id -> the card reopens (id was NOT added to seenIDs).
+    timers.at(-1)!.fn();
+    FakeWS.last!.open();
+    FakeWS.last!.recv({ box: boxSeal(agentKey, new TextEncoder().encode(JSON.stringify(req))) });
+    expect(session.getState().screen).toBe('yesno');
+    expect(session.getState().request?.id).toBe('req_drop');
+  });
+
   it('stores + reports the agent VAPID key on a sealed vapid_key frame', () => {
     FakeWS.last = null;
     const keys: string[] = [];
