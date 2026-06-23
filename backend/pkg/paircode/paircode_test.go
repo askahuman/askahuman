@@ -10,7 +10,7 @@ func TestNewCode(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewCode: %v", err)
 	}
-	// Display form: "XXXX-XXXX" (Len symbols + one separator at the midpoint).
+	// Display form: "XXXXX-XXXXX" (Len symbols + one separator at the midpoint).
 	if len(code) != Len+1 {
 		t.Fatalf("len(code) = %d, want %d", len(code), Len+1)
 	}

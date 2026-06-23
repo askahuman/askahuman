@@ -83,9 +83,11 @@ side (`backend/pkg/paircode/paircode.go` `roomKDF*` and `frontend/src/lib/codege
   optimistic `1e6` guesses/s GPU/ASIC farm needs `2^49.54 / 1e6 ≈ 8.2e8 s ≈ ~26 years` worst
   case (`~13 years` expected) — vastly beyond the 3-min `pairTTL`. The code is void + re-minted
   long before. **Floor holds.**
-- **Precompute `room → code` table:** the full table is `31^10 × 8 bytes ≈ 6.5 PB` of storage
-  **and** `~31^10` Argon2id evaluations to build `≈ ~10 core-millennia`. (Versus the old HKDF
-  table: seconds of compute + a few hundred GB at 39.6 bits.) **Infeasible.**
+- **Precompute `room → code` table:** building the full table is `~31^10 ≈ 8.2e14` Argon2id
+  evaluations — `≈ 26 years` even at the same optimistic `1e6` evals/s farm rate as the
+  single-code brute above (`≈ ~10 million core-years` single-core at a few evals/s/core) —
+  **and** `31^10 × 8 bytes ≈ 6.5 PB` of storage, which is infeasible on storage alone. (Versus
+  the old HKDF table: seconds of compute + a few hundred GB at 39.6 bits.) **Infeasible.**
 
 No param/length tension: both the GPU-within-`pairTTL` floor and the table-infeasibility hold
 at the chosen setting **and** inside the mobile budget. Ship (not a draft-PR situation).

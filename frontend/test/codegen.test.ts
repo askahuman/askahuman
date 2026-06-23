@@ -41,7 +41,7 @@ describe('canonicalizeCode (typed code -> SPAKE2 password)', () => {
   });
 });
 
-describe('formatCodeInput (auto-insert the XXXX-XXXX hyphen as you type)', () => {
+describe('formatCodeInput (auto-insert the XXXXX-XXXXX hyphen as you type)', () => {
   it('shows no hyphen until the first group is full, then auto-inserts it', () => {
     // The hyphen only appears once there is something on its right-hand side.
     expect(formatCodeInput('ABCD')).toBe('ABCD');

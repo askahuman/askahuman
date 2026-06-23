@@ -66,7 +66,7 @@ export function PairScreen({ c, onSubmitCode, error }: PairScreenProps) {
     };
   }, []);
 
-  // onCodeChange formats the typed code to XXXX-XXXX live (the hyphen appears on
+  // onCodeChange formats the typed code to XXXXX-XXXXX live (the hyphen appears on
   // its own — the user never types a dash or space) and restores the caret after
   // the controlled re-render, so the auto-inserted hyphen never bumps the cursor.
   const onCodeChange = (e: React.ChangeEvent<HTMLInputElement>) => {

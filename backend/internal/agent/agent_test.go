@@ -441,7 +441,7 @@ func TestNewPairingDerivesRoomFromCode(t *testing.T) {
 	// Room is a deterministic, one-way function of the canonical code — nothing
 	// is carried in a URL.
 	assert.Len(t, p.RoomID, 16)
-	assert.Contains(t, p.Display, "-", "display form is grouped XXXX-XXXX")
+	assert.Contains(t, p.Display, "-", "display form is grouped XXXXX-XXXXX")
 
 	canon, err := paircode.Canonicalize(p.Display)
 	require.NoError(t, err)
