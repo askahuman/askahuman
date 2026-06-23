@@ -1,166 +1,257 @@
 # ask-a-human
 
-**Let your AI agent ask a human — on your phone.** End-to-end encrypted. No accounts, no database.
+<p align="center">
+  <img src="https://ask-a-human.ai/icons/pager.svg" width="120" alt="ask-a-human pager logo" />
+</p>
 
-> **Zero setup.** Paste one line into your agent and go — no install, no account, no API key, no dependency to wire up.
+<p align="center">
+  <a href="https://www.npmjs.com/package/@askahuman/mcp"><img src="https://img.shields.io/npm/v/@askahuman/mcp?logo=npm&color=39d98a" alt="npm version" /></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-39d98a.svg" alt="MIT license" /></a>
+  <a href="https://github.com/askahuman/askahuman/actions/workflows/release.yml"><img src="https://github.com/askahuman/askahuman/actions/workflows/release.yml/badge.svg" alt="release" /></a>
+  <img src="https://img.shields.io/badge/E2E-encrypted-39d98a" alt="end-to-end encrypted" />
+  <img src="https://img.shields.io/badge/no-database-0b0d13" alt="no database" />
+  <img src="https://img.shields.io/badge/MCP-server-2dd4bf" alt="MCP server" />
+</p>
 
-[![npm](https://img.shields.io/npm/v/@askahuman/mcp?logo=npm)](https://www.npmjs.com/package/@askahuman/mcp)
-[![license](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![release](https://github.com/askahuman/askahuman/actions/workflows/release.yml/badge.svg)](https://github.com/askahuman/askahuman/actions/workflows/release.yml)
+<p align="center"><b>A private pager for your agent loops.</b></p>
 
-The MCP server runs **locally next to your agent** (Cursor / Claude / Codex) and exposes **one tool you
-call — `request_approval`** (plus a read-only `pair_status`) — that **blocks until a human answers**
-(approve / decline / choose / reply) on a phone PWA. It never auto-approves. The **relay** in the middle
-is content-blind: it only ever sees `base64(nonce‖ciphertext)` + which room talks to which. Pairing is a
-[Magic-Wormhole](https://github.com/magic-wormhole/magic-wormhole)-style **SPAKE2** handshake — a short
-code becomes a strong shared key, with no relay MITM. No DB, RAM-only; restart ⇒ re-pair.
+<p align="center">
+  <a href="https://ask-a-human.ai">Website</a> &nbsp;.&nbsp;
+  <a href="https://ask-a-human.ai/app">Phone app</a> &nbsp;.&nbsp;
+  <a href="https://www.npmjs.com/package/@askahuman/mcp">npm</a> &nbsp;.&nbsp;
+  <a href="https://github.com/askahuman/askahuman">Repo</a> &nbsp;.&nbsp;
+  <a href="https://ask-a-human.ai/llms.txt">For agents</a> &nbsp;.&nbsp;
+  <a href="SECURITY.md">Security</a>
+</p>
 
-- Repo: [github.com/askahuman/askahuman](https://github.com/askahuman/askahuman)
-- Website: [ask-a-human.ai](https://ask-a-human.ai) · npm: [`@askahuman/mcp`](https://www.npmjs.com/package/@askahuman/mcp)
-- For agents: [ask-a-human.ai/llms.txt](https://ask-a-human.ai/llms.txt)
+## Your agents run full-auto. Until one needs you.
+
+You run a hundred agents in loops, full permissions, mostly while you are asleep or away from the keyboard. They are not supposed to need you. Then, every so often, **one** of them hits the single step it should not take alone, and it has no way to reach you.
+
+So reach back. `ask-a-human` lets that one agent tap you on the shoulder: it pings your phone and **blocks** until you answer, then unblocks and rolls on. Seconds, not minutes.
+
+> For years, CAPTCHAs made humans prove they are not robots.
+> Now you register **yourself** as a tool your agents call.
+
+**100 agents. One human. One buzz at a time.**
+
+<!-- HERO DEMO (the single biggest virality lever) goes here once recorded: a ~5s loop of
+     terminal blocking on request_approval  ->  iPhone buzz + Yes/No card + tap  ->  terminal unblocks.
+     Then drop in: <p align="center"><img src="https://ask-a-human.ai/demo.gif" width="720" alt="ask-a-human: an agent asks, your phone buzzes, you tap, it continues" /></p> -->
+
+## What lands on your phone
+
+Four things, and that is the whole product.
+
+### 1. Pairing (once)
+
+First run prints a short 8-character code, like `ABCD-2345`. Open the app on your phone, type it, done. It pairs over a Magic-Wormhole-style SPAKE2 handshake. RAM-only, so a restart just means you re-pair.
+
+### 2. Yes / No  `response_kind: "yesno"`
+
+> **Claude Code asks:** Tests pass. Push to main and deploy to production?
+>
+> `[ Approve ]`  `[ Decline ]`
+
+### 3. Multiple choice  `response_kind: "choice"` with `options[]`
+
+> **Codex asks:** Two patches fix the failing test. Which one should I apply?
+>
+> `[ Patch A ]`  `[ Patch B ]`  `[ Neither ]`
+
+### 4. Free-form reply  `response_kind: "text"` with optional `placeholder` / `max_len`
+
+> **Cursor asks:** What should I name the new payments service?
+>
+> _you type a reply_
+
+**It NEVER auto-approves.** A decline, a timeout, or an error is never returned as approved. Silence is not a yes.
+
+## One phone. Every agent.
+
+This is how a hundred agents become one buzz at a time. Pair each agent once and it gets its own chip in a roster strip, labeled by `--name` (say `cursor @ workstation` or `nightly-deploy-bot`) so you always know who is asking. When an agent needs you, its chip lights up with a pulsing red dot and jumps to the front of the strip. Tap it, answer, move on. Pair as many as you want.
+
+## Works with your agents
+
+**Claude Code, Codex, Cursor, Copilot, Gemini** and **any MCP client**.
+
+If it speaks MCP, it can reach you. Same one-line config, zero extra setup.
+
+## Setup in 30 seconds
+
+Zero install. Zero account. Zero API key.
+
+Paste this into your MCP client config (Cursor `~/.cursor/mcp.json`, Claude Desktop `claude_desktop_config.json`, Codex, or any MCP client), then restart the agent.
+
+```json
+{
+  "mcpServers": {
+    "ask-a-human": {
+      "command": "npx",
+      "args": ["-y", "@askahuman/mcp", "serve"]
+    }
+  }
+}
+```
+
+That is it. Here is what happens:
+
+- `npx` fetches one static release binary on first run.
+- It defaults to the hosted relay `wss://ask-a-human.ai/ws` and the PWA at `https://ask-a-human.ai`.
+- The first `request_approval` prints the pairing code to stderr **and** opens a local loopback browser page showing it. The code is never in a URL.
+- Pin `https://ask-a-human.ai/app` to your iPhone home screen as a PWA, then type the code. (On iOS, Web Push only works once the app is installed to the home screen, and wake-ups are best-effort; when you open the app it shows a pending-count badge.)
+
+Running your own relay? Point the agent at it with `--relay <wss-url>` (and `--public-relay <wss-url>` if your phone reaches the relay at a different address). See [self-hosting](#self-hosting).
+
+## The flow
 
 ```
-  AGENT SIDE                    RELAY (kind / GKE)            USER SIDE
- ┌──────────────┐  seal       ┌──────────────────┐  blob   ┌────────────────┐
- │ MCP agent    │ ──────────► │ rooms-of-two WS   │ ──────► │ phone PWA      │
- │ request_     │             │ verbatim forward  │         │ swipe / choose │
- │   approval   │ ◄────────── │ RAM-only, no DB   │ ◄────── │ / reply → seal │
- └──────────────┘   open      └──────────────────┘  blob   └────────────────┘
+1. Agent hits a wall it should not pass alone
+2. The request is sealed in a wormhole
+3. Your phone buzzes
+4. You tap: approve, decline, or reply
+5. The agent unblocks and rolls on
+```
+
+Seconds, not minutes.
+
+## Why I built this
+
+I built this for myself first. The hard part of running agents in bulk was never the work, it was the rare moment one of them needed a judgment call and I wasn't at the keyboard.
+
+I didn't want a dashboard, an account, or another company holding my messages. So it's private by design: everything travels through a magic wormhole, end-to-end encrypted, and the relay in the middle is blind. I don't track anything, there's no database, and I pay for the hosting myself.
+
+No data to sell, no funnel, no catch. I built it because I needed it, and my only goal is for it to spread.
+
+---
+
+## How it works
+
+The MCP server runs **locally** on your machine, on purpose. It is the only party holding the key and the plaintext, so it is never hosted. Only the content-blind relay lives on a server, and it is a dumb pipe.
+
+```
+  AGENT SIDE                    RELAY (content-blind)          YOUR PHONE
+ +--------------+   seal      +------------------+   blob   +----------------+
+ | MCP agent    | ----------> | rooms-of-two WS  | -------> | phone PWA      |
+ | request_     |             | verbatim forward |          | swipe / choose |
+ |   approval   | <---------- | RAM-only, no DB  | <------- | / reply -> seal|
+ +--------------+   open      +------------------+   blob   +----------------+
         the relay sees only ciphertext + which room-id talks to which
 ```
 
-## Quickstart — copy-paste MCP (npx)
+## The MCP tools
 
-Paste into Cursor `~/.cursor/mcp.json`, Claude Desktop `claude_desktop_config.json`, or your Codex MCP config:
-```json
-{ "mcpServers": { "ask-a-human": {
-  "command": "npx",
-  "args": ["-y", "@askahuman/mcp", "serve"]
-}}}
+Three tools. No surprises.
+
+### `request_approval`
+
+Ask a human. **BLOCKS** until they respond. Pass `expires_in_s` to also time out after N seconds; omit it and the call waits indefinitely (until answered, or the connection drops).
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `title` | string | yes | Short card title. |
+| `summary` | string | yes | The question body. |
+| `response_kind` | string | yes | `"yesno"` \| `"choice"` \| `"text"`. |
+| `category` | string | no | Badge. Recognized: `cash` \| `deploy` \| `data` \| `access` \| `other`. Any other value is still shown, just with the neutral `other` color. |
+| `options` | string[] | no | Choices when `response_kind` is `"choice"`. |
+| `placeholder` | string | no | Input hint when `"text"`. |
+| `max_len` | integer | no | Max input length when `"text"`. |
+| `expires_in_s` | integer | no | Countdown seconds before timeout. Omit it and the request never times out on its own. |
+
+**Returns** the shape you asked for: `yesno` gives an `approved` boolean, `choice` gives the selected option, `text` gives the typed reply. A decline comes back as a non-approval; a timeout or transport error is returned as an error the agent can branch on. It never silently proceeds, and never returns approved on failure.
+
+### `pair_status`
+
+Read-only. Reports whether the agent is paired, waiting to pair, or idle (as a short status message). Never returns the code. Does not start pairing (use `start_pairing` for that).
+
+### `start_pairing`
+
+Read-only trigger. Begins pairing with your phone eagerly, instead of waiting for the first `request_approval`. Prints the short code in the agent terminal for you to type into the app; the handshake runs in the background and the tool returns immediately. Returns only non-secret status. The code never appears in the result.
+
+For agents: [`https://ask-a-human.ai/llms.txt`](https://ask-a-human.ai/llms.txt)
+
+## How the crypto works
+
+This is the whole point, so it is built to be boring and verifiable.
+
+- **End-to-end encrypted.** Plaintext only ever exists on your machine and on your phone.
+- **Content-blind relay.** It only ever forwards `base64(nonce‖ciphertext)` plus which room talks to which. It cannot read, log, or forge a decision (replay is blocked separately, by per-request IDs the phone de-dupes on). It is a dumb pipe.
+- **No accounts, no database.** Pairing lives in RAM for the server's lifetime. Restart = re-pair. There is nothing on the relay to breach: no accounts, no database, content-blind. (The real attack surface is your phone's PWA and the pairing channel. See [`SECURITY.md`](SECURITY.md).)
+- **Pairing is a SPAKE2-style PAKE.** A short code becomes a strong shared key. Even if the code is shoulder-surfed, an attacker gets exactly **one** online guess against the live handshake.
+- **App traffic is sealed with NaCl secretbox** (XSalsa20-Poly1305), keyed by the symmetric SPAKE2 session key.
+
+The PAKE is an in-house construction following [RFC 9382](https://www.rfc-editor.org/rfc/rfc9382) over the ristretto255 group ([RFC 9496](https://www.rfc-editor.org/rfc/rfc9496)), Magic-Wormhole-inspired. Go uses [`gtank/ristretto255`](https://github.com/gtank/ristretto255), the PWA uses [`@noble/curves`](https://github.com/paulmillr/noble-curves), and Go to JS interop is pinned by `frontend/test/spake2-interop.mjs`. The short code is the PAKE password: it never reaches the model and never travels in a URL.
+
+Read every line. See [`SECURITY.md`](SECURITY.md) and the ADRs in [`docs/decisions/architecture/`](docs/decisions/architecture/) (start with [`0002_spake2_ristretto255_secretbox.md`](docs/decisions/architecture/0002_spake2_ristretto255_secretbox.md) for the crypto and [`0011_npx_distribution_stdio_local_mcp.md`](docs/decisions/architecture/0011_npx_distribution_stdio_local_mcp.md) for npx/stdio).
+
+## Self-hosting
+
+The server is already local. To point at your own relay, pass `--relay`:
+
+```bash
+npx -y @askahuman/mcp serve --relay <wss-url>
 ```
-No checkout, no build, no flags — the published binary defaults to `wss://ask-a-human.ai/ws` +
-`https://ask-a-human.ai`. The first `request_approval` opens a local browser page showing a short
-pairing **code** (and also prints it to stderr); open the PWA at
-[ask-a-human.ai/app](https://ask-a-human.ai/app) on your phone and **type the code** (RAM-only,
-restart ⇒ re-pair). Override `--relay`/`--public-relay` to self-host.
 
-The MCP server runs **on your machine** (stdio) on purpose: it holds the SPAKE2 key + plaintext, so it is
-never hosted — only the content-blind relay is. See `docs/decisions/architecture/0011`.
+If your phone dials the relay at a different URL than the agent does, add `--public-relay`:
 
-## Security & trust
+```bash
+npx -y @askahuman/mcp serve --relay <wss-url> --public-relay <wss-url>
+```
 
-This is the whole point of the project:
-- **Open-source + self-hostable** — read the code, run your own relay/PWA (`--relay` / `--public-relay`).
-- **End-to-end encrypted** — plaintext only ever exists on your machine and your phone.
-- **Content-blind relay** — it forwards `base64(nonce‖ciphertext)` verbatim and knows only which room-id
-  talks to which. It cannot read, log, or replay your approvals.
-- **No DB, no accounts** — pairing lives in RAM for the server's lifetime; a restart simply means re-pair.
-- **Never auto-approves** — `request_approval` blocks until a real human answers (or it times out).
+Or in your MCP client config:
 
-Found a bug? Report it — see [SECURITY.md](SECURITY.md). I patch and release fast.
+```json
+{
+  "mcpServers": {
+    "ask-a-human": {
+      "command": "npx",
+      "args": ["-y", "@askahuman/mcp", "serve", "--relay", "wss://your-relay/ws"]
+    }
+  }
+}
+```
 
-## Crypto — the magic wormhole (see `docs/decisions/architecture/0002`)
-Pairing borrows [Magic Wormhole](https://github.com/magic-wormhole/magic-wormhole)'s trick: a short,
-human-readable code becomes a strong shared key via a **SPAKE2** PAKE (password-authenticated key
-exchange). A passive *or* active relay can never read or forge the channel — and even if the short code leaks, an
-attacker still gets only **one online guess** against the live handshake. We follow the SPAKE2
-construction of [RFC 9382](https://www.rfc-editor.org/rfc/rfc9382.html) over the **ristretto255** group
-([RFC 9496](https://www.rfc-editor.org/rfc/rfc9496.html)); the protocol glue (transcript, HKDF,
-key-confirmation) is ours, so this is RFC 9382-*style*, not a byte-for-byte implementation. Foundations:
-Abdalla & Pointcheval, *Simple Password-Based Encrypted Key Exchange Protocols* (CT-RSA 2005,
-[doi:10.1007/978-3-540-30574-3_14](https://doi.org/10.1007/978-3-540-30574-3_14)); reference impl:
-[`warner/python-spake2`](https://github.com/warner/python-spake2).
+The `serve` flags are `--relay <wss-url>` (the relay the agent dials), `--public-relay <wss-url>` (the relay the phone dials, when it differs from `--relay`), and `--name <text>` (who is asking, shown on the card). The MCP server still runs locally (it has to: it holds the key and the plaintext). Only the content-blind relay and the static PWA move to your infra. Both are in this repo, MIT-licensed, with deploy manifests under `infra/`.
 
-- **Pairing:** SPAKE2 over ristretto255 — Go uses `gtank/ristretto255`, the PWA uses `@noble/curves`;
-  roles agent = A, phone = B. Go↔JS interop is pinned by `frontend/test/spake2-interop.mjs`.
-- **App traffic:** **`nacl/secretbox`** (XSalsa20-Poly1305) keyed by the SPAKE2 session key (symmetric,
-  so `secretbox` not `box`).
+## Repo layout
 
-## Layout
-| Dir | What |
+| Path | What's inside |
 |---|---|
-| `backend/` | Go relay (`cmd/relay`) + MCP agent (`cmd/agent`); `pkg/spake2`, `pkg/sealedbox`, `pkg/wire` |
-| `frontend/` | Astro 5 + React 19 + Tailwind 4 static PWA (9 screens, service worker, client crypto) |
-| `npm/` | `@askahuman/mcp` wrapper — `postinstall` pulls the matching release binary, `bin/cli.js` execs it |
-| `infra/` | `ctlptl`/`kind` cluster, `ko`/Tilt build, kustomize `base`/`local`/`prod` (GKE) |
-| `docs/` | `plan.md` + `decisions/` (ADRs) — read these first |
+| `backend/` | Go relay (`cmd/relay`) + MCP agent (`cmd/agent`); `pkg/spake2`, `pkg/sealedbox`, `pkg/wire`. |
+| `frontend/` | Astro 5 + React 19 + Tailwind 4 static PWA (the app and the landing); client-side crypto. |
+| `npm/` | `@askahuman/mcp` wrapper: postinstall pulls the matching release binary; `bin/cli.js` execs it. |
+| `infra/` | ctlptl/kind cluster, ko/Tilt build, kustomize base/local/prod (GKE). |
+| `docs/` | `plan.md` + `decisions/` (ADRs). Read these first. |
 
-## Local dev (Tilt + kind)
-Requires Docker, plus `tilt`/`ko`/`ctlptl`/`kind` on `PATH` (`/opt/homebrew/bin`).
-```bash
-make up        # ctlptl cluster + registry, then `tilt up` (interactive UI at :10350)
-# ...or headless:
-make ci-up     # build (ko relay + docker web) → apply infra/local → wait healthy
-```
-Then:
-- Relay: `http://localhost:8080/healthz` · WS `ws://localhost:8080/ws?room=<id>`
-- PWA:   `http://localhost:8081/app`
-- Pair manually: run `./bin/agent pair` (or `serve`) — it prints a short pairing **code**; open the
-  PWA (`http://localhost:8081/app`) and **type the code** to pair, then approvals show up live.
-```bash
-make down      # tilt down + ctlptl delete (tears down the cluster + registry)
-```
+## Dev and tests
 
-### From your iPhone (same Wi-Fi)
-The kind cluster publishes the relay (`:8080`) and PWA (`:8081`) on all interfaces, so they're reachable at
-this Mac's LAN IP. The agent points the phone at the LAN-IP relay; you type the printed code:
-```bash
-make pair                  # auto-detects LAN IP, prints a pairing code, sends one demo request
-#   scripts/pair-lan.sh pair    # just hold pairing open    serve  # MCP server bound to the LAN IP
-```
-Open the PWA at `http://<lan-ip>:8081/app` on the iPhone and **type the printed code** → the PWA pairs over
-SPAKE2 → approve/decline/choose/reply. If the page won't load, allow incoming connections for Docker in
-System Settings → Network → Firewall.
+Local dev runs on Tilt + kind (`make up` / `make ci-up`).
 
-**Plain http caveat (iOS secure-context rule):** over `http://<lan-ip>` the **service worker and Web Push
-are disabled** — pairing (type the code) and all decisions still work.
+| What | Command |
+|---|---|
+| Backend unit tests | `make backend-test` (`go test ./...`) |
+| Backend integration | `go test -tags integration ./...` (in `backend/`) |
+| Frontend unit tests | `bun run test` (in `frontend/`) |
+| SPAKE2 interop | `node test/spake2-interop.mjs` (in `frontend/`) |
+| End-to-end | `make ci-up && make e2e` (live agent + relay-in-kind + real PWA in headless Chromium) |
 
-**Want service worker + push?** Run a local HTTPS proxy (mkcert), trust its CA on the phone once:
-```bash
-make https                 # mkcert cert for the LAN IP + a TLS proxy on :8443 (keep it running)
-HTTPS=1 make pair          # advertises wss://<lan>:8443/ws to the phone; agent still dials plain local
-```
-`make https` prints the `rootCA.pem` path — AirDrop it to the phone, install the profile (Settings →
-General → VPN & Device Management), then enable full trust (Settings → General → About → Certificate Trust
-Settings). After that `https://<lan-ip>:8443/app` is a secure context, so the service worker + push work. The
-agent never needs the cert (it dials the relay over plain local `ws`); only the phone trusts the CA.
+More depth lives in [`docs/`](docs/) (start with `plan.md` and the ADRs).
 
-## Connect an agent from source (register the MCP server)
-Build it: `make backend-build` → `./bin/agent`. Register the launcher (it binds to your LAN IP so a
-phone can pair, and tees the pairing code to a log) as an MCP **stdio** server in your client —
-Cursor `~/.cursor/mcp.json`, Claude Desktop `claude_desktop_config.json`, or Codex MCP config:
-```json
-{ "mcpServers": { "ask-a-human": {
-  "command": "/ABS/PATH/ask-a-human/scripts/mcp-serve.sh"
-}}}
-```
-That exposes one tool — `request_approval(title, category, summary, response_kind, options?,
-placeholder?, max_len?, expires_in_s?)` — which **blocks until the human answers** (or times out;
-never auto-approves). First call pairs: the pairing **code** is shown on an auto-opened local browser
-page (loopback-only; the code is in the page body, never in a URL) **and** printed to the server's
-stderr — **type the code** into the PWA on your phone. Pairing is held in RAM for that server's
-lifetime (no DB); restart ⇒ re-pair.
+## Links
 
-Localhost-only (no phone)? Skip the launcher and point `command` at `./bin/agent` with
-`"args": ["serve", "--relay", "ws://127.0.0.1:8080/ws"]`.
+- Repo: https://github.com/askahuman/askahuman
+- Website: https://ask-a-human.ai
+- App (phone PWA): https://ask-a-human.ai/app
+- npm: https://www.npmjs.com/package/@askahuman/mcp
+- For agents: https://ask-a-human.ai/llms.txt
 
-## Tests
-```bash
-make backend-test                         # go test ./...  (unit, -race)
-( cd backend && go test -tags integration -race ./... )   # hermetic round trip + relay blindness + MCP
-( cd frontend && bunx vitest run )        # 38 PWA/crypto unit tests
-( cd frontend && node test/spake2-interop.mjs )           # Go↔JS SPAKE2 interop
-make ci-up && make e2e                    # LIVE: integration vs kind relay + real PWA in headless Chromium
-```
-`make e2e` proves the whole path with nothing mocked: the MCP agent + relay-in-kind + the real PWA
-(it spawns `agent ask`, drives headless Chromium to approve, asserts the agent gets the sealed decision).
+## Security and license
 
-## Production
-The hosted relay + PWA at **[ask-a-human.ai](https://ask-a-human.ai)** run on a private GKE cluster.
-`infra/prod` (kustomize) defines a `gce` ingress + `ManagedCertificate` + `BackendConfig` (long-lived-WS
-timeout); each `v*` tag builds the `relay`/`web` images and rolls them out keylessly via Workload Identity
-Federation — see [`.github/workflows/deploy.yml`](.github/workflows/deploy.yml). The registry, GCP
-project, and cluster identity live **only** in GitHub Secrets, never in this repo. Prefer your own
-infra? Self-host the relay + PWA and point the agent at them with `--relay` / `--public-relay`.
-</content>
-</invoke>
+- Found something? See [`SECURITY.md`](SECURITY.md).
+- Licensed under [MIT](LICENSE). Read every line, run your own, make it yours.
+
+<p align="center"><b>100 agents. One human. One buzz at a time.</b></p>
+
+<p align="center">
+  <a href="https://ask-a-human.ai">ask-a-human.ai</a>
+</p>
