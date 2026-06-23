@@ -276,23 +276,22 @@ export function ListeningScreen({
           gap: 20,
         }}
       >
-        <div style={{ position: 'relative', width: 78, height: 78, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-          <div style={{ position: 'absolute', inset: 0, borderRadius: '50%', background: c.approve, animation: 'pulse 2.6s ease-out infinite' }} />
-          <div
-            style={{
-              width: 56,
-              height: 56,
-              borderRadius: 17,
-              background: c.surface,
-              border: `1px solid ${c.border}`,
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-            }}
-          >
-            <span style={{ fontWeight: 700, fontSize: 25, color: c.approve }}>?</span>
-          </div>
-        </div>
+        {/* The ask-a-human pager logo, with the landing page's green glow
+            (drop-shadow) and its slow up/down bob. Reduced-motion disables the
+            bob via the [data-testid="listening-pager"] rule in App.tsx. */}
+        <img
+          data-testid="listening-pager"
+          src="/icons/pager.svg"
+          alt=""
+          width={92}
+          height={92}
+          style={{
+            width: 92,
+            height: 92,
+            filter: 'drop-shadow(0 0 32px rgba(57, 217, 138, 0.5))',
+            animation: 'bob 4s ease-in-out infinite',
+          }}
+        />
         <div style={{ textAlign: 'center' }}>
           <div style={{ fontSize: 15, color: c.text }}>
             Listening for requests
