@@ -1,4 +1,4 @@
-// PairScreen is the code-only pairing UI: the user types the 8-char code their
+// PairScreen is the code-only pairing UI: the user types the 10-char code their
 // agent printed into ONE field and submits. The phone derives the relay room
 // from the code alone (App: canonicalizeCode -> roomFromCode); nothing secret is
 // ever placed in a URL. There is no deep link.
@@ -166,7 +166,7 @@ export function PairScreen({ c, onSubmitCode, error }: PairScreenProps) {
           onKeyDown={(e) => {
             if (e.key === 'Enter') submit();
           }}
-          placeholder="ABCD-2345"
+          placeholder="ABCDE-23456"
           // Mobile-friendly: text keyboard, force caps, no auto-mangle.
           inputMode="text"
           autoCapitalize="characters"
@@ -175,7 +175,7 @@ export function PairScreen({ c, onSubmitCode, error }: PairScreenProps) {
           spellCheck={false}
           // No maxLength: the browser would clamp a PASTE (separators included)
           // before onChange runs, dropping real symbols. formatCodeInput already
-          // caps the displayed value at 8 symbols + the one auto-inserted hyphen.
+          // caps the displayed value at 10 symbols + the one auto-inserted hyphen.
           style={{
             marginTop: 9,
             width: '100%',

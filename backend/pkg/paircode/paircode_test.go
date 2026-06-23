@@ -42,12 +42,12 @@ func TestCanonicalize(t *testing.T) {
 		want    string
 		wantErr bool
 	}{
-		{"already canonical", "4F2K9QHR", "4F2K9QHR", false},
-		{"lowercase + hyphen", "4f2k-9qhr", "4F2K9QHR", false},
-		{"spaces around groups", " 4f2k 9qhr ", "4F2K9QHR", false},
-		{"old 6-symbol code too short", "4F2-9KQ", "", true},
-		{"ambiguous char dropped -> short", "4F2K9QH0", "", true}, // 0 not in alphabet
-		{"too long", "4F2K9QHRX", "", true},
+		{"already canonical", "4F2K9QHRXY", "4F2K9QHRXY", false},
+		{"lowercase + hyphen", "4f2k9-qhrxy", "4F2K9QHRXY", false},
+		{"spaces around groups", " 4f2k9 qhrxy ", "4F2K9QHRXY", false},
+		{"old 8-symbol code too short", "4F2K9QHR", "", true},
+		{"ambiguous char dropped -> short", "4F2K9QHRX0", "", true}, // 0 not in alphabet
+		{"too long", "4F2K9QHRXYZ", "", true},
 		{"empty", "", "", true},
 	}
 	for _, tc := range cases {
@@ -70,7 +70,7 @@ func TestCanonicalize(t *testing.T) {
 }
 
 func TestRoomFromCode(t *testing.T) {
-	canon, err := Canonicalize("4f2k-9qhr")
+	canon, err := Canonicalize("4f2k9-qhrxy")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -92,7 +92,7 @@ func TestRoomFromCode(t *testing.T) {
 		t.Fatalf("RoomFromCode not deterministic: %q vs %q", room, again)
 	}
 	// Distinct codes -> distinct rooms (preimage/spread sanity).
-	other, _ := RoomFromCode("ABCDEFGH")
+	other, _ := RoomFromCode("ABCDEFGHJK")
 	if other == room {
 		t.Fatalf("distinct codes collided on room %q", room)
 	}

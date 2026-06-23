@@ -1,6 +1,6 @@
 // payload defines the internal pairing parameters the phone hands a Session.
 //
-// Code-only pairing: the agent prints an 8-char code; the user types it into the
+// Code-only pairing: the agent prints a 10-char code; the user types it into the
 // app; the phone canonicalizes it (codegen.canonicalizeCode), derives the room
 // (codegen.roomFromCode) and the relay URL (codegen.defaultRelayURL), and builds
 // this PairPayload internally. NOTHING secret is ever placed in a URL/hash —
