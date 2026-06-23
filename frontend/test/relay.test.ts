@@ -127,6 +127,16 @@ describe('RelayClient dispatch', () => {
     expect(client.sendBox('BBB')).toBe(true);
     expect(ws().sent).toEqual(['{"pake":"AAA"}', '{"box":"BBB"}']);
   });
+
+  it('send returns false when ws.send throws (half-open socket)', () => {
+    const { client, ws } = newClient();
+    client.connect();
+    ws().open();
+    ws().send = () => {
+      throw new Error('dead socket');
+    };
+    expect(client.sendBox('BBB')).toBe(false);
+  });
 });
 
 describe('RelayClient reconnect', () => {

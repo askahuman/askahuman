@@ -113,6 +113,14 @@ function lenPrefixed(fields: Uint8Array[]): Uint8Array {
   return out;
 }
 
+// mulCT does constant-time scalar mult. multiply() rejects 0 (subgroup
+// contract), so map the astronomically-rare 0 to identity, matching Go's
+// ScalarMult (0*P = identity). Use only for SECRET scalars (x, w); public
+// scalars may keep multiplyUnsafe.
+function mulCT(p: RPoint, s: bigint): RPoint {
+  return s === 0n ? Point.ZERO : p.multiply(s);
+}
+
 /** Handshake runs one side of SPAKE2. Use newA (agent) or newB (phone). */
 export class Handshake {
   readonly role: Role;
@@ -166,9 +174,9 @@ export class Handshake {
 
   private startWith(x: bigint): Uint8Array {
     this.x = x;
-    // msg = x*G + w*mine. multiplyUnsafe accepts a (possibly 0) public scalar.
-    const xG = Point.BASE.multiplyUnsafe(x);
-    const wMine = this.mine.multiplyUnsafe(this.w);
+    // msg = x*G + w*mine; both scalars are secret -> constant-time mulCT.
+    const xG = mulCT(Point.BASE, x);
+    const wMine = mulCT(this.mine, this.w);
     this.msg = xG.add(wMine);
     return this.msg.toBytes();
   }
@@ -182,10 +190,10 @@ export class Handshake {
     if (!this.msg || this.x === undefined) throw new Error('spake2: start not called');
     const peerEl = Point.fromBytes(peerMsg); // canonical decode; throws if invalid
 
-    // K = x*(peerMsg - w*peer).
-    const wPeer = this.peer.multiplyUnsafe(this.w);
+    // K = x*(peerMsg - w*peer); x and w are secret -> constant-time mulCT.
+    const wPeer = mulCT(this.peer, this.w);
     const unblinded = peerEl.subtract(wPeer);
-    const k = unblinded.multiplyUnsafe(this.x);
+    const k = mulCT(unblinded, this.x);
     this.sharedKBytes = k.toBytes();
 
     // Canonical transcript order: A's S then T, regardless of role.

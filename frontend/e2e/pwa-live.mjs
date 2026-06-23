@@ -55,6 +55,14 @@ log(`pairing code captured (${code})`);
 const browser = await chromium.launch();
 const context = await browser.newContext({ ignoreHTTPSErrors: true });
 const page = await context.newPage();
+// CSP regression-guard: any securitypolicyviolation while loading /app fails the run (m6-csp-egress).
+// addInitScript runs before page scripts so load-time violations are captured too.
+await page.addInitScript(() => {
+  window.__cspViolations = [];
+  addEventListener('securitypolicyviolation', (e) => {
+    window.__cspViolations.push(`${e.violatedDirective} blocked ${e.blockedURI || e.sourceFile || 'inline'}`);
+  });
+});
 page.on('console', (m) => { if (m.type() === 'error') console.error('  [pwa console.error]', m.text()); });
 const url = `${WEB_ORIGIN}/app/`;
 log(`pwa: goto ${url}`);
@@ -111,6 +119,8 @@ const decLine = await new Promise((resolve) => {
     else if (Date.now() > deadline) { clearInterval(tick); resolve(''); }
   }, 100);
 });
+// Read the CSP-violation collector while the page is still alive (browser closes next).
+const cspViolations = await page.evaluate(() => window.__cspViolations ?? []).catch(() => []);
 agent.kill('SIGTERM');
 await browser.close();
 
@@ -125,6 +135,8 @@ const ok = (KIND === 'yesno' && r.approved === true)
   || (KIND === 'choice' && r.choice === 'Proceed')
   || (KIND === 'text' && typeof r.text === 'string' && r.text.length > 0);
 if (!ok) fail(`unexpected decision for kind=${KIND}: ${JSON.stringify(dec)}`);
+
+if (cspViolations.length) fail(`CSP regression — securitypolicyviolation fired on /app:\n  ${cspViolations.join('\n  ')}`);
 
 log(`\nPWA LIVE E2E PASSED (kind=${KIND}) — real browser typed the code + approved through the kind relay; screenshot: ${SHOT}`);
 process.exit(0);
