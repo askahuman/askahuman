@@ -33,7 +33,7 @@ Two shapes were considered for "copy-paste MCP":
   the localhost dev defaults. Both stay overridable by `--relay`/`--web` flags.
 
 ## Consequences
-- Adoption is one paste + typing an 8-char code on a phone; no Go toolchain, no checkout, no local relay.
+- Adoption is one paste + typing a 10-char code on a phone; no Go toolchain, no checkout, no local relay.
 - The hosted relay + PWA become a hard dependency of the default install — tracked
   separately. Ref. [[0012_deploy_hosted_relay_pwa]].
 - Channel reach is "anyone with Node". `go install` and a curl installer remain easy

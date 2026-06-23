@@ -25,10 +25,11 @@ import (
 // values; do not change without regenerating the JS expectations.
 const (
 	fixedCode = "4F2-9KQ"
-	// fixedRoomCode pins the code-only room derivation (paircode). It is given in
-	// lowercase WITH a hyphen on purpose so the interop check also exercises
-	// Canonicalize (uppercase + strip separators) Go<->JS, not just RoomFromCode.
-	fixedRoomCode = "4f2k-9qhr"
+	// fixedRoomCode pins the code-only room derivation (paircode). It is a
+	// 10-symbol code given in lowercase WITH a hyphen on purpose so the interop
+	// check also exercises Canonicalize (uppercase + strip separators) Go<->JS,
+	// not just RoomFromCode. Canon "4F2K9QHRXY" -> Argon2id room (ADR 0018).
+	fixedRoomCode = "4f2k9-qhrxy"
 	// xSeed/ySeed are 64-byte uniform seeds for A's x and B's y, reduced mod l.
 	xSeedHex = "11111111111111111111111111111111111111111111111111111111111111112222222222222222222222222222222222222222222222222222222222222222"
 	ySeedHex = "33333333333333333333333333333333333333333333333333333333333333334444444444444444444444444444444444444444444444444444444444444444"

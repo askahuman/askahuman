@@ -1,7 +1,7 @@
 // App is the single React island: it owns the Session state machine and routes
-// it to the nine screens. Pairing is code-only: the agent prints an 8-char code,
+// it to the nine screens. Pairing is code-only: the agent prints a 10-char code,
 // the user opens /app and TYPES it. The phone canonicalizes the code, derives the
-// relay room from it (HKDF, codegen.roomFromCode), and runs SPAKE2 as role B.
+// relay room from it (Argon2id, codegen.roomFromCode), and runs SPAKE2 as role B.
 // NOTHING secret is ever placed in a URL/hash — there is no deep link.
 
 import { useEffect, useRef, useState } from 'react';
@@ -210,7 +210,7 @@ export default function App() {
     try {
       canon = canonicalizeCode(raw);
     } catch {
-      setPairError("that code doesn't look right, check the 8 characters");
+      setPairError("that code doesn't look right, check the 10 characters");
       return;
     }
     try {

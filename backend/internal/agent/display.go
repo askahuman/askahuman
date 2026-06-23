@@ -11,7 +11,7 @@ import (
 const appURL = "https://ask-a-human.ai/app"
 
 // PrintCode writes the human-facing pairing instruction for displayCode (the
-// grouped "XXXX-XXXX" form) to w. Callers pass os.Stderr in production (stdout
+// grouped "XXXXX-XXXXX" form) to w. Callers pass os.Stderr in production (stdout
 // is reserved for MCP JSON-RPC). This is the ONLY channel the code travels on:
 // it is the out-of-band secret and must NEVER appear in an MCP tool result. The
 // room id is intentionally not printed — it is derivable from the code, so

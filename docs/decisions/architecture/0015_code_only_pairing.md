@@ -1,6 +1,6 @@
 # 0015 — Code-only pairing: drop the QR + `#p=`/`?p=` deep link for a typed code
 
-**Status:** accepted · 2026-06-22 · supersedes [0006](0006_pairing_payload_query_for_qr.md), [0009](0009_qr_surfacing.md)
+**Status:** accepted · 2026-06-22 · supersedes [0006](0006_pairing_payload_query_for_qr.md), [0009](0009_qr_surfacing.md) · room derivation amended by [0018](0018_argon2id_room_kdf_and_10_symbol_code.md)
 
 ## Context
 Pairing originally minted a random room + a short code, packed `{r, room, code}` into a
@@ -13,13 +13,19 @@ web origin in a single GET — a residual the relay never sees but the web origi
 The agent mints an 8-char code and **prints it** (stderr); the human opens `/app` and **types
 it**. Nothing secret ever rides a URL, QR, history, or referrer.
 
-- **Code:** 8 symbols of the 31-char Crockford-ish alphabet `23456789ABCDEFGHJKMNPQRSTUVWXYZ`
-  (no 0/O/1/I/L), ~39.6 bits, shown grouped `XXXX-XXXX`. Case- and hyphen-insensitive.
-- **Room derivation (the key idea):** `room = lowercasehex(HKDF-SHA256(canonicalize(code),
-  info="ask-a-human:pair-room:v1")[:8])` → 16 hex, matching the relay's frozen room-id
-  contract. The phone derives the room from the code ALONE, so no payload is needed; the room
-  is a one-way, domain-separated function of the code, so the content-blind relay learns
-  nothing about it. The SAME canonical string feeds both the room KDF and the SPAKE2 password.
+- **Code:** ~~8~~ **10** symbols ([0018](0018_argon2id_room_kdf_and_10_symbol_code.md)) of the
+  31-char Crockford-ish alphabet `23456789ABCDEFGHJKMNPQRSTUVWXYZ` (no 0/O/1/I/L), ~~~39.6~~
+  **~49.5** bits, shown grouped ~~`XXXX-XXXX`~~ **`XXXXX-XXXXX`**. Case- and hyphen-insensitive.
+- **Room derivation (the key idea):** ~~`room = lowercasehex(HKDF-SHA256(canonicalize(code),
+  info="ask-a-human:pair-room:v1")[:8])`~~ now memory-hard **`room =
+  lowercasehex(Argon2id(canonicalize(code), salt="ask-a-human:pair-room:v1", m=19MiB,t=2,p=1)[:8])`**
+  ([0018](0018_argon2id_room_kdf_and_10_symbol_code.md)) → 16 hex, matching the relay's frozen
+  room-id contract. The phone derives the room from the code ALONE, so no payload is needed; the
+  room is a one-way, domain-separated function of the code. (0015 originally claimed the
+  content-blind relay "learns nothing" about the code from the room; **0018 corrects that** — a
+  room-id observer could brute-force the 39.6-bit HKDF room offline / build a reusable
+  `room→code` table, which is why the KDF is now memory-hard and the code is 10 symbols.) The
+  SAME canonical string feeds both the room KDF and the SPAKE2 password.
   Shared, byte-exact Go↔JS contract: `backend/pkg/paircode` + `frontend/src/lib/codegen.ts`
   (`canonicalizeCode`/`roomFromCode`), pinned by `frontend/test/spake2-interop.mjs`.
 - **MCP:** new `start_pairing` tool mints + prints the code (NEVER returns it in the tool
