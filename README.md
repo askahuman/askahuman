@@ -99,7 +99,7 @@ Four things, and that is the whole product. You pair once, then every `request_a
       &nbsp;<b>Claude Code</b><br />
       <sub>2 &nbsp;&middot;&nbsp; YES / NO &nbsp;&middot;&nbsp; <code>response_kind: "yesno"</code></sub>
       <br /><br />
-      Tests pass. Push to <code>main</code> and deploy to production?
+      All tests pass, but this release also runs a migration that drops <code>orders.coupon_code</code> on prod. Ship it?
       <br /><br />
       <code>&#10003; Approve</code> &nbsp; <code>&#10007; Decline</code>
     </td>
@@ -110,18 +110,18 @@ Four things, and that is the whole product. You pair once, then every `request_a
       &nbsp;<b>Codex</b><br />
       <sub>3 &nbsp;&middot;&nbsp; MULTIPLE CHOICE &nbsp;&middot;&nbsp; <code>response_kind: "choice"</code></sub>
       <br /><br />
-      Two patches fix the failing test. Which one should I apply?
+      <code>main</code> has been red for 20 min and 3 deploys are stuck behind it. How do I unblock it?
       <br /><br />
-      <code>Patch A</code> &nbsp; <code>Patch B</code> &nbsp; <code>Neither</code>
+      <code>Revert it</code> &nbsp; <code>Hotfix forward</code> &nbsp; <code>Hold, I'll look</code>
     </td>
     <td valign="top">
       <img src=".github/assets/agents/cursor.svg" width="26" height="26" align="left" alt="" />
       &nbsp;<b>Cursor</b><br />
       <sub>4 &nbsp;&middot;&nbsp; FREE-FORM REPLY &nbsp;&middot;&nbsp; <code>response_kind: "text"</code></sub>
       <br /><br />
-      What should I name the new payments service?
+      A customer is escalating in the support thread and demanding a refund I'm not allowed to approve. How should I reply?
       <br /><br />
-      <i>type a reply&hellip;</i>
+      <i>Type your reply&hellip;</i>
     </td>
   </tr>
 </table>
@@ -144,13 +144,13 @@ This is how a hundred agents become one buzz at a time. Pair each agent once and
 
 Seconds, not minutes.
 
-## Why I built this
+## Why we built this
 
-I built this for myself first. The hard part of running agents in bulk was never the work, it was the rare moment one of them needed a judgment call and I wasn't at the keyboard.
+We built this for ourselves first. The hard part of running agents in bulk was never the work, it was the rare moment one of them needed a judgment call and we weren't at the keyboard.
 
-I didn't want a dashboard, an account, or another company holding my messages. So it's private by design: everything travels through a magic wormhole, end-to-end encrypted, and the relay in the middle is blind. I don't track anything, there's no database, and I pay for the hosting myself.
+We didn't want a dashboard, an account, or another company holding our messages. So it's private by design: everything travels through a magic wormhole, end-to-end encrypted, and the relay in the middle is blind. We don't track anything, there's no database, and we pay for the hosting ourselves.
 
-No data to sell, no funnel, no catch. I built it because I needed it, and my only goal is for it to spread.
+No data to sell, no funnel, no catch. We built it because we needed it, and our only goal is for it to spread.
 
 ---
 
