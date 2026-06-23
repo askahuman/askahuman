@@ -1,4 +1,4 @@
-# 0017 — Verify the downloaded binary's sha256 before install
+# 0019 — Verify the downloaded binary's sha256 before install
 
 **Status:** accepted · 2026-06-23 · refines [0011](0011_npx_distribution_stdio_local_mcp.md)
 

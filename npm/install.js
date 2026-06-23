@@ -145,7 +145,15 @@ function sha256File(file) {
 // Returns "" when neither yields a digest, which the caller treats as failure.
 async function expectedDigest() {
   const pin = process.env.AAH_BINARY_SHA256;
-  if (pin && /^[0-9a-fA-F]{64}$/.test(pin.trim())) return pin.trim().toLowerCase();
+  // A set-but-malformed pin must fail closed, not silently fall back to
+  // checksums.txt — the operator asked to pin, honoring a weaker source instead
+  // would defeat the intent. Only an *unset* pin falls back.
+  if (pin !== undefined && pin !== "") {
+    if (!/^[0-9a-fA-F]{64}$/.test(pin.trim())) {
+      fail("AAH_BINARY_SHA256 set but not a valid 64-hex sha256");
+    }
+    return pin.trim().toLowerCase();
+  }
   const text = await downloadText(`${base}/checksums.txt`);
   return parseChecksum(text, asset);
 }
@@ -174,6 +182,28 @@ function extract(archive, destDir) {
   const line = `${hex}  ${asset}`;
   if (parseChecksum(line, asset) !== hex) throw new Error("parseChecksum self-check failed: match");
   if (parseChecksum(line, "other.tar.gz") !== "") throw new Error("parseChecksum self-check failed: miss");
+})();
+
+// self-check (house style): the redirect host-allowlist must allow github.com +
+// the asset CDN suffix + the configured mirror host, and deny everything else —
+// including a suffix-spoof like "githubusercontent.com.evil.com".
+(() => {
+  for (const h of ["github.com", "objects.githubusercontent.com", "release-assets.githubusercontent.com"]) {
+    if (!hostAllowed(h)) throw new Error(`hostAllowed self-check failed: should allow ${h}`);
+  }
+  for (const h of ["evil.com", "githubusercontent.com.evil.com"]) {
+    if (hostAllowed(h)) throw new Error(`hostAllowed self-check failed: should deny ${h}`);
+  }
+  // mirror host: allowed only while AAH_BINARY_BASEURL points at it; restore env after.
+  const saved = process.env.AAH_BINARY_BASEURL;
+  process.env.AAH_BINARY_BASEURL = "https://mirror.example.com/dl";
+  try {
+    if (!hostAllowed("mirror.example.com")) throw new Error("hostAllowed self-check failed: should allow mirror host");
+    if (hostAllowed("evil.com")) throw new Error("hostAllowed self-check failed: should deny non-mirror host");
+  } finally {
+    if (saved === undefined) delete process.env.AAH_BINARY_BASEURL;
+    else process.env.AAH_BINARY_BASEURL = saved;
+  }
 })();
 
 if (process.env.AAH_SKIP_DOWNLOAD) {
