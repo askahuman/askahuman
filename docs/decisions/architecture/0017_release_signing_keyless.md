@@ -38,13 +38,16 @@ key material is stored or committed — the GitHub Actions OIDC identity is the 
   signing lives in the public Rekor transparency log.
 
 ## Consequences
-- A downloader (and the npm installer, B2) can verify a release is **authentic**, not merely
-  self-consistent: a swapped binary fails `cosign verify-blob` because the attacker cannot re-sign
-  `checksums.txt` under this workflow's OIDC identity. Provenance additionally proves the build source.
-- **Composes with B2 (installer verification).** The installer is the consumer: it fetches
-  `checksums.txt` + `checksums.txt.sigstore.json`, runs `cosign verify-blob`, then verifies the archive
-  sha256 against the now-trusted checksum before extracting. The verification test (good bundle passes,
-  tampered checksum fails) ships with that B2 change, not here.
+- A downloader can verify a release is **authentic**, not merely self-consistent: a swapped binary
+  fails `cosign verify-blob` because the attacker cannot re-sign `checksums.txt` under this workflow's
+  OIDC identity. Provenance additionally proves the build source.
+- **Composes with B2 (installer verification), via a deferred upgrade.** Today B2
+  ([0019](0019_install_checksum_verify.md)) fetches `checksums.txt` and verifies the archive's sha256
+  against it before extract — integrity, but **not** signature authenticity (it does not yet run
+  `cosign verify-blob`). This signing work is what *enables* that upgrade: once shipped, the installer
+  can fetch `checksums.txt.sigstore.json`, run `cosign verify-blob` to establish a **trusted**
+  `checksums.txt`, then pin the archive sha256 to it. That signature-verification step (and its test:
+  good bundle passes, tampered checksum fails) is the deferred B2 follow-up, not part of either change yet.
 - **Deliberate ceilings** (marked in `.goreleaser.yaml`):
   - *Checksum-only signing.* We do not sign each archive individually — the checksum is the single
     anchor B2 needs, and it chains to every archive. Upgrade path: set `artifacts: archive` to sign
