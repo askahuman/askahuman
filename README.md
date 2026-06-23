@@ -1,16 +1,15 @@
 # ask-a-human
 
 <p align="center">
-  <img src="https://ask-a-human.ai/icons/pager.svg" width="120" alt="ask-a-human pager logo" />
+  <img src=".github/assets/pager.svg" width="120" alt="ask-a-human pager logo" />
 </p>
 
 <p align="center">
-  <a href="https://www.npmjs.com/package/@askahuman/mcp"><img src="https://img.shields.io/npm/v/@askahuman/mcp?logo=npm&color=39d98a" alt="npm version" /></a>
-  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-39d98a.svg" alt="MIT license" /></a>
-  <a href="https://github.com/askahuman/askahuman/actions/workflows/release.yml"><img src="https://github.com/askahuman/askahuman/actions/workflows/release.yml/badge.svg" alt="release" /></a>
-  <img src="https://img.shields.io/badge/E2E-encrypted-39d98a" alt="end-to-end encrypted" />
-  <img src="https://img.shields.io/badge/no-database-0b0d13" alt="no database" />
-  <img src="https://img.shields.io/badge/MCP-server-2dd4bf" alt="MCP server" />
+  <a href="https://www.npmjs.com/package/@askahuman/mcp"><img src="https://img.shields.io/npm/v/@askahuman/mcp?style=for-the-badge&logo=npm&logoColor=white&label=npm&color=39d98a" alt="npm version" /></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-39d98a?style=for-the-badge" alt="MIT License" /></a>
+  <img src="https://img.shields.io/badge/E2E-encrypted-39d98a?style=for-the-badge" alt="end-to-end encrypted" />
+  <img src="https://img.shields.io/badge/no-database-2dd4bf?style=for-the-badge" alt="no database" />
+  <img src="https://img.shields.io/badge/MCP-server-2dd4bf?style=for-the-badge" alt="MCP server" />
 </p>
 
 <p align="center"><b>A private pager for your agent loops.</b></p>
@@ -39,44 +38,6 @@ So reach back. `ask-a-human` lets that one agent tap you on the shoulder: it pin
      terminal blocking on request_approval  ->  iPhone buzz + Yes/No card + tap  ->  terminal unblocks.
      Then drop in: <p align="center"><img src="https://ask-a-human.ai/demo.gif" width="720" alt="ask-a-human: an agent asks, your phone buzzes, you tap, it continues" /></p> -->
 
-## What lands on your phone
-
-Four things, and that is the whole product.
-
-### 1. Pairing (once)
-
-First run prints a short 8-character code, like `ABCD-2345`. Open the app on your phone, type it, done. It pairs over a Magic-Wormhole-style SPAKE2 handshake. RAM-only, so a restart just means you re-pair.
-
-### 2. Yes / No  `response_kind: "yesno"`
-
-> **Claude Code asks:** Tests pass. Push to main and deploy to production?
->
-> `[ Approve ]`  `[ Decline ]`
-
-### 3. Multiple choice  `response_kind: "choice"` with `options[]`
-
-> **Codex asks:** Two patches fix the failing test. Which one should I apply?
->
-> `[ Patch A ]`  `[ Patch B ]`  `[ Neither ]`
-
-### 4. Free-form reply  `response_kind: "text"` with optional `placeholder` / `max_len`
-
-> **Cursor asks:** What should I name the new payments service?
->
-> _you type a reply_
-
-**It NEVER auto-approves.** A decline, a timeout, or an error is never returned as approved. Silence is not a yes.
-
-## One phone. Every agent.
-
-This is how a hundred agents become one buzz at a time. Pair each agent once and it gets its own chip in a roster strip, labeled by `--name` (say `cursor @ workstation` or `nightly-deploy-bot`) so you always know who is asking. When an agent needs you, its chip lights up with a pulsing red dot and jumps to the front of the strip. Tap it, answer, move on. Pair as many as you want.
-
-## Works with your agents
-
-**Claude Code, Codex, Cursor, Copilot, Gemini** and **any MCP client**.
-
-If it speaks MCP, it can reach you. Same one-line config, zero extra setup.
-
 ## Setup in 30 seconds
 
 Zero install. Zero account. Zero API key.
@@ -102,6 +63,74 @@ That is it. Here is what happens:
 - Pin `https://ask-a-human.ai/app` to your iPhone home screen as a PWA, then type the code. (On iOS, Web Push only works once the app is installed to the home screen, and wake-ups are best-effort; when you open the app it shows a pending-count badge.)
 
 Running your own relay? Point the agent at it with `--relay <wss-url>` (and `--public-relay <wss-url>` if your phone reaches the relay at a different address). See [self-hosting](#self-hosting).
+
+## Works with your agents
+
+<table>
+  <tr>
+    <td align="center" width="16%"><img src=".github/assets/agents/claude.svg" width="30" height="30" alt="Claude Code" /><br /><sub>Claude Code</sub></td>
+    <td align="center" width="16%"><img src=".github/assets/agents/codex.svg" width="30" height="30" alt="Codex" /><br /><sub>Codex</sub></td>
+    <td align="center" width="16%"><img src=".github/assets/agents/cursor.svg" width="30" height="30" alt="Cursor" /><br /><sub>Cursor</sub></td>
+    <td align="center" width="16%"><img src=".github/assets/agents/copilot.svg" width="30" height="30" alt="Copilot" /><br /><sub>Copilot</sub></td>
+    <td align="center" width="16%"><img src=".github/assets/agents/gemini.svg" width="30" height="30" alt="Gemini" /><br /><sub>Gemini</sub></td>
+    <td align="center" width="16%"><img src=".github/assets/agents/mcp.svg" width="30" height="30" alt="Any MCP client" /><br /><sub><b>Any MCP client</b></sub></td>
+  </tr>
+</table>
+
+If it speaks MCP, it can reach you. Same one-line config, zero extra setup.
+
+## What lands on your phone
+
+Four things, and that is the whole product. You pair once, then every `request_approval` blocks the agent until you answer.
+
+<table>
+  <tr>
+    <td width="50%" valign="top">
+      <img src=".github/assets/pager.svg" width="26" height="26" align="left" alt="" />
+      &nbsp;<b>New agent</b><br />
+      <sub>1 &nbsp;&middot;&nbsp; PAIRING</sub>
+      <br /><br />
+      Open <code>ask-a-human.ai/app</code> on your phone and type the 8-character code it printed.
+      <br /><br />
+      <code>A B C D&nbsp; - &nbsp;2 3 4 5</code>
+    </td>
+    <td width="50%" valign="top">
+      <img src=".github/assets/agents/claude.svg" width="26" height="26" align="left" alt="" />
+      &nbsp;<b>Claude Code</b><br />
+      <sub>2 &nbsp;&middot;&nbsp; YES / NO &nbsp;&middot;&nbsp; <code>response_kind: "yesno"</code></sub>
+      <br /><br />
+      Tests pass. Push to <code>main</code> and deploy to production?
+      <br /><br />
+      <code>&#10003; Approve</code> &nbsp; <code>&#10007; Decline</code>
+    </td>
+  </tr>
+  <tr>
+    <td valign="top">
+      <img src=".github/assets/agents/codex.svg" width="26" height="26" align="left" alt="" />
+      &nbsp;<b>Codex</b><br />
+      <sub>3 &nbsp;&middot;&nbsp; MULTIPLE CHOICE &nbsp;&middot;&nbsp; <code>response_kind: "choice"</code></sub>
+      <br /><br />
+      Two patches fix the failing test. Which one should I apply?
+      <br /><br />
+      <code>Patch A</code> &nbsp; <code>Patch B</code> &nbsp; <code>Neither</code>
+    </td>
+    <td valign="top">
+      <img src=".github/assets/agents/cursor.svg" width="26" height="26" align="left" alt="" />
+      &nbsp;<b>Cursor</b><br />
+      <sub>4 &nbsp;&middot;&nbsp; FREE-FORM REPLY &nbsp;&middot;&nbsp; <code>response_kind: "text"</code></sub>
+      <br /><br />
+      What should I name the new payments service?
+      <br /><br />
+      <i>type a reply&hellip;</i>
+    </td>
+  </tr>
+</table>
+
+**It NEVER auto-approves.** A decline, a timeout, or an error is never returned as approved. Silence is not a yes.
+
+## One phone. Every agent.
+
+This is how a hundred agents become one buzz at a time. Pair each agent once and it gets its own chip in a roster strip, labeled by `--name` (say `cursor @ workstation` or `nightly-deploy-bot`) so you always know who is asking. When an agent needs you, its chip lights up with a pulsing red dot and jumps to the front of the strip. Tap it, answer, move on. Pair as many as you want.
 
 ## The flow
 
