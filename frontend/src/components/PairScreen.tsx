@@ -129,7 +129,9 @@ export function PairScreen({ c, onSubmitCode, error }: PairScreenProps) {
       style={{
         height: '100dvh',
         width: '100%',
-        background: c.bg,
+        // Transparent so the shared starfield/aurora (SpaceBackground) shows
+        // through behind the pairing UI, matching the marketing landing.
+        background: 'transparent',
         color: c.text,
         fontFamily: MONO,
         // Safe-area inset so the title clears the iOS notch in standalone PWA.
@@ -211,7 +213,7 @@ export function PairScreen({ c, onSubmitCode, error }: PairScreenProps) {
           >
             <span style={{ width: 8, height: 8, borderRadius: '50%', background: c.approve, animation: 'blink 1.4s infinite' }} />
             {waitedTooLong
-              ? 'no agent on this code yet — check the code or ask for a fresh one'
+              ? 'no agent on this code yet, check the code or ask for a fresh one'
               : 'waiting for your agent…'}
           </div>
         )}
@@ -299,7 +301,7 @@ export function PairScreen({ c, onSubmitCode, error }: PairScreenProps) {
       )}
 
       <div style={{ fontFamily: SANS, fontSize: 13, color: c.faint, textAlign: 'center', lineHeight: 1.55 }}>
-        The code is the key — it derives the room and encrypts the channel. The relay can't read it.
+        The code is the key. It derives the room and encrypts the channel, and the relay can't read it.
       </div>
     </div>
   );

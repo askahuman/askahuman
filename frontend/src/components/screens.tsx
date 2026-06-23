@@ -37,7 +37,9 @@ function Frame({ c, children, style }: { c: Palette; children: React.ReactNode; 
       style={{
         height: '100dvh',
         width: '100%',
-        background: c.bg,
+        // Transparent so the shared starfield/aurora (SpaceBackground, fixed at
+        // z-0 behind the app) shows through; cards keep their own opaque surfaces.
+        background: 'transparent',
         color: c.text,
         fontFamily: MONO,
         position: 'relative',
@@ -64,7 +66,7 @@ export function LockScreen({ c, agent, onOpen }: { c: Palette; agent: string; on
         alignItems: 'center',
         padding: 'calc(100px + env(safe-area-inset-top)) 22px 44px',
         boxSizing: 'border-box',
-        background: `radial-gradient(125% 80% at 50% 0%, ${c.surface2} 0%, ${c.bg} 68%)`,
+        background: 'transparent',
       }}
     >
       <div style={{ fontSize: 13, letterSpacing: 2, color: c.muted, textTransform: 'uppercase' }}>
@@ -152,7 +154,7 @@ export function HomeScreen({ c, unread, onOpen }: { c: Palette; unread: number; 
         boxSizing: 'border-box',
         display: 'flex',
         flexDirection: 'column',
-        background: `radial-gradient(125% 90% at 50% 0%, ${c.surface2} 0%, ${c.bg} 72%)`,
+        background: 'transparent',
       }}
     >
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4,1fr)', gap: '24px 16px' }}>
@@ -848,7 +850,7 @@ export function OfflineScreen({ c, attempt, onRetry }: { c: Palette; attempt: nu
         <div>
           <div style={{ fontSize: 16, color: c.text }}>Reconnecting…</div>
           <div style={{ fontFamily: SANS, fontSize: 13.5, color: c.muted, marginTop: 9, lineHeight: 1.55, maxWidth: 250 }}>
-            The relay or your agent is offline. Retrying — attempt {attempt}.
+            The relay or your agent is offline. Retrying, attempt {attempt}.
           </div>
         </div>
       </div>
@@ -865,7 +867,7 @@ export function OfflineScreen({ c, attempt, onRetry }: { c: Palette; attempt: nu
       >
         <span style={{ color: c.approve, fontSize: 13, marginTop: 1 }}>✓</span>
         <span style={{ fontFamily: SANS, fontSize: 13, color: c.muted, lineHeight: 1.55 }}>
-          No answer is sent while you're offline. Your agent keeps waiting — nothing is auto-approved.
+          No answer is sent while you're offline. Your agent keeps waiting. Nothing is auto-approved.
         </span>
       </div>
       <button

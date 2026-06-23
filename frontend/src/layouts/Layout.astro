@@ -39,21 +39,14 @@ const THEME_COLOR = "#08090c";
     <meta name="mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
-    <link rel="icon" type="image/svg+xml" href="/icons/icon.svg" />
+    <link rel="icon" type="image/svg+xml" href="/icons/pager-favicon.svg" />
     <link rel="apple-touch-icon" href="/icons/icon-192.png" />
     {pwaInfo && <Fragment set:html={pwaInfo.webManifest.linkTag} />}
 
-    <!-- Anti-FOUC: apply the dark class before paint (mirror the reference app). -->
-    <script is:inline>
-      (function () {
-        const theme = localStorage.getItem("theme");
-        if (theme === "light") {
-          document.documentElement.classList.remove("dark");
-        } else {
-          document.documentElement.classList.add("dark");
-        }
-      })();
-    </script>
+    <!-- The app is dark-only: <html class="dark"> above pins it before paint (no
+         FOUC). No theme-toggle script here: a <script is:inline> would be blocked
+         by the strict CSP (is:inline scripts aren't hashed into script-src), and
+         nothing in the app ever stores a light theme. Mirrors LandingLayout. -->
   </head>
   <body class="app-shell min-h-screen overflow-x-hidden">
     <slot />

@@ -1,11 +1,27 @@
 ---
 import Layout from "../layouts/Layout.astro";
 import App from "../components/App.tsx";
+import SpaceBackground from "../components/SpaceBackground.astro";
 ---
 
 <Layout>
+  <!-- Same animated starfield/aurora as the marketing landing, fixed behind the
+       app. The React screens render their cards transparently over it (in dark;
+       see SpaceBackground, whose cosmic layers only paint under html.dark). -->
+  <SpaceBackground />
+
   <!-- Full-viewport PWA: the React island owns all nine screens + crypto/relay.
-       client:only — the user types the pairing code and WebCrypto runs in the
-       browser; there is nothing to server-render. -->
-  <App client:only="react" />
+       client:only, so the user types the pairing code and WebCrypto runs in the
+       browser; there is nothing to server-render. The relative z-10 wrapper lifts
+       the whole app above the fixed background layers (which sit at z-0). -->
+  <div class="app-content">
+    <App client:only="react" />
+  </div>
 </Layout>
+
+<style>
+  .app-content {
+    position: relative;
+    z-index: 10;
+  }
+</style>

@@ -41,13 +41,15 @@ const VAPID_KEY =
   (import.meta as unknown as { env?: Record<string, string> }).env?.PUBLIC_VAPID_KEY ?? '';
 
 function usePalette(): Palette {
+  // Dark-only, to match the dark-only marketing site and the shared cosmic
+  // background (SpaceBackground paints the starfield under html.dark). We do NOT
+  // follow prefers-color-scheme: a light React palette over the fixed dark
+  // starfield would put white cards on a dark-green sky. Light stays reachable
+  // only via an explicit stored 'theme' (no UI sets it today).
   const [isDark, setIsDark] = useState(true);
   useEffect(() => {
     try {
-      const stored = localStorage.getItem('theme');
-      if (stored === 'light') setIsDark(false);
-      else if (stored === 'dark') setIsDark(true);
-      else if (window.matchMedia?.('(prefers-color-scheme: light)').matches) setIsDark(false);
+      if (localStorage.getItem('theme') === 'light') setIsDark(false);
     } catch {
       /* default dark */
     }
@@ -207,7 +209,7 @@ export default function App() {
     try {
       canon = canonicalizeCode(raw);
     } catch {
-      setPairError("that code doesn't look right — check the 8 characters");
+      setPairError("that code doesn't look right, check the 8 characters");
       return;
     }
     try {
@@ -220,7 +222,7 @@ export default function App() {
       // Unreachable in practice (PairScreen validates the relay URL before
       // submit), but a non-WS relay scheme would throw out of roomURL here —
       // degrade to an inline error instead of an uncaught handler exception.
-      setPairError('could not connect — check the relay URL in Advanced settings');
+      setPairError('could not connect, check the relay URL in Advanced settings');
     }
   };
 
