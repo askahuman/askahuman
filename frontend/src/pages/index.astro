@@ -80,33 +80,35 @@ const cards: Card[] = [
     kind: "yesno",
     agent: "Claude Code",
     icon: iconByName["Claude Code"],
-    sub: "needs a yes or no",
-    body: "Tests pass. Push to `main` and deploy to production?",
+    sub: "stuck on a risky deploy",
+    body: "All tests pass, but this release also runs a migration that drops `orders.coupon_code` on prod. Ship it?",
     actions: ["Approve", "Decline"],
   },
   {
     kind: "choice",
     agent: "Codex",
     icon: iconByName["Codex"],
-    sub: "needs you to choose",
-    body: "Two patches fix the failing test. Which one should I apply?",
-    actions: ["Patch A", "Patch B", "Neither"],
+    sub: "blocked, needs your call",
+    body: "`main` has been red for 20 min and 3 deploys are stuck behind it. How do I unblock it?",
+    actions: ["Revert it", "Hotfix forward", "Hold, I'll look"],
   },
   {
     kind: "text",
     agent: "Cursor",
     icon: iconByName["Cursor"],
-    sub: "needs a quick reply",
-    body: "What should I name the new payments service?",
-    placeholder: "Type a reply…",
+    sub: "needs your words",
+    body: "A customer is escalating in the support thread and demanding a refund I'm not allowed to approve. How should I reply?",
+    placeholder: "Type your reply…",
   },
 ];
 
-// Tone of an action pill: approve/choose -> green, decline/hold -> red, else neutral.
+// Tone of an action pill: the explicit yes/no answers are colored (approve ->
+// green, decline -> red); every other label (the open-ended choices) stays
+// neutral grey so no single option is implied to be "the safe one".
 const actionTone = (label: string): "approve" | "decline" | "neutral" => {
   const l = label.toLowerCase();
-  if (l.startsWith("approve") || l.startsWith("choose")) return "approve";
-  if (l.startsWith("decline") || l.startsWith("hold")) return "decline";
+  if (l.startsWith("approve")) return "approve";
+  if (l.startsWith("decline")) return "decline";
   return "neutral";
 };
 
@@ -181,9 +183,21 @@ const features = [
 
       <div class="rise rise-5 mt-9 flex flex-col items-center justify-center gap-3 sm:flex-row">
         <a
+          href={REPO_URL}
+          target="_blank"
+          rel="noopener noreferrer"
+          class="inline-flex w-full items-center justify-center gap-2 rounded-xl border border-border bg-surface/50 px-6 py-3.5 font-sans text-sm font-semibold text-text backdrop-blur transition hover:bg-surface sm:w-auto"
+        >
+          <svg viewBox="0 0 16 16" aria-hidden="true" class="size-4 fill-current">
+            <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0 0 16 8c0-4.42-3.58-8-8-8z"></path>
+          </svg>
+          GitHub
+        </a>
+        <a
           href={APP_URL}
           class="inline-flex w-full items-center justify-center gap-2 rounded-xl bg-approve px-6 py-3.5 font-sans text-sm font-semibold text-page shadow-lg shadow-approve/25 transition hover:brightness-110 sm:w-auto"
         >
+          <span aria-hidden="true">📱</span>
           Open the app
         </a>
         <a
@@ -192,21 +206,10 @@ const features = [
           aria-live="polite"
           class="group inline-flex w-full items-center justify-center gap-2 rounded-xl border border-border bg-surface/50 px-6 py-3.5 font-sans text-sm font-semibold text-text backdrop-blur transition hover:bg-surface sm:w-auto"
         >
-          <svg viewBox="0 0 16 16" aria-hidden="true" class="size-4 fill-current">
-            <path d="M5.5 1.5A1.5 1.5 0 0 1 7 0h2a1.5 1.5 0 0 1 1.5 1.5H11A1.5 1.5 0 0 1 12.5 3v.5H13A1.5 1.5 0 0 1 14.5 5v9A1.5 1.5 0 0 1 13 15.5H6A1.5 1.5 0 0 1 4.5 14V13.5H4A1.5 1.5 0 0 1 2.5 12V3A1.5 1.5 0 0 1 4 1.5h1.5ZM6 3.5V12a0 0 0 0 0 0 0h7V5H6a1.5 1.5 0 0 1-1.5-1.5V3H4v9h.5V5A1.5 1.5 0 0 1 6 3.5Z"></path>
-          </svg>
+          <span aria-hidden="true">📋</span>
           <span data-copy-label>Copy the config</span>
         </a>
       </div>
-
-      <p class="rise rise-5 mt-5 text-xs text-muted">
-        or
-        <a
-          href={REPO_URL}
-          class="underline decoration-border underline-offset-4 transition hover:text-text"
-          >read every line on GitHub</a
-        >. It's open-source.
-      </p>
     </section>
 
     <!-- ───────────────────────── Setup (how to set it up) ───────────────────────── -->
@@ -217,10 +220,8 @@ const features = [
         </h2>
         <p class="mx-auto mt-3 max-w-2xl text-pretty text-muted">
           No account, no API key, nothing to install or build. Drop this into your
-          <code class="rounded bg-surface px-1.5 py-0.5 text-sm text-text">mcp.json</code>,
-          restart your agent, and your phone is now a tool it can call.
-          <code class="rounded bg-surface px-1.5 py-0.5 text-sm text-text">npx</code> pulls
-          the server and runs it locally, right next to your agent.
+          <code class="rounded bg-surface px-1.5 py-0.5 text-sm text-text">mcp.json</code>
+          and your phone is now a tool your agent can call.
         </p>
       </div>
 
@@ -244,11 +245,6 @@ const features = [
           class="overflow-x-auto px-5 py-5 text-sm leading-relaxed text-text"
         ><code id="mcp-code">{mcpSnippet}</code></pre>
       </div>
-
-      <p class="mt-4 text-center text-xs text-muted">
-        First request opens a local page with a short pairing code. Open
-        <span class="text-text">ask-a-human.ai/app</span> on your phone and type it. Done.
-      </p>
 
       <!-- Copy-to-clipboard, shared by the hero/footer CTAs + the code-block button.
            Astro hashes this inline <script> into the build-synced CSP (script-src),
@@ -328,9 +324,8 @@ const features = [
             This is what lands on your phone.
           </h2>
           <p class="mt-3 text-pretty text-muted">
-            You pair once. After that, every <code class="rounded bg-surface px-1.5 py-0.5 text-sm text-text"
-              >request_approval</code
-            > blocks your agent until you answer: yes/no, a choice, or a reply. It never auto-approves.
+            Pair once. After that, when an agent can't decide on its own, it
+            rings your phone and waits: a yes or no, a choice, or a quick reply.
           </p>
         </div>
 
@@ -582,15 +577,28 @@ const features = [
     <!-- ───────────────────────── Footer CTA ───────────────────────── -->
     <footer class="border-t border-border-soft">
       <div class="mx-auto flex max-w-5xl flex-col items-center gap-6 px-6 py-16 text-center">
-        <h2 class="flex max-w-xl flex-wrap items-center justify-center gap-x-2 font-sans text-2xl font-semibold tracking-tight text-text">
-          Your agents are already running. Give them a way to ask.
-          <img src={PAGER} alt="" width="28" height="28" class="inline-block size-7" />
+        <h2 class="max-w-xl font-sans text-2xl font-semibold tracking-tight text-text">
+          Your agents are already running.<br />
+          Give them a way to ask.
+          <img src={PAGER} alt="" width="28" height="28" class="inline-block size-7 align-middle" />
         </h2>
         <div class="flex flex-col items-center gap-3 sm:flex-row">
           <a
-            href={APP_URL}
-            class="inline-flex items-center justify-center rounded-xl bg-approve px-6 py-3 font-sans text-sm font-semibold text-page transition hover:brightness-110"
+            href={REPO_URL}
+            target="_blank"
+            rel="noopener noreferrer"
+            class="inline-flex items-center justify-center gap-2 rounded-xl border border-border bg-surface/40 px-6 py-3 font-sans text-sm font-semibold text-text backdrop-blur transition hover:bg-surface"
           >
+            <svg viewBox="0 0 16 16" aria-hidden="true" class="size-4 fill-current">
+              <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0 0 16 8c0-4.42-3.58-8-8-8z"></path>
+            </svg>
+            GitHub
+          </a>
+          <a
+            href={APP_URL}
+            class="inline-flex items-center justify-center gap-2 rounded-xl bg-approve px-6 py-3 font-sans text-sm font-semibold text-page transition hover:brightness-110"
+          >
+            <span aria-hidden="true">📱</span>
             Open the app
           </a>
           <a
@@ -599,6 +607,7 @@ const features = [
             aria-live="polite"
             class="inline-flex items-center justify-center gap-2 rounded-xl border border-border bg-surface/40 px-6 py-3 font-sans text-sm font-semibold text-text backdrop-blur transition hover:bg-surface"
           >
+            <span aria-hidden="true">📋</span>
             <span data-copy-label>Copy the config</span>
           </a>
         </div>
