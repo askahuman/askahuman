@@ -262,3 +262,40 @@ func TestPerIPCapRejected(t *testing.T) {
 		assert.Equal(t, http.StatusServiceUnavailable, resp.StatusCode)
 	}
 }
+
+// TestClientIPExtraction exercises the per-IP cap key derivation directly (no
+// HTTP server): when trustProxy is off, RemoteAddr wins and any client XFF is
+// ignored; when on, the rightmost (trusted-LB-appended) XFF hop wins, never a
+// leftmost client-spoofable one. Toggles the package-level trustProxy with
+// save/restore (mirrors the maxConnsPerIP pattern above).
+func TestClientIPExtraction(t *testing.T) {
+	cases := []struct {
+		name   string
+		trust  bool
+		remote string
+		xff    string // "" => header absent
+		want   string
+	}{
+		{"no-trust ignores absent XFF", false, "1.2.3.4:5678", "", "1.2.3.4"},
+		{"no-trust ignores present XFF", false, "1.2.3.4:5678", "9.9.9.9", "1.2.3.4"},
+		{"trust single hop", true, "10.0.0.1:5678", "9.9.9.9", "9.9.9.9"},
+		{"trust rightmost wins over leftmost spoof", true, "10.0.0.1:0", "spoofed, 8.8.8.8, 9.9.9.9", "9.9.9.9"},
+		{"trust falls back when XFF unparseable", true, "10.0.0.1:5678", "not-an-ip", "10.0.0.1"},
+		{"trust falls back on empty XFF", true, "10.0.0.1:5678", "", "10.0.0.1"},
+		{"trust trims whitespace", true, "10.0.0.1:5678", "  9.9.9.9  ", "9.9.9.9"},
+		{"trust tolerates host:port hop", true, "10.0.0.1:5678", "9.9.9.9:443", "9.9.9.9"},
+		{"no-trust RemoteAddr without port", false, "1.2.3.4", "", "1.2.3.4"},
+	}
+	orig := trustProxy
+	t.Cleanup(func() { trustProxy = orig })
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			trustProxy = tc.trust
+			req := &http.Request{RemoteAddr: tc.remote, Header: http.Header{}}
+			if tc.xff != "" {
+				req.Header.Set("X-Forwarded-For", tc.xff)
+			}
+			assert.Equal(t, tc.want, clientIP(req))
+		})
+	}
+}
