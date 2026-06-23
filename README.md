@@ -24,7 +24,7 @@
   <a href="SECURITY.md">Security</a>
 </p>
 
-## Your agents run full-auto. Until one needs you.
+## Your agents run full-auto in loops. Until one needs you.
 
 You run a hundred agents in loops, full permissions, mostly while you are asleep or away from the keyboard. They are not supposed to need you. Then, every so often, **one** of them hits the single step it should not take alone, and it has no way to reach you.
 
