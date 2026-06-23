@@ -279,6 +279,10 @@ More depth lives in [`docs/`](docs/) (start with `plan.md` and the ADRs).
 - Found something? See [`SECURITY.md`](SECURITY.md).
 - Licensed under [MIT](LICENSE). Read every line, run your own, make it yours.
 
+<p align="center">
+  <img src=".github/assets/pager.svg" width="120" alt="ask-a-human pager logo" />
+</p>
+
 <p align="center"><b>100 agents. One human. One buzz at a time.</b></p>
 
 <p align="center">
