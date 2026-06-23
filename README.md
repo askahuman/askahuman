@@ -90,9 +90,9 @@ Four things, and that is the whole product. You pair once, then every `request_a
       &nbsp;<b>New agent</b><br />
       <sub>1 &nbsp;&middot;&nbsp; PAIRING</sub>
       <br /><br />
-      Open <code>ask-a-human.ai/app</code> on your phone and type the 8-character code it printed.
+      Open <code>ask-a-human.ai/app</code> on your phone and type the 10-character code it printed.
       <br /><br />
-      <code>A B C D&nbsp; - &nbsp;2 3 4 5</code>
+      <code>A B C D E&nbsp; - &nbsp;2 3 4 5 6</code>
     </td>
     <td width="50%" valign="top">
       <img src=".github/assets/agents/claude.svg" width="26" height="26" align="left" alt="" />
