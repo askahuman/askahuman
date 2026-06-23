@@ -10,6 +10,8 @@ on:
 
 permissions:
   contents: write # GoReleaser creates the GitHub Release
+  id-token: write # keyless cosign signing + SLSA provenance (sigstore OIDC)
+  attestations: write # actions/attest-build-provenance writes attestations
 
 jobs:
   release:
@@ -29,6 +31,9 @@ jobs:
           node-version: "20"
           registry-url: "https://registry.npmjs.org"
 
+      - name: Install cosign
+        uses: sigstore/cosign-installer@7e8b541eb2e61bf99390e1afd4be13a184e9ebc5 # v3.10.1
+
       - name: GoReleaser (build + GitHub Release)
         uses: goreleaser/goreleaser-action@e435ccd777264be153ace6237001ef4d979d3a7a # v6
         with:
@@ -36,6 +41,11 @@ jobs:
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
+        with:
+          subject-path: "dist/ask-a-human_*.tar.gz,dist/ask-a-human_*.zip"
 
       - name: Publish npm package
         working-directory: npm
