@@ -27,7 +27,10 @@ import {
 import { type Palette, dark, light } from './theme.ts';
 
 // Keyframes used by the inline-styled screens (mirror the mockup <style>).
-const KEYFRAMES = `
+// Exported so test/csp-keyframes.test.ts can pin its sha256 against the CSP
+// style-src hash in astro.config.mjs (the runtime <style>{KEYFRAMES}</style>
+// island can't be hashed by Astro at build time). ref. csp-keyframes.test.ts.
+export const KEYFRAMES = `
 @keyframes blink { 0%,100% { opacity: 1; } 50% { opacity: 0; } }
 @keyframes pulse { 0% { transform: scale(0.7); opacity: 0.5; } 80%,100% { transform: scale(1.6); opacity: 0; } }
 @keyframes spin { to { transform: rotate(360deg); } }
