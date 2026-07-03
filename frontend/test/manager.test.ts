@@ -197,6 +197,47 @@ describe('SessionManager', () => {
     expect(d).toEqual({ kind: 'decision', id: 'rb', result: { approved: true } });
   });
 
+  it('re-sends the retained decision when the agent re-announces an answered id (lost decision)', () => {
+    const m = newManager();
+    const room = 'aaaa9999bbbb0000';
+    m.add(payload(room));
+    const { ws, agentKey } = pair(room);
+
+    ws.recv(sealReq(agentKey, yesno('r1')));
+    expect(m.activeState().screen).toBe('yesno');
+    m.approve();
+    const sentBefore = ws.sent.filter((f) => typeof f.box === 'string').length;
+
+    // The decision was written into a half-open socket and lost; the agent is
+    // still asking, so it re-announces the same id after the phone reconnects.
+    ws.recv(sealReq(agentKey, yesno('r1')));
+
+    // The card is NOT reopened (the human already answered)...
+    expect(m.activeState().request).toBeNull();
+    // ...and the retained decision is re-sent, sealed for the agent.
+    const boxes = ws.sent.filter((f) => typeof f.box === 'string');
+    expect(boxes).toHaveLength(sentBefore + 1);
+    const d = JSON.parse(
+      new TextDecoder().decode(boxOpen(agentKey, boxes.at(-1)!.box as string)),
+    ) as Decision;
+    expect(d).toEqual({ kind: 'decision', id: 'r1', result: { approved: true } });
+  });
+
+  it('a re-announced id that expired locally (never answered) stays silent', () => {
+    const m = newManager();
+    const room = 'cccc9999dddd0000';
+    m.add(payload(room));
+    const { ws, agentKey } = pair(room);
+
+    ws.recv(sealReq(agentKey, yesno('r2')));
+    m.expire('r2'); // countdown hit zero: card dismissed, nothing was sent
+    const sentBefore = ws.sent.filter((f) => typeof f.box === 'string').length;
+
+    ws.recv(sealReq(agentKey, yesno('r2')));
+    expect(m.activeState().request).toBeNull();
+    expect(ws.sent.filter((f) => typeof f.box === 'string')).toHaveLength(sentBefore);
+  });
+
   it('remove closes the active session and re-picks active', () => {
     const m = newManager();
     const a = 'aaaa999999999999';
