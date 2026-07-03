@@ -3,9 +3,12 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  decisionSigningMessage,
   decodeDecision,
+  decodeDeviceKey,
   decodeRequest,
   encodeDecision,
+  encodeDeviceKey,
   isRelayControl,
   newChoiceDecision,
   newTextDecision,
@@ -15,6 +18,12 @@ import {
   validMessageKind,
   validResponseKind,
 } from '../src/lib/wire.ts';
+
+/** hex renders bytes as lowercase hex so a pinned message can be compared to
+ *  the Go twin (backend/pkg/wire/wire_test.go) byte-for-byte. */
+function hex(bytes: Uint8Array): string {
+  return [...bytes].map((b) => b.toString(16).padStart(2, '0')).join('');
+}
 
 describe('parseFrame', () => {
   it('parses a relay control frame', () => {
@@ -144,5 +153,52 @@ describe('decodeRequest bounded validation', () => {
     expect(() => decodeRequest(enc({ ...base, response: { kind: 'yesno' }, expires_in_s: 999999 }))).toThrow(
       /expires_in_s/,
     );
+  });
+});
+
+describe('decisionSigningMessage (cross-language byte contract)', () => {
+  // These hex strings are pinned IDENTICALLY in backend/pkg/wire/wire_test.go
+  // (TestDecisionSigningMessagePinsHex) so the Go and TS signers can never
+  // drift. Any change here MUST change there too. See ADR 0021.
+  const room = '0123456789abcdef';
+  const id = 'req_1';
+  it.each([
+    ['yesno true', { approved: true }, '6161683a6465636973696f6e3a76310030313233343536373839616263646566007265715f31007965736e6f3a31'],
+    ['yesno false', { approved: false }, '6161683a6465636973696f6e3a76310030313233343536373839616263646566007265715f31007965736e6f3a30'],
+    ['choice', { choice: 'Merge & retry' }, '6161683a6465636973696f6e3a76310030313233343536373839616263646566007265715f310063686f6963653a4d657267652026207265747279'],
+    ['text', { text: 'up to $500' }, '6161683a6465636973696f6e3a76310030313233343536373839616263646566007265715f3100746578743a757020746f2024353030'],
+  ] as const)('pins the canonical message bytes for %s', (_name, result, wantHex) => {
+    expect(hex(decisionSigningMessage(room, id, result))).toBe(wantHex);
+  });
+});
+
+describe('device_key wire message', () => {
+  const enc = (o: unknown) => new TextEncoder().encode(JSON.stringify(o));
+  it('round-trips encodeDeviceKey/decodeDeviceKey padded', () => {
+    const spki = 'MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE-example-spki';
+    const raw = encodeDeviceKey(spki);
+    expect(raw.length % 256).toBe(0); // padded like every sealed encoder
+    const dk = decodeDeviceKey(raw);
+    expect(dk.kind).toBe('device_key');
+    expect(dk.public_key).toBe(spki);
+  });
+  it('rejects a non-device_key kind and a missing public_key', () => {
+    expect(() => decodeDeviceKey(enc({ kind: 'vapid_key', public_key: 'x' }))).toThrow(/not a device_key/);
+    expect(() => decodeDeviceKey(enc({ kind: 'device_key' }))).toThrow(/public_key missing/);
+  });
+});
+
+describe('decodeDecision sig tolerance + cap', () => {
+  const enc = (o: unknown) => new TextEncoder().encode(JSON.stringify(o));
+  it('accepts a decision with a sig and without one', () => {
+    const withSig = decodeDecision(enc({ kind: 'decision', id: 'a', result: { approved: true }, sig: 'AAAA' }));
+    expect(withSig.sig).toBe('AAAA');
+    const without = decodeDecision(enc({ kind: 'decision', id: 'a', result: { approved: true } }));
+    expect(without.sig).toBeUndefined();
+  });
+  it('rejects an over-long sig', () => {
+    expect(() =>
+      decodeDecision(enc({ kind: 'decision', id: 'a', result: { approved: true }, sig: 'a'.repeat(300) })),
+    ).toThrow(/sig too long/);
   });
 });

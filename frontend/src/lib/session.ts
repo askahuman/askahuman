@@ -10,6 +10,7 @@
 // so it is unit-testable without a real WebSocket or DOM.
 
 import { open as boxOpen, seal as boxSeal } from './crypto.ts';
+import { type DeviceKey as DeviceSigner, loadOrCreateDeviceKey } from './devicekey.ts';
 import { Pairing, type PairingSend } from './pairing.ts';
 import { RelayClient, type ConnState, type RelayEvents, type RelayOptions } from './relay.ts';
 import type { PairPayload } from './payload.ts';
@@ -19,9 +20,11 @@ import {
   type Request,
   KindPushSub,
   KindVAPIDKey,
+  decisionSigningMessage,
   decodeRequest,
   decodeVapidKey,
   encodeDecision,
+  encodeDeviceKey,
   encodePushSub,
 } from './wire.ts';
 
@@ -123,6 +126,11 @@ export class Session {
   // App subscribes for Web Push with exactly this key. Undefined until received.
   private vapidKey?: string;
   private readonly onVapidKey?: (publicKey: string) => void;
+  // deviceKey is this origin's non-extractable ECDSA signer (IndexedDB). It is
+  // loaded lazily once paired/restored (the constructor can't await); until then
+  // it is null and decisions go out unsigned (compat). Every decision is signed
+  // with it when present so a stolen session key cannot forge an approval.
+  private deviceKey: DeviceSigner | null = null;
   private readonly seenIDs = new Set<string>();
   // sentDecisions retains each decision we believe we sent, keyed by request
   // id. If the agent re-announces an id that is in seenIDs, our decision never
@@ -167,6 +175,10 @@ export class Session {
         screen: 'listening',
         agent: restored.agent || this.state.agent,
       };
+      // A restored session is already paired: arm the device key so the agent
+      // (which lost devicePub from RAM on any restart) is re-armed before the
+      // next decision, and so this decision can be signed.
+      this.initDeviceKey();
       return;
     }
 
@@ -240,7 +252,7 @@ export class Session {
 
   /** approve/decline send a yesno decision and advance to confirmed. */
   approve(): void {
-    this.sendDecision(this.req().id, { kind: 'decision', id: this.req().id, result: { approved: true } }, {
+    void this.sendDecision(this.req().id, { kind: 'decision', id: this.req().id, result: { approved: true } }, {
       icon: '✓',
       label: 'Approved',
       approved: true,
@@ -248,7 +260,7 @@ export class Session {
     });
   }
   decline(): void {
-    this.sendDecision(this.req().id, { kind: 'decision', id: this.req().id, result: { approved: false } }, {
+    void this.sendDecision(this.req().id, { kind: 'decision', id: this.req().id, result: { approved: false } }, {
       icon: '✗',
       label: 'Declined',
       approved: false,
@@ -257,7 +269,7 @@ export class Session {
   }
   /** choose sends a choice decision. */
   choose(label: string): void {
-    this.sendDecision(this.req().id, { kind: 'decision', id: this.req().id, result: { choice: label } }, {
+    void this.sendDecision(this.req().id, { kind: 'decision', id: this.req().id, result: { choice: label } }, {
       icon: '✓',
       label: 'Choice sent',
       approved: true,
@@ -268,7 +280,7 @@ export class Session {
   reply(text: string): void {
     const t = text.trim();
     if (!t) return;
-    this.sendDecision(this.req().id, { kind: 'decision', id: this.req().id, result: { text: t } }, {
+    void this.sendDecision(this.req().id, { kind: 'decision', id: this.req().id, result: { text: t } }, {
       icon: '✓',
       label: 'Reply sent',
       approved: true,
@@ -296,8 +308,23 @@ export class Session {
 
   // --- internals -----------------------------------------------------------
 
-  private sendDecision(id: string, decision: Decision, result: ConfirmedResult): void {
+  private async sendDecision(id: string, decision: Decision, result: ConfirmedResult): Promise<void> {
     if (!this.sessionKey) return;
+    // Sign with this device's key when we have one. Fail CLOSED: if a device key
+    // exists but signing throws, never fall back to an unsigned decision (the
+    // agent would rightly reject it) — surface offline and keep the card
+    // answerable so a retry re-signs. With no device key (WebCrypto/IndexedDB
+    // unavailable) send unsigned (compat). The signed message binds room+id+result
+    // exactly (mirrors wire.DecisionSigningMessage); the agent verifies it.
+    if (this.deviceKey) {
+      const msg = decisionSigningMessage(this.state.roomID, id, decision.result);
+      try {
+        decision = { ...decision, sig: await this.deviceKey.sign(msg) };
+      } catch {
+        this.set({ screen: 'offline' });
+        return;
+      }
+    }
     const bytes = encodeDecision(decision);
     if (!this.relay.sendBox(boxSeal(this.sessionKey, bytes))) {
       // Send dropped (socket not open / threw): do NOT claim "sent". Keep the
@@ -343,6 +370,9 @@ export class Session {
               : 'listening'
             : this.state.screen;
         this.set({ conn, attempt, screen });
+        // Re-arm a possibly-restarted agent with our device key on every fresh
+        // connection so the next decision's signature can be verified.
+        this.sendDeviceKey();
       } else {
         this.set({ conn, attempt });
       }
@@ -361,7 +391,10 @@ export class Session {
     if (signal === 'peer_joined') {
       this.set({ peerPresent: true });
       // Peer present => start (or re-send) our pake; harmless if already paired.
+      // Already paired => the peer is a (re)joining agent: re-arm it with our
+      // device key so it can verify the next decision even after a restart.
       if (!this.state.paired) this.pairing?.start();
+      else this.sendDeviceKey();
       return;
     }
     if (signal === 'peer_left') {
@@ -431,6 +464,32 @@ export class Session {
   private onPaired(key: Uint8Array): void {
     this.sessionKey = key;
     this.set({ paired: true, screen: 'listening', pairError: null });
+    this.initDeviceKey();
+  }
+
+  /**
+   * initDeviceKey best-effort loads (or creates) this origin's non-extractable
+   * ECDSA signing key and hands its public half to the agent. Fire-and-forget:
+   * a browser without WebCrypto/IndexedDB yields null and the phone stays on
+   * unsigned decisions (compat). Called once the session is paired or restored.
+   */
+  private initDeviceKey(): void {
+    void (async () => {
+      this.deviceKey = await loadOrCreateDeviceKey();
+      this.sendDeviceKey();
+    })();
+  }
+
+  /**
+   * sendDeviceKey seals this device's ECDSA PUBLIC key to the agent so it can
+   * verify every decision's signature. Best-effort and idempotent on the agent;
+   * re-sent on each reconnect/peer_joined (see onConnState/onSignal) so an agent
+   * that restarted — and lost devicePub from RAM — is re-armed before the next
+   * decision. A no-op until both the session key and device key are ready.
+   */
+  private sendDeviceKey(): void {
+    if (!this.sessionKey || !this.deviceKey) return;
+    this.relay.sendBox(boxSeal(this.sessionKey, encodeDeviceKey(this.deviceKey.spkiB64)));
   }
 
   private onPairError(err: Error): void {

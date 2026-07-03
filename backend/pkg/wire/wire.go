@@ -65,6 +65,62 @@ func EncodeVAPIDKey(pub string) ([]byte, error) {
 	return pad(raw), nil
 }
 
+// EncodeDeviceKey JSON-encodes the phone's per-device ECDSA P-256 public key
+// (SPKI DER, base64) and pads the plaintext to a fixed block, matching the
+// other sealed encoders. Only the public key crosses the wire; the matching
+// non-extractable private key never leaves the phone. Seal the result. Mirrors
+// EncodeVAPIDKey.
+func EncodeDeviceKey(spkiB64 string) ([]byte, error) {
+	raw, err := json.Marshal(DeviceKey{Kind: KindDeviceKey, PublicKey: spkiB64})
+	if err != nil {
+		return nil, err
+	}
+	return pad(raw), nil
+}
+
+// DecisionSigningMessage builds the canonical byte string the phone signs and
+// the agent verifies for one decision. It is a cross-language contract (like
+// the SPAKE2 transcript): the JS twin decisionSigningMessage in
+// frontend/src/lib/wire.ts MUST produce byte-identical output — both are pinned
+// to the same hex in their respective wire tests. The message binds the room,
+// the request id, and the exact result so a signature cannot be replayed across
+// rooms, requests, or answers.
+//
+//	DecisionSigningMessage(roomID, id, r) =
+//	    UTF8("aah:decision:v1" 0x00 roomID 0x00 id 0x00 resultTag(r))
+//
+// with no trailing separator. resultTag picks the branch by which Result field
+// is set, in priority order approved / choice / text (exactly one is set for a
+// valid decision, so it is unambiguous).
+func DecisionSigningMessage(roomID, id string, r Result) []byte {
+	var b bytes.Buffer
+	b.WriteString("aah:decision:v1")
+	b.WriteByte(0)
+	b.WriteString(roomID)
+	b.WriteByte(0)
+	b.WriteString(id)
+	b.WriteByte(0)
+	b.WriteString(resultTag(r))
+	return b.Bytes()
+}
+
+// resultTag renders a Result as the canonical tag used by DecisionSigningMessage.
+// The branch is chosen by which field is set, in the fixed priority order
+// approved (yesno) -> choice -> text, matching the JS twin exactly.
+func resultTag(r Result) string {
+	switch {
+	case r.Approved != nil:
+		if *r.Approved {
+			return "yesno:1"
+		}
+		return "yesno:0"
+	case r.Choice != "":
+		return "choice:" + r.Choice
+	default:
+		return "text:" + r.Text
+	}
+}
+
 // RelaySignal is a relay-injected control value carried in Frame.Relay.
 // The relay is the only party that may set it; clients never send it.
 type RelaySignal string
@@ -118,12 +174,15 @@ const (
 	// KindVAPIDKey delivers the agent's VAPID public key to the phone so it
 	// subscribes with exactly the key the agent signs wake-up pushes with.
 	KindVAPIDKey MessageKind = "vapid_key"
+	// KindDeviceKey delivers the phone's per-device ECDSA P-256 public key to
+	// the agent so it can verify the signature on every decision.
+	KindDeviceKey MessageKind = "device_key"
 )
 
 // ValidMessageKind reports whether k is a known application message kind.
 func ValidMessageKind(k MessageKind) bool {
 	switch k {
-	case KindRequest, KindDecision, KindPushSub, KindVAPIDKey:
+	case KindRequest, KindDecision, KindPushSub, KindVAPIDKey, KindDeviceKey:
 		return true
 	default:
 		return false
@@ -233,6 +292,14 @@ type Decision struct {
 	ID string `json:"id"`
 	// Result carries the answer matching the request's response kind.
 	Result Result `json:"result"`
+	// Sig is base64(raw IEEE-P1363 r||s, 64 bytes) of the phone's ECDSA P-256
+	// signature over DecisionSigningMessage(roomID, ID, Result). It is omitted
+	// (omitempty) by a phone with no device key, keeping an unsigned decision
+	// byte-compatible with older agents. Once the agent has learned the phone's
+	// device key, every decision MUST carry a verifying Sig or it is rejected —
+	// a stolen session key can decrypt but cannot forge an approval. See
+	// docs/decisions/architecture/0021_device_signed_decisions.md.
+	Sig string `json:"sig,omitempty"`
 }
 
 // PushSubscription is a Web Push subscription (RFC 8030/8291). The phone
@@ -269,5 +336,16 @@ type VAPIDKey struct {
 	// Kind is always KindVAPIDKey.
 	Kind MessageKind `json:"kind"`
 	// PublicKey is the agent's VAPID public key (base64url, uncompressed P-256).
+	PublicKey string `json:"public_key"`
+}
+
+// DeviceKey delivers the phone's per-device ECDSA P-256 PUBLIC key to the
+// agent, sealed. The phone signs every Decision with the matching non-
+// extractable private key (WebCrypto, IndexedDB) so a stolen session key
+// cannot forge an approval. Only the public key ever crosses the wire.
+type DeviceKey struct {
+	// Kind is always KindDeviceKey.
+	Kind MessageKind `json:"kind"`
+	// PublicKey is the phone's device public key (base64 of SPKI DER, ECDSA P-256).
 	PublicKey string `json:"public_key"`
 }

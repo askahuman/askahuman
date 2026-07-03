@@ -13,9 +13,15 @@ package agent
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/sha256"
+	"crypto/x509"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math/big"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -30,6 +36,14 @@ import (
 	"github.com/askahuman/askahuman/backend/pkg/sealedbox"
 	"github.com/askahuman/askahuman/backend/pkg/wire"
 )
+
+// requireDeviceSig, when AAH_REQUIRE_DEVICE_SIG=1, forces strict signature
+// enforcement: a decision is accepted only if it carries a signature that
+// verifies against the phone's device key. Before the phone has delivered a
+// device key there is nothing to verify against, so strict mode rejects every
+// decision until the key arrives (fail closed). With it off, decisions are
+// accepted unsigned until a device key is seen (compat), then signed-only.
+var requireDeviceSig = os.Getenv("AAH_REQUIRE_DEVICE_SIG") == "1"
 
 // Default relay endpoint for local dev.
 const defaultRelayURL = "ws://127.0.0.1:8080/ws"
@@ -546,9 +560,12 @@ func (a *Agent) askOnce(ctx context.Context, sess *Session, req wire.Request, pl
 		if a.absorbPush(plainResp) {
 			continue
 		}
-		dec, ok := decodeDecision(plainResp, req)
+		if a.absorbDeviceKey(sess, plainResp) {
+			continue
+		}
+		dec, ok := decodeDecision(plainResp, req, sess)
 		if !ok {
-			continue // wrong id (dup/stale), wrong kind, or shape mismatch.
+			continue // wrong id (dup/stale), wrong kind, shape, or bad signature.
 		}
 		return dec, nil
 	}
@@ -576,12 +593,83 @@ func (a *Agent) absorbPush(plain []byte) bool {
 	return true
 }
 
+// absorbDeviceKey consumes a sealed wire.DeviceKey frame, recording the phone's
+// ECDSA P-256 public key on the session so later decisions can be signature-
+// verified (mirrors absorbPush). It returns true when the frame WAS a
+// device_key — so askOnce stops treating it as a decision — whether or not the
+// key parsed; a malformed key is noted on stderr and dropped, never silently
+// reinterpreted.
+//
+// The key is PINNED first-seen: the first valid device key for the session is
+// recorded and any LATER, different key is rejected. This pin is what makes the
+// signature meaningful against the very thief this feature targets — a
+// device_key frame is only session-key-sealed, so an attacker who stole the
+// persisted session key could otherwise seal a frame carrying their OWN device
+// key, overwrite the pin, and sign a forged approval that verifies. The real
+// phone establishes its key at pairing (when only it is the room peer), so the
+// pin is the real key; a re-send of the SAME key on reconnect/restore is a
+// no-op. See docs/decisions/architecture/0021.
+//
+// sess.devicePub is touched only from the Ask read-loop; sequential Asks run on
+// different goroutines but are serialized by the asking single-flight atomic
+// (which establishes the happens-before), so it needs no lock.
+func (a *Agent) absorbDeviceKey(sess *Session, plain []byte) bool {
+	var dk wire.DeviceKey
+	if err := json.Unmarshal(plain, &dk); err != nil {
+		return false
+	}
+	if dk.Kind != wire.KindDeviceKey {
+		return false
+	}
+	pub, err := parseDevicePub(dk.PublicKey)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "ask-a-human: ignoring malformed device key: %v\n", err)
+		return true // it IS a device_key frame: consume it regardless.
+	}
+	if sess.devicePub != nil {
+		// Pin first-seen: reject a swap. A re-send of the same key is a benign
+		// no-op; a DIFFERENT key means either a stray frame or a session-key
+		// thief trying to substitute their own signer — never overwrite the pin.
+		if !sess.devicePub.Equal(pub) {
+			fmt.Fprintf(os.Stderr, "ask-a-human: ignoring device key change (pinned)\n")
+		}
+		return true
+	}
+	sess.devicePub = pub // pin first-seen
+	return true
+}
+
+// parseDevicePub decodes a base64 SPKI DER string into an ECDSA P-256 public
+// key, rejecting anything that is not a P-256 ECDSA key.
+func parseDevicePub(spkiB64 string) (*ecdsa.PublicKey, error) {
+	if spkiB64 == "" {
+		return nil, errors.New("agent: empty device key")
+	}
+	der, err := base64.StdEncoding.DecodeString(spkiB64)
+	if err != nil {
+		return nil, fmt.Errorf("agent: device key b64: %w", err)
+	}
+	pubAny, err := x509.ParsePKIXPublicKey(der)
+	if err != nil {
+		return nil, fmt.Errorf("agent: device key parse: %w", err)
+	}
+	pub, ok := pubAny.(*ecdsa.PublicKey)
+	if !ok {
+		return nil, errors.New("agent: device key not ecdsa")
+	}
+	if pub.Curve != elliptic.P256() {
+		return nil, errors.New("agent: device key not p256")
+	}
+	return pub, nil
+}
+
 // decodeDecision parses plain as a wire.Decision for req.ID; ok is false
-// unless it is a decision whose ID matches and whose Result shape matches the
-// requested ResponseKind. A decision with the wrong shape (e.g. a yesno reply
-// missing the approve bool, or a choice not among the offered options) is
+// unless it is a decision whose ID matches, whose Result shape matches the
+// requested ResponseKind, AND whose signature satisfies verifyDecisionSig. A
+// decision with the wrong shape (e.g. a yesno reply missing the approve bool, or
+// a choice not among the offered options) or a missing/invalid signature is
 // treated as not-yet-valid (ok=false) so Ask keeps waiting — never approved.
-func decodeDecision(plain []byte, req wire.Request) (dec wire.Decision, ok bool) {
+func decodeDecision(plain []byte, req wire.Request, sess *Session) (dec wire.Decision, ok bool) {
 	if err := json.Unmarshal(plain, &dec); err != nil {
 		return wire.Decision{}, false
 	}
@@ -591,7 +679,37 @@ func decodeDecision(plain []byte, req wire.Request) (dec wire.Decision, ok bool)
 	if !resultMatchesKind(dec.Result, req.Response) {
 		return wire.Decision{}, false
 	}
+	if !verifyDecisionSig(sess, dec) {
+		return wire.Decision{}, false
+	}
 	return dec, true
+}
+
+// verifyDecisionSig enforces the per-device signature. Once the phone has
+// delivered a device key (sess.devicePub != nil), every decision MUST carry a
+// signature that verifies against that key over DecisionSigningMessage — a
+// stolen session key can decrypt traffic but cannot forge an approval. Before
+// any device key, an unsigned decision is accepted (compat with an older phone)
+// UNLESS strict mode (AAH_REQUIRE_DEVICE_SIG=1) is on, which rejects until a key
+// arrives. A bad or missing signature is never an approval: it returns false so
+// Ask keeps waiting. The wire signature is raw IEEE-P1363 r||s (64 bytes), so it
+// is verified with ecdsa.Verify (NOT VerifyASN1, which expects DER).
+func verifyDecisionSig(sess *Session, dec wire.Decision) bool {
+	if sess.devicePub == nil {
+		return !requireDeviceSig // no key to verify against: compat unless strict.
+	}
+	if dec.Sig == "" {
+		return false
+	}
+	sig, err := base64.StdEncoding.DecodeString(dec.Sig)
+	if err != nil || len(sig) != 64 {
+		return false
+	}
+	msg := wire.DecisionSigningMessage(sess.roomID, dec.ID, dec.Result)
+	digest := sha256.Sum256(msg)
+	r := new(big.Int).SetBytes(sig[:32])
+	s := new(big.Int).SetBytes(sig[32:])
+	return ecdsa.Verify(sess.devicePub, digest[:], r, s)
 }
 
 // resultMatchesKind reports whether res is a well-formed answer for the

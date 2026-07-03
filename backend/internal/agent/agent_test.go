@@ -2,6 +2,11 @@ package agent
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/sha256"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -431,6 +436,210 @@ func TestAskRejectsKindMismatch(t *testing.T) {
 }
 
 func boolPtr(b bool) *bool { return &b }
+
+// deviceSigner is a test-side phone: an ECDSA P-256 key whose SPKI is delivered
+// to the agent (as a sealed device_key) and which signs decisions exactly as
+// WebCrypto does — raw IEEE-P1363 r||s, each half left-padded to 32 bytes so the
+// signature is always 64 bytes.
+type deviceSigner struct {
+	priv *ecdsa.PrivateKey
+	spki string // base64 SPKI DER of the public key
+}
+
+func newDeviceSigner(t *testing.T) deviceSigner {
+	t.Helper()
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+	der, err := x509.MarshalPKIXPublicKey(&priv.PublicKey)
+	require.NoError(t, err)
+	return deviceSigner{priv: priv, spki: base64.StdEncoding.EncodeToString(der)}
+}
+
+// deviceKeyFrame is the sealed wire.DeviceKey the phone sends to arm the agent.
+func (d deviceSigner) deviceKeyFrame() wire.DeviceKey {
+	return wire.DeviceKey{Kind: wire.KindDeviceKey, PublicKey: d.spki}
+}
+
+// sign returns base64(raw r||s) over the canonical decision message for roomID,
+// matching WebCrypto's output: r and s are each left-padded to 32 bytes (via
+// big.Int.FillBytes) so the concatenation is exactly 64 bytes.
+func (d deviceSigner) sign(t *testing.T, roomID string, dec wire.Decision) string {
+	t.Helper()
+	msg := wire.DecisionSigningMessage(roomID, dec.ID, dec.Result)
+	digest := sha256.Sum256(msg)
+	r, s, err := ecdsa.Sign(rand.Reader, d.priv, digest[:])
+	require.NoError(t, err)
+	raw := make([]byte, 64)
+	r.FillBytes(raw[:32])
+	s.FillBytes(raw[32:])
+	return base64.StdEncoding.EncodeToString(raw)
+}
+
+// TestAskDeviceSignedDecisionApproves: once the phone has delivered its device
+// key, a correctly-signed decision is accepted and approved.
+func TestAskDeviceSignedDecisionApproves(t *testing.T) {
+	key := make([]byte, sealedbox.KeySize)
+	conn := newFakeConn()
+	a := pairedAgent(t, key, conn, nil)
+	signer := newDeviceSigner(t)
+
+	pushBox(t, conn, key, signer.deviceKeyFrame())
+	dec := wire.Decision{Kind: wire.KindDecision, ID: "req_1", Result: wire.Result{Approved: boolPtr(true)}}
+	dec.Sig = signer.sign(t, "room1", dec)
+	pushBox(t, conn, key, dec)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	got, err := a.Ask(ctx, yesnoReq())
+	require.NoError(t, err)
+	require.NotNil(t, got.Result.Approved)
+	assert.True(t, *got.Result.Approved)
+}
+
+// TestAskDeviceKeyRejectsUnsigned: once armed with a device key, an UNSIGNED
+// decision is rejected — the agent keeps waiting and the request times out. A
+// missing signature is never an approval.
+func TestAskDeviceKeyRejectsUnsigned(t *testing.T) {
+	key := make([]byte, sealedbox.KeySize)
+	conn := newFakeConn()
+	a := pairedAgent(t, key, conn, nil)
+	signer := newDeviceSigner(t)
+
+	pushBox(t, conn, key, signer.deviceKeyFrame())
+	// Same shape as an accepted decision, but no signature.
+	pushBox(t, conn, key, wire.Decision{Kind: wire.KindDecision, ID: "req_1", Result: wire.Result{Approved: boolPtr(true)}})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 400*time.Millisecond)
+	defer cancel()
+	dec, err := a.Ask(ctx, yesnoReq())
+	require.ErrorIs(t, err, ErrTimeout)
+	assert.Nil(t, dec.Result.Approved, "an unsigned decision is never approved once a device key exists")
+}
+
+// TestAskDeviceKeyRejectsTamperedSig: a signature over a DIFFERENT result than
+// the one sent must not verify (proves the message binds the exact answer).
+func TestAskDeviceKeyRejectsTamperedSig(t *testing.T) {
+	key := make([]byte, sealedbox.KeySize)
+	conn := newFakeConn()
+	a := pairedAgent(t, key, conn, nil)
+	signer := newDeviceSigner(t)
+
+	pushBox(t, conn, key, signer.deviceKeyFrame())
+	// Send approved=true, but sign over approved=false: the digest differs.
+	dec := wire.Decision{Kind: wire.KindDecision, ID: "req_1", Result: wire.Result{Approved: boolPtr(true)}}
+	dec.Sig = signer.sign(t, "room1", wire.Decision{Kind: wire.KindDecision, ID: "req_1", Result: wire.Result{Approved: boolPtr(false)}})
+	pushBox(t, conn, key, dec)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 400*time.Millisecond)
+	defer cancel()
+	got, err := a.Ask(ctx, yesnoReq())
+	require.ErrorIs(t, err, ErrTimeout)
+	assert.Nil(t, got.Result.Approved, "a signature over a different result must not verify")
+}
+
+// TestAskDeviceKeyRejectsWrongRoom: a signature made for a different room id must
+// not verify (proves the message binds the room, blocking cross-room replay).
+func TestAskDeviceKeyRejectsWrongRoom(t *testing.T) {
+	key := make([]byte, sealedbox.KeySize)
+	conn := newFakeConn()
+	a := pairedAgent(t, key, conn, nil)
+	signer := newDeviceSigner(t)
+
+	pushBox(t, conn, key, signer.deviceKeyFrame())
+	dec := wire.Decision{Kind: wire.KindDecision, ID: "req_1", Result: wire.Result{Approved: boolPtr(true)}}
+	dec.Sig = signer.sign(t, "some-other-room", dec) // session roomID is "room1".
+	pushBox(t, conn, key, dec)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 400*time.Millisecond)
+	defer cancel()
+	got, err := a.Ask(ctx, yesnoReq())
+	require.ErrorIs(t, err, ErrTimeout)
+	assert.Nil(t, got.Result.Approved, "a signature for a different room must not verify")
+}
+
+// TestAskDeviceKeyPinnedRejectsSwap: the device key is pinned first-seen. After
+// the real phone's key (signer1) is recorded, an attacker who stole the session
+// key seals a device_key carrying THEIR OWN key (signer2) — it must NOT overwrite
+// the pin, so a decision signed by signer2 is rejected (times out, never
+// approved). A decision signed by the pinned signer1 still verifies and approves.
+// This proves the pin defeats the session-key-thief key-swap.
+func TestAskDeviceKeyPinnedRejectsSwap(t *testing.T) {
+	key := make([]byte, sealedbox.KeySize)
+	conn := newFakeConn()
+	a := pairedAgent(t, key, conn, nil)
+	real, attacker := newDeviceSigner(t), newDeviceSigner(t)
+
+	// Real phone pins its key at pairing; attacker (session-key holder) tries to
+	// swap in theirs; attacker then signs a forged approval for req_1.
+	pushBox(t, conn, key, real.deviceKeyFrame())
+	pushBox(t, conn, key, attacker.deviceKeyFrame())
+	forged := wire.Decision{Kind: wire.KindDecision, ID: "req_1", Result: wire.Result{Approved: boolPtr(true)}}
+	forged.Sig = attacker.sign(t, "room1", forged)
+	pushBox(t, conn, key, forged)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 400*time.Millisecond)
+	defer cancel()
+	dec, err := a.Ask(ctx, yesnoReq())
+	require.ErrorIs(t, err, ErrTimeout)
+	assert.Nil(t, dec.Result.Approved, "a swapped attacker key must not overwrite the pinned real key")
+
+	// The pinned real key still works: a decision signed by signer1 verifies.
+	conn2 := newFakeConn()
+	a.sess.conn = conn2 // reuse the same session (devicePub still pinned to real).
+	good := wire.Decision{Kind: wire.KindDecision, ID: "req_2", Result: wire.Result{Approved: boolPtr(true)}}
+	good.Sig = real.sign(t, "room1", good)
+	pushBox(t, conn2, key, good)
+
+	ctx2, cancel2 := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel2()
+	req2 := yesnoReq()
+	req2.ID = "req_2"
+	got, err := a.Ask(ctx2, req2)
+	require.NoError(t, err)
+	require.NotNil(t, got.Result.Approved)
+	assert.True(t, *got.Result.Approved, "the pinned real key still verifies decisions")
+}
+
+// TestAskCompatUnsignedWithoutDeviceKey: with no device key delivered and strict
+// mode off (default), an unsigned decision is still approved — no regression for
+// an older phone that predates device signing. (Mirrors TestAskReturnsDecision;
+// kept explicit as the compat baseline for the enforcement suite.)
+func TestAskCompatUnsignedWithoutDeviceKey(t *testing.T) {
+	key := make([]byte, sealedbox.KeySize)
+	conn := newFakeConn()
+	a := pairedAgent(t, key, conn, nil)
+
+	pushBox(t, conn, key, wire.Decision{Kind: wire.KindDecision, ID: "req_1", Result: wire.Result{Approved: boolPtr(true)}})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	got, err := a.Ask(ctx, yesnoReq())
+	require.NoError(t, err)
+	require.NotNil(t, got.Result.Approved)
+	assert.True(t, *got.Result.Approved)
+}
+
+// TestAskStrictModeRejectsUnsignedWithoutKey: with AAH_REQUIRE_DEVICE_SIG=1 and
+// no device key delivered, an unsigned decision is rejected (fail closed — there
+// is nothing to verify against). Toggles the package-level requireDeviceSig with
+// save/restore, mirroring the relay trustProxy tests.
+func TestAskStrictModeRejectsUnsignedWithoutKey(t *testing.T) {
+	orig := requireDeviceSig
+	t.Cleanup(func() { requireDeviceSig = orig })
+	requireDeviceSig = true
+
+	key := make([]byte, sealedbox.KeySize)
+	conn := newFakeConn()
+	a := pairedAgent(t, key, conn, nil)
+
+	pushBox(t, conn, key, wire.Decision{Kind: wire.KindDecision, ID: "req_1", Result: wire.Result{Approved: boolPtr(true)}})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 400*time.Millisecond)
+	defer cancel()
+	dec, err := a.Ask(ctx, yesnoReq())
+	require.ErrorIs(t, err, ErrTimeout)
+	assert.Nil(t, dec.Result.Approved, "strict mode never approves without a verifying signature")
+}
 
 func TestNewPairingDerivesRoomFromCode(t *testing.T) {
 	a, err := New(Config{RelayURL: "ws://host:8080/ws"})

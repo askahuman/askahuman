@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"crypto/ecdsa"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/hex"
@@ -39,6 +40,13 @@ type Session struct {
 	key      []byte
 	conn     frameConn
 	dial     dialer
+	// devicePub is the phone's per-device ECDSA P-256 public key, learned from a
+	// sealed device_key frame (absorbDeviceKey) and PINNED first-seen. Once set,
+	// every decision must carry a signature that verifies against it. It is
+	// touched only from the Ask read-loop; sequential Asks run on different
+	// goroutines but are serialized by the asking single-flight atomic (which
+	// establishes the happens-before), so it needs no lock.
+	devicePub *ecdsa.PublicKey
 }
 
 // SessionKey returns the 32-byte SPAKE2-derived key.
