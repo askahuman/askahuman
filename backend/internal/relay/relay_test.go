@@ -136,6 +136,52 @@ func TestThirdJoinClosed4001(t *testing.T) {
 	assert.Equal(t, StatusRoomFull, ce.Code)
 }
 
+// TestRoomFullProbeReapsZombie exercises the iOS-resume recovery path: the
+// phone's previous socket is silently dead (open TCP, but it never reads, so
+// it never answers a ping — exactly what a frozen background PWA looks like).
+// A rejected third join must probe the room, reap the zombie within
+// probeTimeout, and let the retry join succeed.
+func TestRoomFullProbeReapsZombie(t *testing.T) {
+	origProbe := probeTimeout
+	probeTimeout = 200 * time.Millisecond
+	t.Cleanup(func() { probeTimeout = origProbe })
+
+	base := newServer(t)
+	agent := dialRoom(t, base, roomA)
+	defer agent.CloseNow()
+
+	// The zombie: joins, then never reads. coder/websocket only answers pings
+	// inside Read, so the relay's probe ping to it will time out.
+	zombie := dialRoom(t, base, roomA)
+	defer zombie.CloseNow()
+	assert.Equal(t, wire.SignalPeerJoined, readFrame(t, agent).Relay)
+
+	// Fresh phone socket (the resume reconnect): rejected 4001, which triggers
+	// the probe.
+	third := dialRoom(t, base, roomA)
+	defer third.CloseNow()
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	_, _, err := third.Read(ctx)
+	require.Error(t, err)
+	var ce websocket.CloseError
+	require.ErrorAs(t, err, &ce)
+	assert.Equal(t, StatusRoomFull, ce.Code)
+
+	// The agent (which reads, so it pongs) survives the probe and sees the
+	// zombie reaped as peer_left.
+	assert.Equal(t, wire.SignalPeerLeft, readFrame(t, agent).Relay)
+
+	// The retry (the phone's backoff reconnect) now gets the freed slot: both
+	// sides see peer_joined and traffic flows.
+	retry := dialRoom(t, base, roomA)
+	defer retry.CloseNow()
+	assert.Equal(t, wire.SignalPeerJoined, readFrame(t, agent).Relay)
+	assert.Equal(t, wire.SignalPeerJoined, readFrame(t, retry).Relay)
+	writeText(t, retry, `{"box":"aGVsbG8="}`)
+	assert.Equal(t, "aGVsbG8=", readFrame(t, agent).Box)
+}
+
 func TestSeparateRoomsIsolated(t *testing.T) {
 	base := newServer(t)
 	a := dialRoom(t, base, roomA)
