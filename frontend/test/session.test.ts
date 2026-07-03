@@ -283,6 +283,34 @@ describe('Session full round trip', () => {
     expect(session.getState().request).toBeNull();
   });
 
+  it('approve/decline/choose/reply are no-ops once the request has cleared (deferred-swipe wrong-target guard)', () => {
+    const { session } = newSession();
+    const { ws, agentKey } = pairSession(session);
+    const req: Request = {
+      kind: KindRequest,
+      id: 'req_gone',
+      title: 'T',
+      summary: 'S',
+      response: { kind: 'yesno' },
+    };
+    ws.recv({ box: boxSeal(agentKey, new TextEncoder().encode(JSON.stringify(req))) });
+    expect(session.getState().screen).toBe('yesno');
+
+    // The request clears (expiry, or the user switched agent) BEFORE the 330ms
+    // swipe-commit timer fires. The late approve() must NOT seal anything — a
+    // decision sealed here would carry a stale/foreign id or throw.
+    session.expire('req_gone');
+    expect(session.getState().request).toBeNull();
+    const sentBefore = ws.sent.filter((f) => typeof f.box === 'string').length;
+
+    expect(() => session.approve()).not.toThrow();
+    expect(() => session.decline()).not.toThrow();
+    expect(() => session.choose('x')).not.toThrow();
+    expect(() => session.reply('y')).not.toThrow();
+    expect(ws.sent.filter((f) => typeof f.box === 'string')).toHaveLength(sentBefore);
+    expect(session.getState().screen).toBe('listening');
+  });
+
   it('goes offline when the agent leaves while a card is open', () => {
     const { session } = newSession();
     const { ws, agentKey } = pairSession(session);
