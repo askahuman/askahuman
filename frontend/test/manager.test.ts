@@ -461,6 +461,31 @@ describe('SessionManager persistence (ADR 0020)', () => {
     expect(d).toEqual({ kind: 'decision', id: 'r1', result: { approved: true } });
   });
 
+  it('a PENDING (unanswered) request re-opens after restore via the re-announce', () => {
+    const persist = new FakePersist();
+    const m1 = newManager(persist);
+    const room = 'feed1111feed1111';
+    m1.add(payload(room));
+    const { ws: ws1, agentKey } = pair(room);
+    ws1.recv(sealReq(agentKey, yesno('r7')));
+    expect(m1.activeState().screen).toBe('yesno'); // card open, NOT answered
+
+    // Page kill mid-card. The open id must NOT be persisted as seen — else the
+    // agent's re-announce (its only recovery path) would be dropped forever.
+    expect(persist.stored[0]!.seen ?? []).not.toContain('r7');
+
+    const m2 = newManager(persist);
+    m2.restoreAll();
+    const ws2 = FakeWS.byRoom.get(room)!;
+    ws2.open();
+    ws2.recv(sealReq(agentKey, yesno('r7'))); // the agent's re-announce
+    expect(m2.activeState().screen).toBe('yesno'); // card re-opened
+    m2.approve();
+    const boxOut = ws2.sent.find((f) => typeof f.box === 'string')!.box as string;
+    const d = JSON.parse(new TextDecoder().decode(boxOpen(agentKey, boxOut))) as Decision;
+    expect(d).toEqual({ kind: 'decision', id: 'r7', result: { approved: true } });
+  });
+
   it('remove wipes the persisted entry (forget this agent)', () => {
     const persist = new FakePersist();
     const m = newManager(persist);

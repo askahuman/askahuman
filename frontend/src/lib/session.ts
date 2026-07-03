@@ -199,10 +199,17 @@ export class Session {
   /** MAX_PERSISTED_SEEN bounds the persisted de-dupe list (newest kept). */
   private static readonly MAX_PERSISTED_SEEN = 50;
 
-  /** persistState snapshots the de-dupe/redelivery bookkeeping for storage. */
+  /** persistState snapshots the de-dupe/redelivery bookkeeping for storage.
+   *  The OPEN card's id is excluded: it enters seenIDs on receipt (so live
+   *  re-announces don't reopen it), but persisting it before it is answered
+   *  would make the agent's re-announce after a page kill silently dropped —
+   *  the one re-announce that must re-open the card. */
   persistState(): { seen: string[]; decisions: Record<string, Decision> } {
+    const open = this.state.request?.id;
     return {
-      seen: Array.from(this.seenIDs).slice(-Session.MAX_PERSISTED_SEEN),
+      seen: Array.from(this.seenIDs)
+        .filter((id) => id !== open)
+        .slice(-Session.MAX_PERSISTED_SEEN),
       decisions: Object.fromEntries(this.sentDecisions),
     };
   }
