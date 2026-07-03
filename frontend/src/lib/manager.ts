@@ -11,7 +11,9 @@
 // Sessions stay single-room and sibling-unaware (minimum divergence per
 // ADR 0007); all multi-agent logic lives here. No relay/crypto/wire change.
 
+import { b64Decode, b64Encode } from './b64.ts';
 import type { PairPayload } from './payload.ts';
+import type { Persistence, StoredSession } from './store.ts';
 import type { PushSubscription } from './wire.ts';
 import { Session, type SessionOptions, type SessionState, initialState } from './session.ts';
 
@@ -32,6 +34,8 @@ const CARD_SCREENS: ReadonlySet<string> = new Set(['yesno', 'choice', 'text']);
 
 interface Entry {
   session: Session;
+  /** r is the relay URL the session dials (needed to persist/restore it). */
+  r: string;
   unsub: () => void;
   unread: number;
   /** id of the last request we counted, so a re-render doesn't re-bump unread. */
@@ -59,7 +63,15 @@ export class SessionManager {
   // must produce the subscription sent to room A — never cross-wired).
   private vapidKeyHandler: ((publicKey: string, room: string) => void) | null = null;
 
-  constructor(private readonly opts: SessionOptions = {}) {}
+  /**
+   * persist, when given, stores every paired session's restorable state (relay
+   * URL, room, derived session key, de-dupe/redelivery bookkeeping) so an iOS
+   * page kill does not lose pairing. See lib/store.ts and ADR 0020.
+   */
+  constructor(
+    private readonly opts: SessionOptions = {},
+    private readonly persist?: Persistence,
+  ) {}
 
   /**
    * onVapidKey registers the App's handler invoked (with the room id) when any
@@ -80,22 +92,56 @@ export class SessionManager {
     const room = payload.room;
     if (this.entries.has(room)) return room; // idempotent: no second socket
 
-    // Inject a per-room VAPID-key receiver so the agent's key is forwarded to
-    // the App tagged with THIS room (so its subscription routes back here).
-    const session = new Session(payload, {
+    this.attach(room, payload.r, new Session(payload, this.sessionOpts(room)));
+    // A retained push subscription is delivered to this agent once it PAIRS
+    // (it has no session key yet here); see onSessionChange.
+    this.emit();
+    return room;
+  }
+
+  /**
+   * restoreAll rebuilds every persisted session (page reload / iOS page kill):
+   * each rejoins its room already paired — no handshake, no code — and the
+   * agent's Ask loop re-announces any pending request within its backoff.
+   * Returns how many sessions were restored.
+   */
+  restoreAll(): number {
+    if (!this.persist) return 0;
+    let n = 0;
+    for (const s of this.persist.load()) {
+      if (this.entries.has(s.room)) continue;
+      const payload: PairPayload = { r: s.r, room: s.room, code: '' };
+      const session = new Session(payload, this.sessionOpts(s.room), {
+        key: b64Decode(s.key),
+        agent: s.agent,
+        vapid: s.vapid,
+        seen: s.seen,
+        decisions: s.decisions,
+      });
+      this.attach(s.room, s.r, session);
+      n += 1;
+    }
+    if (n > 0) this.emit();
+    return n;
+  }
+
+  /** sessionOpts injects the per-room VAPID-key receiver so the agent's key is
+   *  forwarded to the App tagged with THIS room (its subscription routes back). */
+  private sessionOpts(room: string): SessionOptions {
+    return {
       ...this.opts,
       onVapidKey: (publicKey) => this.vapidKeyHandler?.(publicKey, room),
-    });
-    const entry: Entry = { session, unsub: () => {}, unread: 0, lastReqID: null, pushSent: false };
+    };
+  }
+
+  /** attach registers a constructed session under room and starts it. */
+  private attach(room: string, r: string, session: Session): void {
+    const entry: Entry = { session, r, unsub: () => {}, unread: 0, lastReqID: null, pushSent: false };
     entry.unsub = session.onChange(() => this.onSessionChange(room));
     this.entries.set(room, entry);
     this.order.push(room);
     if (!this.active) this.active = room;
     session.start();
-    // A retained push subscription is delivered to this agent once it PAIRS
-    // (it has no session key yet here); see onSessionChange.
-    this.emit();
-    return room;
   }
 
   /**
@@ -111,6 +157,7 @@ export class SessionManager {
     const i = this.order.indexOf(room);
     if (i >= 0) this.order.splice(i, 1);
     if (this.active === room) this.active = this.order[0] ?? '';
+    this.persistAll(); // removal is the user's "forget this agent": wipe its key
     this.emit();
   }
 
@@ -300,7 +347,35 @@ export class SessionManager {
       // Forget a resolved request id so the next one (even same id reused) counts.
       if (!isCard) entry.lastReqID = null;
     }
+    this.persistAll();
     this.emit();
+  }
+
+  /**
+   * persistAll snapshots every PAIRED session to storage (best-effort). Runs on
+   * each session change: pairing completes, a request/decision moves the
+   * bookkeeping, or the agent label arrives — all restorable state.
+   */
+  private persistAll(): void {
+    if (!this.persist) return;
+    const list: StoredSession[] = [];
+    for (const room of this.order) {
+      const entry = this.entries.get(room);
+      if (!entry) continue;
+      const key = entry.session.getSessionKey();
+      if (!key) continue; // not paired yet: nothing restorable
+      const { seen, decisions } = entry.session.persistState();
+      list.push({
+        r: entry.r,
+        room,
+        key: b64Encode(key),
+        agent: entry.session.getState().agent,
+        vapid: entry.session.getVapidKey(),
+        seen,
+        decisions,
+      });
+    }
+    this.persist.save(list);
   }
 
   private activeHasCardOpen(): boolean {
