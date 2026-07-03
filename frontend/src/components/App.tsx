@@ -278,21 +278,26 @@ function renderScreen(c: Palette, state: SessionState, expiresIn: number | null,
       return <HomeScreen c={c} unread={state.request ? 1 : 0} onOpen={() => {}} />;
     case 'listening':
       return <ListeningScreen c={c} agent={state.agent} roomID={state.roomID} />;
+    // key={request.id}: a new request or an agent switch must mount a FRESH
+    // card, not reuse the prior instance's swipe/commit state. Without it, a
+    // deferred swipe commit could seal a decision against whatever request is
+    // active when its timer fires (wrong-approval); the key also unmounts the
+    // old card so its commit-timer cleanup runs.
     case 'yesno':
       return state.request ? (
-        <YesNoScreen c={c} req={state.request} expiresIn={expiresIn} onApprove={h.onApprove} onDecline={h.onDecline} />
+        <YesNoScreen key={state.request.id} c={c} req={state.request} expiresIn={expiresIn} onApprove={h.onApprove} onDecline={h.onDecline} />
       ) : (
         <ListeningScreen c={c} agent={state.agent} roomID={state.roomID} />
       );
     case 'choice':
       return state.request ? (
-        <ChoiceScreen c={c} req={state.request} expiresIn={expiresIn} onChoose={h.onChoose} />
+        <ChoiceScreen key={state.request.id} c={c} req={state.request} expiresIn={expiresIn} onChoose={h.onChoose} />
       ) : (
         <ListeningScreen c={c} agent={state.agent} roomID={state.roomID} />
       );
     case 'text':
       return state.request ? (
-        <TextScreen c={c} req={state.request} expiresIn={expiresIn} onSend={h.onSend} />
+        <TextScreen key={state.request.id} c={c} req={state.request} expiresIn={expiresIn} onSend={h.onSend} />
       ) : (
         <ListeningScreen c={c} agent={state.agent} roomID={state.roomID} />
       );
