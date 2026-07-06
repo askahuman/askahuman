@@ -179,18 +179,61 @@ type Agent struct {
 	// rejected with ErrBusy rather than racing.
 	asking atomic.Bool
 
-	// peerSeenAt stamps (unix nanos) the last moment the phone proved present:
-	// pairing completed, a peer_joined arrived on the shared conn, or any
-	// authenticated frame opened. Ask uses it to annotate a timeout with
-	// whether the phone ever showed up, so the calling model can tell "human
-	// is slow" from "phone unreachable / lost pairing" and react (re-pair)
-	// instead of retrying into a dead room.
-	peerSeenAt atomic.Int64
+	// peerPresent tracks whether the phone is currently believed to be in the
+	// room. The persistent reader sets it true on pairing, a peer_joined, or any
+	// authenticated frame, and false on peer_left / an undeliverable write. Ask
+	// uses it to annotate a timeout: a present phone means "human is slow"
+	// (retry), an absent one means "phone unreachable / lost pairing" (re-pair).
+	// A running flag, not "seen since this request started" — the reader now
+	// absorbs the phone's post-pairing frames before the first Ask, so a
+	// timestamp-since-start would misread a silent-but-connected phone as gone.
+	peerPresent atomic.Bool
 
 	// reWakeInterval caps how often the Ask loop's reactive branch re-sends a
 	// wake-up push for one request (see defaultReWakeInterval). A field so tests
 	// can shrink it; production uses the default set in New.
 	reWakeInterval time.Duration
+
+	// waiterMu guards waiter: the single in-flight Ask's mailbox. The persistent
+	// session reader (readLoop) routes the matching decision and transport events
+	// to it. Single-flight (asking) guarantees at most one waiter at a time.
+	waiterMu sync.Mutex
+	waiter   *askWaiter
+
+	// readerMu guards the persistent-reader lifecycle. Exactly one reader runs per
+	// live session: it owns sess.conn, keeps it alive by reading continuously (so
+	// coder/websocket answers the relay's keepalive pings — an unread socket is
+	// reaped in ~20-40s), absorbs the push subscription and device key the phone
+	// sends right after pairing even when no Ask is in flight, owns reconnect, and
+	// delivers decisions to the waiter. readerSess identifies which session it
+	// serves so ensureReader is idempotent across Pair and every Ask.
+	readerMu     sync.Mutex
+	readerSess   *Session
+	readerCancel context.CancelFunc
+	readerDone   chan struct{}
+}
+
+// readerEvent is what the persistent reader tells the in-flight Ask about the
+// transport so Ask can re-announce the request.
+type readerEvent int
+
+const (
+	// evPeerAbsent: the relay reported the request undeliverable or the peer
+	// left mid-request — re-announce (and reactively re-wake, throttled).
+	evPeerAbsent readerEvent = iota
+	// evReconnected: the reader re-dialed a fresh connection after the live one
+	// died — re-announce on it (no re-pairing; same room, same key).
+	evReconnected
+)
+
+// askWaiter is the single in-flight Ask's mailbox, filled by the reader.
+// decCh carries the one authenticated, shape-and-signature-valid decision for
+// req.ID (buffered 1); evCh carries transport events (best-effort, coalesced).
+type askWaiter struct {
+	id    string
+	req   wire.Request
+	decCh chan wire.Decision
+	evCh  chan readerEvent
 }
 
 var _ Asker = (*Agent)(nil)
@@ -365,7 +408,15 @@ func (a *Agent) Pair(ctx context.Context, p Pairing) error {
 	a.mu.Lock()
 	a.sess = sess
 	a.mu.Unlock()
-	a.markPeerSeen() // pairing just completed: the phone is provably present
+	a.setPeerPresent(true) // pairing just completed: the phone is provably present
+
+	// Start the persistent reader NOW, before the first request. It keeps the
+	// socket alive (an unread socket is reaped by the relay keepalive in
+	// ~20-40s) and absorbs the push subscription + device key the phone sends
+	// immediately after pairing — the whole reason a later request can wake a
+	// backgrounded phone. Without this, those frames land in an unread socket
+	// and are lost, and the agent stays Paired() with a dead connection.
+	a.ensureReader(sess)
 
 	// Hand the phone the public key the agent signs wake-ups with, so it
 	// subscribes for Web Push under EXACTLY that key (signer == subscribe-key).
@@ -391,7 +442,7 @@ func (a *Agent) sendVAPIDKey(ctx context.Context, sess *Session) error {
 	if err != nil {
 		return fmt.Errorf("agent: seal vapid key: %w", err)
 	}
-	if err := writeEnvelope(ctx, sess.conn, envelope{Box: box}); err != nil {
+	if err := writeEnvelope(ctx, sess.currentConn(), envelope{Box: box}); err != nil {
 		return fmt.Errorf("agent: send vapid key: %w", err)
 	}
 	return nil
@@ -411,13 +462,40 @@ func (a *Agent) VAPIDPublicKey() string { return a.vapidPub }
 // Config returns the agent's runtime configuration.
 func (a *Agent) Config() Config { return a.cfg }
 
-// Ask implements Asker. It seals req to the paired phone and re-announces on
-// undeliverable / transport failure with capped exponential backoff until an
-// authenticated (sealedbox.Open-verified) decision for req.ID arrives. A bad
-// frame is never treated as approval; ctx cancellation/deadline -> ErrTimeout.
+// Close stops the persistent session reader and waits for it to exit, then
+// tears down the connection. A host that owns the agent's lifetime (serve
+// shutdown, tests) calls it to release the reader goroutine deterministically —
+// without it the reader lives for the process. Safe to call more than once and
+// when no reader was ever started.
+func (a *Agent) Close() {
+	a.readerMu.Lock()
+	cancel, done := a.readerCancel, a.readerDone
+	a.readerSess, a.readerCancel, a.readerDone = nil, nil, nil
+	a.readerMu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	if done != nil {
+		<-done // wait for readLoop to return so nothing outlives Close.
+	}
+	a.mu.Lock()
+	sess := a.sess
+	a.mu.Unlock()
+	if sess != nil {
+		_ = sess.Close()
+	}
+}
+
+// Ask implements Asker. It announces req to the paired phone and waits for the
+// persistent reader to deliver an authenticated (sealedbox.Open-verified)
+// decision for req.ID, re-announcing on undeliverable / peer-left / reconnect.
+// A bad frame is never treated as approval; ctx cancellation/deadline ->
+// ErrTimeout. The single owning reader (readLoop) does all reading; Ask only
+// writes the request and consumes its mailbox, so the connection keeps being
+// serviced (and the phone's post-pairing subscription absorbed) between Asks.
 func (a *Agent) Ask(ctx context.Context, req wire.Request) (wire.Decision, error) {
 	// Single-flight: one phone, one shared connection, one question at a time.
-	// Reject (never approve) a concurrent Ask instead of racing on sess.conn.
+	// Reject (never approve) a concurrent Ask instead of racing on the reader.
 	if !a.asking.CompareAndSwap(false, true) {
 		return wire.Decision{}, ErrBusy
 	}
@@ -430,8 +508,8 @@ func (a *Agent) Ask(ctx context.Context, req wire.Request) (wire.Decision, error
 		return wire.Decision{}, ErrNotPaired
 	}
 
-	// Enforce the request's own deadline: a timeout fires the ctx.Err() ->
-	// ErrTimeout branches below, returning a zero Decision, never approved.
+	// Enforce the request's own deadline: a timeout fires the ctx.Done branch
+	// below, returning a zero Decision, never approved.
 	if req.ExpiresInS > 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, time.Duration(req.ExpiresInS)*time.Second)
@@ -446,23 +524,34 @@ func (a *Agent) Ask(ctx context.Context, req wire.Request) (wire.Decision, error
 		return wire.Decision{}, fmt.Errorf("agent: encode request: %w", err)
 	}
 
+	// Register this Ask's mailbox BEFORE ensuring the reader runs. In a unit test
+	// that wires a session directly (bypassing Pair) ensureReader is what starts
+	// the reader, and it may immediately read a pre-queued decision — the waiter
+	// must already be in place to receive it. In production the reader is already
+	// running from Pair and a decision can never precede its own request, so the
+	// ordering is moot there.
+	w := &askWaiter{id: req.ID, req: req, decCh: make(chan wire.Decision, 1), evCh: make(chan readerEvent, 8)}
+	a.waiterMu.Lock()
+	a.waiter = w
+	a.waiterMu.Unlock()
+	defer func() {
+		a.waiterMu.Lock()
+		a.waiter = nil
+		a.waiterMu.Unlock()
+	}()
+
+	a.ensureReader(sess)
+
 	// Proactively wake a possibly-backgrounded phone exactly once, fired the
 	// moment the request first reaches the wire. iOS silently freezes a
 	// backgrounded WebSocket without a clean close, so the relay can keep
 	// believing the phone present and deliver the live frame into a dead socket;
-	// the reactive wake below only fires once the relay's keepalive ping
-	// eventually declares the peer absent (~20-40s) — long after the user has
-	// given up, if ever. wakeOnce keeps the PROACTIVE wake to one push per Ask so
-	// a foregrounded phone (which still shows a banner under userVisibleOnly, the
-	// known cost of a contentless wake-up — see ADR 0016) is not re-alerted for a
-	// request it can already see; the reactive branch keeps re-nudging an absent
-	// phone, coalesced by the SW's fixed notification tag. Best-effort and run in
-	// its own goroutine so it never delays reading the decision.
+	// the reactive re-wake below only fires once the relay's keepalive
+	// eventually declares the peer absent (~20-40s). wakeOnce keeps the PROACTIVE
+	// wake to one push per Ask so a foregrounded phone (which still shows a banner
+	// under userVisibleOnly — see ADR 0016) is not re-alerted for a request it can
+	// already see. lastWake also throttles the reactive re-wake.
 	var wakeOnce sync.Once
-	// lastWake stamps when the most recent wake-up push was issued (proactive or
-	// reactive) so the reactive branch below can throttle itself. Only the Ask
-	// loop goroutine touches it — the proactive closure runs synchronously inside
-	// askOnce before launching its push goroutine — so it needs no lock.
 	var lastWake time.Time
 	wake := func() {
 		wakeOnce.Do(func() {
@@ -471,145 +560,235 @@ func (a *Agent) Ask(ctx context.Context, req wire.Request) (wire.Decision, error
 		})
 	}
 
-	// start anchors the peer-presence window for this request: a timeout is
-	// reported differently depending on whether the phone was EVER seen after
-	// this point (see timeoutErr).
-	start := time.Now()
+	// Announce the request, then nudge. A write failure is not fatal: the reader
+	// owns reconnect and sends evReconnected so we re-announce on the fresh conn.
+	_ = a.sendRequest(sess, plain)
+	wake()
 
+	// backoff paces re-announces. The relay replies undeliverable to EVERY write
+	// into an empty room, so re-announcing the instant that reply lands would be a
+	// tight write→undeliverable→write loop against the relay while the phone is
+	// away. Cap it with the same exponential backoff the old loop used; a decision
+	// or timeout always wins immediately (the wait is interruptible).
 	backoff := baseBackoff
 	for {
-		if err := ctx.Err(); err != nil {
-			return wire.Decision{}, a.timeoutErr(start)
-		}
-
-		dec, sendErr := a.askOnce(ctx, sess, req, plain, wake)
-		if sendErr == nil {
+		select {
+		case <-ctx.Done():
+			return wire.Decision{}, a.timeoutErr()
+		case dec := <-w.decCh:
 			return dec, nil
-		}
-		if errors.Is(sendErr, ErrTimeout) {
-			return wire.Decision{}, a.timeoutErr(start)
-		}
-		if !errors.Is(sendErr, errResend) {
-			return wire.Decision{}, sendErr
-		}
-
-		// A transport failure means the live connection is dead: re-dial the
-		// same room (no re-pairing). An undeliverable peer (or a peer that
-		// left mid-request) means the phone is absent: keep the connection,
-		// wake it with a push (best-effort), and wait. A successful reconnect
-		// resets the backoff so a later blip starts fresh.
-		if errors.Is(sendErr, errReconnect) {
-			if reconnectErr := a.reconnect(ctx, sess); reconnectErr != nil {
-				if waitErr := sleep(ctx, backoff); waitErr != nil {
-					return wire.Decision{}, a.timeoutErr(start)
+		case ev := <-w.evCh:
+			switch ev {
+			case evPeerAbsent:
+				// Peer absent (undeliverable / left mid-request): re-wake it
+				// (THROTTLED — the relay re-reports absence on every keepalive
+				// cycle, which would otherwise buzz the phone repeatedly; see
+				// defaultReWakeInterval), back off, then re-announce so a
+				// returning phone sees the request.
+				if time.Since(lastWake) >= a.reWakeInterval {
+					lastWake = time.Now()
+					a.wakePush(ctx)
 				}
+				select {
+				case <-ctx.Done():
+					return wire.Decision{}, a.timeoutErr()
+				case dec := <-w.decCh:
+					return dec, nil
+				case <-time.After(backoff):
+				}
+				_ = a.sendRequest(sess, plain)
 				backoff = nextBackoff(backoff)
-				continue
+			case evReconnected:
+				// The reader re-dialed a fresh socket after the live one died:
+				// re-announce on it at once (no re-pairing; same room and key)
+				// and reset the backoff — a fresh connection starts clean.
+				_ = a.sendRequest(sess, plain)
+				backoff = baseBackoff
 			}
-			backoff = baseBackoff
-		} else if time.Since(lastWake) >= a.reWakeInterval {
-			// Peer explicitly absent (undeliverable / left mid-request): re-wake
-			// it. This is the fallback to the proactive wake above; both are
-			// best-effort and a benign "no subscription yet" is never logged.
-			// THROTTLED: the relay re-reports the peer absent on every keepalive
-			// cycle, so re-waking on each one buzzed the phone every backoff tick
-			// until the human answered (see defaultReWakeInterval). Cap it to one
-			// push per reWakeInterval — a single nudge plus an occasional reminder.
-			lastWake = time.Now()
-			a.wakePush(ctx)
 		}
-		if waitErr := sleep(ctx, backoff); waitErr != nil {
-			return wire.Decision{}, a.timeoutErr(start)
-		}
-		backoff = nextBackoff(backoff)
 	}
 }
 
-// markPeerSeen stamps now as the last proof the phone is present.
-func (a *Agent) markPeerSeen() { a.peerSeenAt.Store(time.Now().UnixNano()) }
-
-// peerSeenSince reports whether the phone proved present at or after t.
-func (a *Agent) peerSeenSince(t time.Time) bool {
-	return a.peerSeenAt.Load() >= t.UnixNano()
-}
+// setPeerPresent records whether the phone is currently in the room.
+func (a *Agent) setPeerPresent(v bool) { a.peerPresent.Store(v) }
 
 // timeoutErr wraps ErrTimeout with what the agent actually observed, so the
-// calling model can act instead of blindly retrying: a phone that never joined
-// the room during the request has almost certainly lost its pairing (page
-// killed / app removed), and only a fresh start_pairing can recover — whereas
-// a phone that was present just has a slow human. errors.Is(err, ErrTimeout)
-// holds for both.
-func (a *Agent) timeoutErr(since time.Time) error {
-	if a.peerSeenSince(since) {
+// calling model can act instead of blindly retrying: a phone that is not in the
+// room has almost certainly lost its pairing (page killed / app removed), and
+// only a fresh start_pairing can recover — whereas a phone that is present just
+// has a slow human. errors.Is(err, ErrTimeout) holds for both.
+func (a *Agent) timeoutErr() error {
+	if a.peerPresent.Load() {
 		return fmt.Errorf("%w: the phone was reachable but nobody answered — retry, or raise expires_in_s", ErrTimeout)
 	}
 	return fmt.Errorf("%w: the phone never connected while this request was pending — it has likely lost its pairing; call start_pairing and have the human enter the new code", ErrTimeout)
 }
 
-// errResend is the internal signal to re-announce the request. errReconnect
-// additionally signals the live connection is dead and must be re-dialed.
-var (
-	errResend    = errors.New("agent: resend")
-	errReconnect = fmt.Errorf("%w: reconnect", errResend)
-)
+// writeTimeout bounds a single frame write. It is derived from context.Background
+// (NOT the request context) so a request that times out never cancels an in-flight
+// write — which, with coder/websocket, would close the SHARED connection the
+// persistent reader depends on.
+const writeTimeout = 10 * time.Second
 
-// askOnce seals plain, sends one box, and reads frames until an
-// authenticated decision for id arrives. It returns errResend on
-// undeliverable / transport failure so Ask can re-announce. Push
-// subscriptions that arrive are absorbed and stored. wake is invoked once the
-// request is on the wire so Ask can proactively nudge a backgrounded phone; it
-// is single-fire across re-announces (see Ask) and never blocks the read.
-func (a *Agent) askOnce(ctx context.Context, sess *Session, req wire.Request, plain []byte, wake func()) (wire.Decision, error) {
+// sendRequest seals plain and writes it as one box on the session's current
+// connection. It never uses the request context for the write (see writeTimeout).
+// A write failure is returned but is non-fatal to Ask: the reader owns reconnect.
+func (a *Agent) sendRequest(sess *Session, plain []byte) error {
 	box, err := sealedbox.Seal(sess.key, plain)
 	if err != nil {
-		return wire.Decision{}, fmt.Errorf("agent: seal: %w", err)
+		return fmt.Errorf("agent: seal: %w", err)
 	}
-	if err := writeEnvelope(ctx, sess.conn, envelope{Box: box}); err != nil {
-		return wire.Decision{}, fmt.Errorf("%w: write: %w", errReconnect, err)
-	}
-	// The request is on the wire: nudge a possibly-backgrounded phone now,
-	// concurrently with waiting for the decision below.
-	wake()
+	ctx, cancel := context.WithTimeout(context.Background(), writeTimeout)
+	defer cancel()
+	return writeEnvelope(ctx, sess.currentConn(), envelope{Box: box})
+}
 
+// ensureReader starts the persistent session reader if one is not already
+// running for sess. It is idempotent: Pair starts it right after pairing, and
+// every Ask calls it (a no-op in production; in a unit test that wires a session
+// directly it is what starts the reader). Starting a reader for a NEW session
+// cancels the previous one — re-pairing replaces the session (and its conn).
+func (a *Agent) ensureReader(sess *Session) {
+	a.readerMu.Lock()
+	defer a.readerMu.Unlock()
+	if a.readerSess == sess {
+		return
+	}
+	if a.readerCancel != nil {
+		a.readerCancel() // stop the reader bound to the previous session.
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	a.readerSess = sess
+	a.readerCancel = cancel
+	a.readerDone = done
+	go a.readLoop(ctx, sess, done)
+}
+
+// readLoop is the single owner of sess.conn for the session's lifetime. It reads
+// continuously — which is what keeps the socket alive, since coder/websocket only
+// answers the relay's keepalive pings while a read is pending (an unread socket is
+// reaped in ~20-40s) — dispatches every frame via handleFrame, and owns reconnect:
+// a dead live connection is re-dialed (same room, same key — no re-pairing) and
+// the in-flight Ask, if any, is told to re-announce. It exits only when its
+// context is canceled (teardown / re-pairing).
+func (a *Agent) readLoop(ctx context.Context, sess *Session, done chan struct{}) {
+	defer close(done)
+	backoff := baseBackoff
 	for {
-		env, err := readEnvelope(ctx, sess.conn)
-		if err != nil {
-			if ctx.Err() != nil {
-				return wire.Decision{}, ErrTimeout
-			}
-			return wire.Decision{}, fmt.Errorf("%w: read: %w", errReconnect, err)
+		if ctx.Err() != nil {
+			return
 		}
-		switch {
-		case env.Relay == wire.SignalUndeliverable, env.Relay == wire.SignalPeerLeft:
-			// Peer absent or left mid-request: re-announce so the outer Ask
-			// loop re-wakes and re-sends when the phone returns.
-			return wire.Decision{}, errResend
-		case env.Relay == wire.SignalPeerJoined:
-			a.markPeerSeen()
-			continue // phone (re)joined: keep waiting for its decision.
-		case env.Relay != "":
-			continue // other relay signals: keep waiting.
-		case env.Box == "":
-			continue // pake/confirm stragglers post-pairing: ignore.
+		env, err := readEnvelope(ctx, sess.currentConn())
+		if err == nil {
+			backoff = baseBackoff // a healthy read: the connection is good again.
+			a.handleFrame(sess, env)
+			continue
 		}
+		if ctx.Err() != nil {
+			return // teardown: the cancel closed the conn.
+		}
+		// Live connection dead: re-dial the same room and, if an Ask is waiting,
+		// have it re-announce. Pace reconnects by backoff REGARDLESS of whether
+		// the dial itself succeeds — the relay can accept the WebSocket upgrade
+		// and then close at once (room full / overloaded, or an LB draining a
+		// backend), so resetting the backoff on a successful *dial* would spin a
+		// connect→close→connect hot loop that floods the relay and the waiter.
+		// Only a successful frame read (above) clears the backoff.
+		if a.readerReconnect(ctx, sess) {
+			a.notifyWaiter(evReconnected)
+		}
+		if sleep(ctx, backoff) != nil {
+			return
+		}
+		backoff = nextBackoff(backoff)
+	}
+}
 
-		plainResp, err := sealedbox.Open(sess.key, env.Box)
-		if err != nil {
-			// Unauthenticated frame: never trust it, keep waiting.
-			continue
-		}
-		a.markPeerSeen() // authenticated frame: only the paired phone can seal it
-		if a.absorbPush(plainResp) {
-			continue
-		}
-		if a.absorbDeviceKey(sess, plainResp) {
-			continue
-		}
-		dec, ok := decodeDecision(plainResp, req, sess)
-		if !ok {
-			continue // wrong id (dup/stale), wrong kind, shape, or bad signature.
-		}
-		return dec, nil
+// readerReconnect closes the dead connection and re-dials the same room, swapping
+// in the fresh conn. Returns false when the session has no dialer (unit fakes) or
+// the dial fails, so readLoop backs off and retries.
+func (a *Agent) readerReconnect(ctx context.Context, sess *Session) bool {
+	_ = sess.currentConn().close()
+	if sess.dial == nil {
+		return false
+	}
+	conn, err := sess.dial(ctx, sess.relayURL, sess.roomID)
+	if err != nil {
+		return false
+	}
+	sess.setConn(conn)
+	return true
+}
+
+// handleFrame classifies one envelope exactly as the old in-Ask read loop did:
+// relay signals update presence / notify the waiter; a box that opens is a push
+// subscription, a device key, or a decision. A frame that does not open under the
+// session key is never trusted, and only a valid decision is ever routed to Ask.
+func (a *Agent) handleFrame(sess *Session, env envelope) {
+	switch {
+	case env.Relay == wire.SignalUndeliverable, env.Relay == wire.SignalPeerLeft:
+		a.setPeerPresent(false)      // the phone is not in the room right now.
+		a.notifyWaiter(evPeerAbsent) // absent/left mid-request: Ask re-announces.
+		return
+	case env.Relay == wire.SignalPeerJoined:
+		a.setPeerPresent(true) // phone (re)joined.
+		return
+	case env.Relay != "":
+		return // other relay signals: ignore.
+	case env.Box == "":
+		return // pake/confirm stragglers post-pairing: ignore.
+	}
+
+	plain, err := sealedbox.Open(sess.key, env.Box)
+	if err != nil {
+		return // unauthenticated frame: never trust it.
+	}
+	a.setPeerPresent(true) // authenticated frame: only the paired phone can seal it.
+	if a.absorbPush(plain) {
+		return
+	}
+	if a.absorbDeviceKey(sess, plain) {
+		return
+	}
+	a.routeDecision(sess, plain)
+}
+
+// routeDecision delivers plain to the in-flight Ask iff it is a valid decision
+// (matching id, matching shape, and a verifying signature) for the waiting
+// request. A decision with no waiter (a stale re-delivery between requests), the
+// wrong id, a mismatched shape, or a bad/missing signature is dropped — never
+// approved (decodeDecision enforces the trust boundary; see verifyDecisionSig).
+func (a *Agent) routeDecision(sess *Session, plain []byte) {
+	a.waiterMu.Lock()
+	w := a.waiter
+	a.waiterMu.Unlock()
+	if w == nil {
+		return
+	}
+	dec, ok := decodeDecision(plain, w.req, sess)
+	if !ok {
+		return
+	}
+	select {
+	case w.decCh <- dec:
+	default: // already delivered: drop the duplicate.
+	}
+}
+
+// notifyWaiter passes a transport event to the in-flight Ask (best-effort: evCh
+// is buffered and Ask coalesces re-announces, so a full channel simply drops a
+// redundant trigger).
+func (a *Agent) notifyWaiter(ev readerEvent) {
+	a.waiterMu.Lock()
+	w := a.waiter
+	a.waiterMu.Unlock()
+	if w == nil {
+		return
+	}
+	select {
+	case w.evCh <- ev:
+	default:
 	}
 }
 
@@ -779,20 +958,6 @@ func resultMatchesKind(res wire.Result, resp wire.Response) bool {
 	default:
 		return false
 	}
-}
-
-// reconnect re-dials the relay room and swaps in a fresh connection on the
-// session. The session key is unchanged (no re-pairing): both peers rejoin
-// the same room id and the agent re-announces. Returns an error if the dial
-// or handshake re-confirmation fails.
-func (a *Agent) reconnect(ctx context.Context, sess *Session) error {
-	_ = sess.conn.close()
-	conn, err := sess.dial(ctx, sess.relayURL, sess.roomID)
-	if err != nil {
-		return err
-	}
-	sess.conn = conn
-	return nil
 }
 
 // errNoPushSub is returned by Notify before any subscription has arrived. It is

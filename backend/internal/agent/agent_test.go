@@ -110,6 +110,9 @@ func pairedAgent(t *testing.T, key []byte, conn frameConn, dial dialer) *Agent {
 	require.NoError(t, err)
 	a.dial = dial
 	a.sess = &Session{relayURL: "ws://test/ws", roomID: "room1", code: "C0-DE5", key: key, conn: conn, dial: dial}
+	// Stop the persistent reader (started lazily by the first Ask) when the test
+	// ends, so no reader goroutine outlives the test and races its cleanup.
+	t.Cleanup(a.Close)
 	// Short backoff via context-bound waits; tests use small sleeps.
 	return a
 }
@@ -179,20 +182,31 @@ func TestAskResendsOnUndeliverable(t *testing.T) {
 	conn := newFakeConn()
 	a := pairedAgent(t, key, conn, nil)
 
-	// First attempt: peer absent. Then the phone answers.
+	// First attempt: peer absent. The phone answers only AFTER the re-announce
+	// lands (re-announce is backoff-paced now, so answering too early would let
+	// the decision preempt the re-send we are asserting).
 	pushSignal(t, conn, wire.SignalUndeliverable)
 	approved := true
 	go func() {
-		time.Sleep(50 * time.Millisecond)
+		waitWrites(conn, 2, 3*time.Second)
 		pushBox(t, conn, key, wire.Decision{Kind: wire.KindDecision, ID: "req_1", Result: wire.Result{Approved: &approved}})
 	}()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	dec, err := a.Ask(ctx, yesnoReq())
 	require.NoError(t, err)
 	require.NotNil(t, dec.Result.Approved)
 	assert.GreaterOrEqual(t, conn.writeCount(), 2) // resent at least once.
+}
+
+// waitWrites blocks until conn has captured at least n writes or the deadline
+// elapses; it lets a test answer only after a (backoff-paced) re-announce.
+func waitWrites(conn *fakeConn, n int, within time.Duration) {
+	deadline := time.Now().Add(within)
+	for conn.writeCount() < n && time.Now().Before(deadline) {
+		time.Sleep(2 * time.Millisecond)
+	}
 }
 
 // TestAskThrottlesReWake guards the push-storm fix: the relay re-reports the
@@ -215,14 +229,15 @@ func TestAskThrottlesReWake(t *testing.T) {
 	stubSub(t, a, srv.URL)
 	a.reWakeInterval = time.Hour // far longer than the test: no reactive re-wake.
 
-	// Three "peer absent" reports drive three resends; only then does the phone
-	// answer. Each resend re-enters the reactive branch.
+	// Three "peer absent" reports drive re-announces; the phone answers only once
+	// at least two re-announces have landed, so multiple absence reports are
+	// exercised. Each re-enters the reactive branch, but the wake is throttled.
 	pushSignal(t, conn, wire.SignalUndeliverable)
 	pushSignal(t, conn, wire.SignalUndeliverable)
 	pushSignal(t, conn, wire.SignalUndeliverable)
 	approved := true
 	go func() {
-		time.Sleep(200 * time.Millisecond)
+		waitWrites(conn, 3, 5*time.Second) // initial + >=2 re-announces
 		pushBox(t, conn, key, wire.Decision{Kind: wire.KindDecision, ID: "req_1", Result: wire.Result{Approved: &approved}})
 	}()
 
@@ -231,7 +246,7 @@ func TestAskThrottlesReWake(t *testing.T) {
 	dec, err := a.Ask(ctx, yesnoReq())
 	require.NoError(t, err)
 	require.NotNil(t, dec.Result.Approved)
-	assert.GreaterOrEqual(t, conn.writeCount(), 3, "the loop must have resent on each undeliverable")
+	assert.GreaterOrEqual(t, conn.writeCount(), 3, "the loop re-announced on the absence reports")
 	// Let the proactive goroutine's single push (if any) land before counting.
 	time.Sleep(100 * time.Millisecond)
 	assert.LessOrEqual(t, pushes.Load(), int32(1), "throttled: one wake-up, not one per resend")
@@ -270,6 +285,43 @@ func TestAskReconnectsOnTransportError(t *testing.T) {
 	dialMu.Lock()
 	assert.GreaterOrEqual(t, dialCalls, int32(1))
 	dialMu.Unlock()
+}
+
+// errConn is a frameConn whose read fails immediately (a socket the relay
+// accepted then closed at once), while honoring ctx cancellation so the reader
+// can still be torn down.
+type errConn struct{}
+
+func (errConn) readFrame(ctx context.Context) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return nil, errors.New("errconn: closed by peer")
+}
+func (errConn) writeFrame(context.Context, []byte) error { return nil }
+func (errConn) close() error                             { return nil }
+
+// TestReaderReconnectBacksOffOnFlap guards against a hot reconnect loop: a
+// connection that DIALS successfully but errors on the first read (the relay
+// accepts the WebSocket upgrade then closes at once — room full / overloaded /
+// an LB draining a backend) must be re-dialed with backoff, not spun as fast as
+// the CPU allows.
+func TestReaderReconnectBacksOffOnFlap(t *testing.T) {
+	key := make([]byte, sealedbox.KeySize)
+	var dials atomic.Int32
+	dial := func(_ context.Context, _, _ string) (frameConn, error) {
+		dials.Add(1)
+		return errConn{}, nil // dials OK, every read errors immediately.
+	}
+	a := pairedAgent(t, key, errConn{}, dial)
+	a.ensureReader(a.sess)
+
+	// A hot loop would re-dial thousands of times in this window; backoff
+	// (baseBackoff=500ms, growing) caps it to a handful.
+	time.Sleep(1200 * time.Millisecond)
+	n := dials.Load()
+	assert.GreaterOrEqual(t, n, int32(1), "it must actually attempt to reconnect")
+	assert.LessOrEqual(t, n, int32(6), "reconnects must be backoff-paced, not a hot loop (got %d)", n)
 }
 
 func TestAskTimeoutNeverApproves(t *testing.T) {
@@ -321,6 +373,38 @@ func TestAskTimeoutReportsPhonePresence(t *testing.T) {
 	})
 }
 
+// TestAskTimeoutPresentAfterIdleAbsorb guards the read-pump diagnostic fix: a
+// phone that proved present by delivering a frame WHILE IDLE (absorbed by the
+// persistent reader before this request even started) must be reported as
+// "nobody answered" on timeout, not "never connected". The old timestamp-since-
+// request-start check misread such a silent-but-connected phone as having lost
+// its pairing; the live presence flag fixes that.
+func TestAskTimeoutPresentAfterIdleAbsorb(t *testing.T) {
+	key := make([]byte, sealedbox.KeySize)
+	conn := newFakeConn()
+	a := pairedAgent(t, key, conn, nil)
+
+	// Reader starts; the phone delivers its push subscription while idle (an
+	// authenticated frame marks the peer present), then stays silent.
+	a.ensureReader(a.sess)
+	pushBox(t, conn, key, wire.PushSub{
+		Kind:         wire.KindPushSub,
+		Subscription: wire.PushSubscription{Endpoint: "https://push.example/present", Keys: wire.PushKeys{P256dh: "p", Auth: "x"}},
+	})
+	require.Eventually(t, func() bool {
+		a.mu.Lock()
+		defer a.mu.Unlock()
+		return a.sub != nil
+	}, 2*time.Second, 5*time.Millisecond)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	_, err := a.Ask(ctx, yesnoReq())
+	require.ErrorIs(t, err, ErrTimeout)
+	assert.Contains(t, err.Error(), "nobody answered")
+	assert.NotContains(t, err.Error(), "never connected")
+}
+
 func TestAskNotPaired(t *testing.T) {
 	a, err := New(Config{})
 	require.NoError(t, err)
@@ -351,6 +435,66 @@ func TestAbsorbPushSubscription(t *testing.T) {
 	a.mu.Unlock()
 	require.NotNil(t, sub)
 	assert.Equal(t, "https://push.example/abc", sub.Endpoint)
+}
+
+// TestReaderAbsorbsPushSubWhileIdle is the regression test for the idle
+// read-pump defect. The phone seals + sends its Web Push subscription right
+// after pairing — BEFORE any request. With the old design nobody read the
+// socket between pairing and the first Ask, so that frame was lost and a.sub
+// stayed nil: the agent was Paired() but could never wake a backgrounded phone
+// ("requests go nowhere"). The persistent reader must absorb it with NO Ask in
+// flight.
+func TestReaderAbsorbsPushSubWhileIdle(t *testing.T) {
+	key := make([]byte, sealedbox.KeySize)
+	conn := newFakeConn()
+	a := pairedAgent(t, key, conn, nil)
+
+	// Start the persistent reader exactly as Pair does — without any Ask.
+	a.ensureReader(a.sess)
+
+	// The phone delivers its subscription while the agent is idle.
+	pushBox(t, conn, key, wire.PushSub{
+		Kind:         wire.KindPushSub,
+		Subscription: wire.PushSubscription{Endpoint: "https://push.example/idle", Keys: wire.PushKeys{P256dh: "p", Auth: "x"}},
+	})
+
+	require.Eventually(t, func() bool {
+		a.mu.Lock()
+		defer a.mu.Unlock()
+		return a.sub != nil && a.sub.Endpoint == "https://push.example/idle"
+	}, 2*time.Second, 5*time.Millisecond, "push subscription must be absorbed with no Ask in flight")
+}
+
+// TestReaderAbsorbsDeviceKeyWhileIdle: the device key the phone sends right after
+// pairing is pinned by the idle reader, so the very first request's signed
+// decision verifies — even though no Ask was running when the key arrived.
+func TestReaderAbsorbsDeviceKeyWhileIdle(t *testing.T) {
+	key := make([]byte, sealedbox.KeySize)
+	conn := newFakeConn()
+	a := pairedAgent(t, key, conn, nil)
+	signer := newDeviceSigner(t)
+
+	// Reader starts (as Pair would); the phone delivers its device key while idle.
+	a.ensureReader(a.sess)
+	pushBox(t, conn, key, signer.deviceKeyFrame())
+
+	// A later request signed by that key must verify (proving it was pinned while
+	// idle — an unsigned/unpinned decision would time out, see the reject tests).
+	// The decision is sent only after Ask registers its waiter.
+	approved := true
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		dec := wire.Decision{Kind: wire.KindDecision, ID: "req_1", Result: wire.Result{Approved: &approved}}
+		dec.Sig = signer.sign(t, "room1", dec)
+		pushBox(t, conn, key, dec)
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	got, err := a.Ask(ctx, yesnoReq())
+	require.NoError(t, err)
+	require.NotNil(t, got.Result.Approved)
+	assert.True(t, *got.Result.Approved, "a decision signed by the idle-pinned device key verifies")
 }
 
 func TestAskExpiresInSNeverApproves(t *testing.T) {
@@ -408,15 +552,15 @@ func TestAskResendsOnPeerLeft(t *testing.T) {
 	conn := newFakeConn()
 	a := pairedAgent(t, key, conn, nil)
 
-	// Phone leaves mid-request, then returns and answers.
+	// Phone leaves mid-request, then returns and answers after the re-announce.
 	pushSignal(t, conn, wire.SignalPeerLeft)
 	approved := true
 	go func() {
-		time.Sleep(50 * time.Millisecond)
+		waitWrites(conn, 2, 3*time.Second)
 		pushBox(t, conn, key, wire.Decision{Kind: wire.KindDecision, ID: "req_1", Result: wire.Result{Approved: &approved}})
 	}()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	dec, err := a.Ask(ctx, yesnoReq())
 	require.NoError(t, err)
@@ -618,11 +762,11 @@ func TestAskDeviceKeyPinnedRejectsSwap(t *testing.T) {
 	assert.Nil(t, dec.Result.Approved, "a swapped attacker key must not overwrite the pinned real key")
 
 	// The pinned real key still works: a decision signed by signer1 verifies.
-	conn2 := newFakeConn()
-	a.sess.conn = conn2 // reuse the same session (devicePub still pinned to real).
+	// Reuse the SAME connection (the single reader owns it; devicePub stays
+	// pinned to real on the session).
 	good := wire.Decision{Kind: wire.KindDecision, ID: "req_2", Result: wire.Result{Approved: boolPtr(true)}}
 	good.Sig = real.sign(t, "room1", good)
-	pushBox(t, conn2, key, good)
+	pushBox(t, conn, key, good)
 
 	ctx2, cancel2 := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel2()
