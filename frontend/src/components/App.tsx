@@ -11,6 +11,7 @@ import { canonicalizeCode, roomFromCode } from '../lib/codegen.ts';
 import { SessionManager, type AgentSummary } from '../lib/manager.ts';
 import { type PairPayload } from '../lib/payload.ts';
 import { subscribeForPush } from '../lib/push.ts';
+import { localStorePersistence } from '../lib/store.ts';
 import { type SessionState } from '../lib/session.ts';
 import { PairScreen } from './PairScreen.tsx';
 import {
@@ -99,7 +100,9 @@ export default function App() {
   // One SessionManager owns all live agents; the App re-renders off its single
   // onChange. tick forces a re-render when the manager (any session/roster) changes.
   const managerRef = useRef<SessionManager>(null as unknown as SessionManager);
-  if (managerRef.current === null) managerRef.current = new SessionManager();
+  if (managerRef.current === null) {
+    managerRef.current = new SessionManager({}, localStorePersistence);
+  }
   const manager = managerRef.current;
 
   const [, setTick] = useState(0);
@@ -113,6 +116,25 @@ export default function App() {
   // Subscribe to the manager once; tear every session down on unmount.
   useEffect(() => {
     const unsub = manager.onChange(() => setTick((t) => t + 1));
+    // Restore persisted sessions (iOS kills the PWA page routinely): each
+    // rejoins its room already paired, and the agent's re-announce delivers any
+    // pending request within seconds. Storage stays put on unmount.
+    if (manager.restoreAll() > 0) {
+      setPairing(false);
+      // Re-subscribe for push with the persisted agent VAPID key: the agent
+      // sends its key only once (right after pairing), so a restored session
+      // never re-receives it. Permission was granted at original pairing, so
+      // this resolves silently; the sub is retained and delivered to each
+      // session once its socket opens.
+      const restoredKey = manager.firstVapidKey();
+      if (restoredKey && !pushDoneRef.current) {
+        pushDoneRef.current = true;
+        (async () => {
+          const sub = await subscribeForPush(restoredKey);
+          if (sub) manager.sendPushSubscription(sub);
+        })();
+      }
+    }
     return () => {
       unsub();
       manager.closeAll();

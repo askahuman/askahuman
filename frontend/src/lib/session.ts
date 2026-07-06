@@ -78,6 +78,20 @@ export interface SessionOptions {
   onVapidKey?: (publicKey: string) => void;
 }
 
+/**
+ * RestoredSession is the persisted state a Session resumes from after a page
+ * kill (see lib/store.ts): the already-derived SPAKE2 session key plus the
+ * de-dupe/redelivery bookkeeping. A restored session NEVER runs the handshake
+ * again — it rejoins the room paired and waits for the agent's re-announce.
+ */
+export interface RestoredSession {
+  key: Uint8Array;
+  agent?: string;
+  vapid?: string;
+  seen?: string[];
+  decisions?: Record<string, Decision>;
+}
+
 /** initialState is the pre-pairing snapshot (the pair screen). */
 export function initialState(): SessionState {
   return {
@@ -101,7 +115,9 @@ export function initialState(): SessionState {
 export class Session {
   private state: SessionState;
   private readonly relay: RelayClient;
-  private readonly pairing: Pairing;
+  // pairing is null for a RESTORED session: the key is already derived, so
+  // stray pake/confirm frames must be ignored (never re-derive over a live key).
+  private readonly pairing: Pairing | null;
   private sessionKey?: Uint8Array;
   // vapidKey is the agent-delivered VAPID public key (sealed during pairing); the
   // App subscribes for Web Push with exactly this key. Undefined until received.
@@ -117,15 +133,15 @@ export class Session {
   private readonly listeners = new Set<(s: SessionState) => void>();
   private confirmedTimer: ReturnType<typeof setTimeout> | null = null;
 
-  constructor(payload: PairPayload, opts: SessionOptions = {}) {
+  constructor(payload: PairPayload, opts: SessionOptions = {}, restored?: RestoredSession) {
     this.state = { ...initialState(), roomID: payload.room };
     this.onVapidKey = opts.onVapidKey;
 
     const relayEvents: RelayEvents = {
       onState: (conn, attempt) => this.onConnState(conn, attempt),
       onSignal: (signal) => this.onSignal(signal),
-      onPake: (b64) => this.pairing.onPeerPake(b64),
-      onConfirm: (b64) => this.pairing.onPeerConfirm(b64),
+      onPake: (b64) => this.pairing?.onPeerPake(b64),
+      onConfirm: (b64) => this.pairing?.onPeerConfirm(b64),
       onBox: (b64) => this.onBox(b64),
     };
     this.relay = (opts.relayFactory ?? defaultRelayFactory(opts.relayOptions))(
@@ -133,6 +149,26 @@ export class Session {
       payload.room,
       relayEvents,
     );
+
+    if (restored) {
+      // Resume paired: seed the key + bookkeeping and skip the handshake
+      // entirely. The agent's Ask loop re-announces the pending request within
+      // its backoff once we rejoin the room, so there is nothing else to do.
+      this.pairing = null;
+      this.sessionKey = restored.key;
+      this.vapidKey = restored.vapid;
+      for (const id of restored.seen ?? []) this.seenIDs.add(id);
+      for (const [id, dec] of Object.entries(restored.decisions ?? {})) {
+        this.sentDecisions.set(id, dec);
+      }
+      this.state = {
+        ...this.state,
+        paired: true,
+        screen: 'listening',
+        agent: restored.agent || this.state.agent,
+      };
+      return;
+    }
 
     const send: PairingSend = {
       sendPake: (b64) => this.relay.sendPake(b64),
@@ -153,6 +189,29 @@ export class Session {
    *  the agent has not sent one yet (App falls back to the build-time key). */
   getVapidKey(): string | undefined {
     return this.vapidKey;
+  }
+
+  /** getSessionKey returns the derived session key once paired (persistence). */
+  getSessionKey(): Uint8Array | undefined {
+    return this.sessionKey;
+  }
+
+  /** MAX_PERSISTED_SEEN bounds the persisted de-dupe list (newest kept). */
+  private static readonly MAX_PERSISTED_SEEN = 50;
+
+  /** persistState snapshots the de-dupe/redelivery bookkeeping for storage.
+   *  The OPEN card's id is excluded: it enters seenIDs on receipt (so live
+   *  re-announces don't reopen it), but persisting it before it is answered
+   *  would make the agent's re-announce after a page kill silently dropped —
+   *  the one re-announce that must re-open the card. */
+  persistState(): { seen: string[]; decisions: Record<string, Decision> } {
+    const open = this.state.request?.id;
+    return {
+      seen: Array.from(this.seenIDs)
+        .filter((id) => id !== open)
+        .slice(-Session.MAX_PERSISTED_SEEN),
+      decisions: Object.fromEntries(this.sentDecisions),
+    };
   }
 
   /** onChange subscribes to state snapshots; returns an unsubscribe. */
@@ -312,7 +371,7 @@ export class Session {
     if (signal === 'peer_joined') {
       this.set({ peerPresent: true });
       // Peer present => start (or re-send) our pake; harmless if already paired.
-      if (!this.state.paired) this.pairing.start();
+      if (!this.state.paired) this.pairing?.start();
       return;
     }
     if (signal === 'peer_left') {
@@ -329,7 +388,7 @@ export class Session {
     // undeliverable: our frame had no peer. The agent owns retries; we just
     // re-announce our pake so a returning agent can pair.
     if (signal === 'undeliverable' && !this.state.paired) {
-      this.pairing.start();
+      this.pairing?.start();
     }
   }
 

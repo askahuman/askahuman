@@ -9,6 +9,7 @@ import { Handshake, open as boxOpen, seal as boxSeal } from '../src/lib/crypto.t
 import { SessionManager } from '../src/lib/manager.ts';
 import { type WSLike } from '../src/lib/relay.ts';
 import { type PairPayload } from '../src/lib/payload.ts';
+import { type Persistence, type StoredSession } from '../src/lib/store.ts';
 import { type Decision, type Request, KindRequest, encodeVapidKey } from '../src/lib/wire.ts';
 
 const b64 = {
@@ -58,11 +59,25 @@ function payload(room: string, code = 'PAIR-1'): PairPayload {
   return { r: `wss://relay.example/ws?room=${room}`, room, code };
 }
 
-function newManager(): SessionManager {
+function newManager(persist?: Persistence): SessionManager {
   FakeWS.byRoom.clear();
-  return new SessionManager({
-    relayOptions: { wsFactory: (url) => new FakeWS(url), setTimer: () => 0, clearTimer: () => {} },
-  });
+  return new SessionManager(
+    {
+      relayOptions: { wsFactory: (url) => new FakeWS(url), setTimer: () => 0, clearTimer: () => {} },
+    },
+    persist,
+  );
+}
+
+/** FakePersist is an in-memory Persistence capturing every save. */
+class FakePersist implements Persistence {
+  constructor(public stored: StoredSession[] = []) {}
+  load(): StoredSession[] {
+    return this.stored;
+  }
+  save(list: StoredSession[]): void {
+    this.stored = list;
+  }
 }
 
 /** pair drives the full SPAKE2 handshake for one room; returns the agent key. */
@@ -380,5 +395,114 @@ describe('SessionManager', () => {
     m.setActive(a);
     m.approve();
     expect(m.pendingCount()).toBe(1);
+  });
+});
+
+describe('SessionManager persistence (ADR 0020)', () => {
+  it('persists a paired session and restores it: rejoin paired, requests deliverable', () => {
+    const persist = new FakePersist();
+    const m1 = newManager(persist);
+    const room = 'abcd1234abcd1234';
+    m1.add(payload(room));
+    const { ws: ws1, agentKey } = pair(room);
+    // The agent label arrives with a first request; it must be persisted too.
+    ws1.recv(sealReq(agentKey, yesno('r0', 'codex @ laptop')));
+    m1.approve();
+
+    const saved = persist.stored;
+    expect(saved).toHaveLength(1);
+    expect(saved[0]!.room).toBe(room);
+    expect(saved[0]!.agent).toBe('codex @ laptop');
+    expect(b64.decode(saved[0]!.key)).toHaveLength(32);
+    expect(saved[0]!.seen).toContain('r0');
+
+    // "iOS killed the page": a brand-new manager restores from storage.
+    const m2 = newManager(persist);
+    expect(m2.restoreAll()).toBe(1);
+    const s = m2.activeState();
+    expect(s.paired).toBe(true);
+    expect(s.screen).toBe('listening');
+    expect(s.agent).toBe('codex @ laptop');
+
+    // The relay socket reopens; the agent re-announces a NEW request and the
+    // restored key opens it -> the card renders without any re-pairing.
+    const ws2 = FakeWS.byRoom.get(room)!;
+    ws2.open();
+    ws2.recv(sealReq(agentKey, yesno('r1', 'codex @ laptop')));
+    expect(m2.activeState().screen).toBe('yesno');
+
+    // And the decision seals back under the SAME key the agent holds.
+    m2.approve();
+    const boxOut = ws2.sent.find((f) => typeof f.box === 'string')!.box as string;
+    const d = JSON.parse(new TextDecoder().decode(boxOpen(agentKey, boxOut))) as Decision;
+    expect(d).toEqual({ kind: 'decision', id: 'r1', result: { approved: true } });
+  });
+
+  it('restores seen ids and sent decisions: an answered re-announce is re-sent, not reopened', () => {
+    const persist = new FakePersist();
+    const m1 = newManager(persist);
+    const room = 'beef5678beef5678';
+    m1.add(payload(room));
+    const { ws: ws1, agentKey } = pair(room);
+    ws1.recv(sealReq(agentKey, yesno('r1')));
+    m1.approve();
+
+    // Reload. The agent never got the decision (half-open socket before the
+    // kill) and re-announces r1: the restored session must re-send the
+    // persisted decision instead of reopening the card or dropping the frame.
+    const m2 = newManager(persist);
+    m2.restoreAll();
+    const ws2 = FakeWS.byRoom.get(room)!;
+    ws2.open();
+    ws2.recv(sealReq(agentKey, yesno('r1')));
+    expect(m2.activeState().request).toBeNull(); // not reopened
+    const boxOut = ws2.sent.find((f) => typeof f.box === 'string')!.box as string;
+    const d = JSON.parse(new TextDecoder().decode(boxOpen(agentKey, boxOut))) as Decision;
+    expect(d).toEqual({ kind: 'decision', id: 'r1', result: { approved: true } });
+  });
+
+  it('a PENDING (unanswered) request re-opens after restore via the re-announce', () => {
+    const persist = new FakePersist();
+    const m1 = newManager(persist);
+    const room = 'feed1111feed1111';
+    m1.add(payload(room));
+    const { ws: ws1, agentKey } = pair(room);
+    ws1.recv(sealReq(agentKey, yesno('r7')));
+    expect(m1.activeState().screen).toBe('yesno'); // card open, NOT answered
+
+    // Page kill mid-card. The open id must NOT be persisted as seen — else the
+    // agent's re-announce (its only recovery path) would be dropped forever.
+    expect(persist.stored[0]!.seen ?? []).not.toContain('r7');
+
+    const m2 = newManager(persist);
+    m2.restoreAll();
+    const ws2 = FakeWS.byRoom.get(room)!;
+    ws2.open();
+    ws2.recv(sealReq(agentKey, yesno('r7'))); // the agent's re-announce
+    expect(m2.activeState().screen).toBe('yesno'); // card re-opened
+    m2.approve();
+    const boxOut = ws2.sent.find((f) => typeof f.box === 'string')!.box as string;
+    const d = JSON.parse(new TextDecoder().decode(boxOpen(agentKey, boxOut))) as Decision;
+    expect(d).toEqual({ kind: 'decision', id: 'r7', result: { approved: true } });
+  });
+
+  it('remove wipes the persisted entry (forget this agent)', () => {
+    const persist = new FakePersist();
+    const m = newManager(persist);
+    const room = 'cafe9999cafe9999';
+    m.add(payload(room));
+    pair(room);
+    expect(persist.stored).toHaveLength(1);
+    m.remove(room);
+    expect(persist.stored).toHaveLength(0);
+  });
+
+  it('a pre-pair session is never persisted (no key yet)', () => {
+    const persist = new FakePersist();
+    const m = newManager(persist);
+    m.add(payload('dddd0000dddd0000'));
+    const ws = FakeWS.byRoom.get('dddd0000dddd0000')!;
+    ws.open(); // connected but not paired
+    expect(persist.stored).toHaveLength(0);
   });
 });
