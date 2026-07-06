@@ -396,6 +396,113 @@ describe('SessionManager', () => {
     m.approve();
     expect(m.pendingCount()).toBe(1);
   });
+
+  it('re-delivers the retained push subscription on every fresh connection (reconnect re-arm)', () => {
+    const m = newManager();
+    const room = 'f00d0000f00d0000';
+    m.add(payload(room));
+    pair(room);
+
+    const sub = { endpoint: 'https://push.example/x', keys: { p256dh: 'p', auth: 'au' } };
+    expect(m.sendPushSubscription(sub)).toBe(true);
+    const ws1 = FakeWS.byRoom.get(room)!;
+    expect(ws1.sent.filter((f) => typeof f.box === 'string').length).toBeGreaterThanOrEqual(1);
+
+    // iOS resume: retryAll drops + reopens the socket. A sub written into the now
+    // half-open socket while the agent was away was counted "sent"; on the fresh
+    // connection it must be re-delivered (pushSent re-armed on the open transition).
+    m.retryAll();
+    const ws2 = FakeWS.byRoom.get(room)!;
+    expect(ws2).not.toBe(ws1);
+    expect(ws2.sent.filter((f) => typeof f.box === 'string').length).toBe(0); // nothing yet (connecting)
+    ws2.open();
+    expect(ws2.sent.filter((f) => typeof f.box === 'string').length).toBeGreaterThanOrEqual(1);
+  });
+
+  it('retains a per-room sub sent while CONNECTING and delivers it once the socket opens', () => {
+    const m = newManager();
+    const room = 'ab12ab12ab12ab12';
+    m.add(payload(room));
+    pair(room);
+
+    // iOS kill -> restore race: retryAll dropped the socket and the replacement
+    // is still CONNECTING when subscribeForPush resolves and the App delivers.
+    m.retryAll();
+    const ws2 = FakeWS.byRoom.get(room)!;
+    const sub = { endpoint: 'https://push.example/agent', keys: { p256dh: 'p', auth: 'au' } };
+    expect(m.sendPushSubscriptionTo(room, sub)).toBe(false); // write into a connecting socket
+    expect(ws2.sent.filter((f) => typeof f.box === 'string')).toHaveLength(0);
+
+    // The sub must be RETAINED: the open transition is the retry that delivers it.
+    ws2.open();
+    expect(ws2.sent.filter((f) => typeof f.box === 'string').length).toBeGreaterThanOrEqual(1);
+  });
+
+  it("re-delivers the room's OWN sub on reconnect (per-agent-key room, not just fanout)", () => {
+    const m = newManager();
+    const room = 'cd34cd34cd34cd34';
+    m.add(payload(room));
+    pair(room);
+
+    const sub = { endpoint: 'https://push.example/agent', keys: { p256dh: 'p', auth: 'au' } };
+    expect(m.sendPushSubscriptionTo(room, sub)).toBe(true); // delivered on the live socket
+
+    // Reconnect (iOS resume). The prod build bakes an EMPTY build key (ADR 0016),
+    // so per-agent rooms are the only kind there: the per-room sub must be
+    // re-delivered on the fresh connection, not only the global fanout one.
+    m.retryAll();
+    const ws2 = FakeWS.byRoom.get(room)!;
+    ws2.open();
+    expect(ws2.sent.filter((f) => typeof f.box === 'string').length).toBeGreaterThanOrEqual(1);
+  });
+
+  it('reconnect re-delivers the per-agent sub, NOT the build fanout sub (build key baked)', () => {
+    const m = newManager();
+    const room = 'ef56ef56ef56ef56';
+    m.add(payload(room));
+    const { agentKey } = pair(room);
+
+    // Self-hoster with a baked build key: the anyPaired fanout fires first, then
+    // the agent's OWN key produces this room's subscription.
+    m.sendPushSubscription({ endpoint: 'https://push.example/build', keys: { p256dh: 'p', auth: 'au' } });
+    m.sendPushSubscriptionTo(room, { endpoint: 'https://push.example/agent', keys: { p256dh: 'p', auth: 'au' } });
+
+    m.retryAll();
+    const ws2 = FakeWS.byRoom.get(room)!;
+    ws2.open();
+    const boxes = ws2.sent.filter((f) => typeof f.box === 'string');
+    expect(boxes.length).toBeGreaterThanOrEqual(1);
+    // The re-delivered sub is the AGENT-keyed one — re-sending the build sub
+    // would clobber the agent's correct endpoint and 403 every push forever.
+    const got = JSON.parse(
+      new TextDecoder().decode(boxOpen(agentKey, boxes.at(-1)!.box as string)),
+    ) as { kind: string; subscription: { endpoint: string } };
+    expect(got.kind).toBe('push_sub');
+    expect(got.subscription.endpoint).toBe('https://push.example/agent');
+  });
+
+  it('vapidKeys returns each agent VAPID key tagged with its room (restore re-subscribe)', () => {
+    const m = newManager();
+    const a = 'aa11aa11aa11aa11';
+    const b = 'bb22bb22bb22bb22';
+    m.add(payload(a));
+    m.add(payload(b));
+    const { ws: wsA, agentKey: keyA } = pair(a);
+    const { ws: wsB, agentKey: keyB } = pair(b);
+
+    expect(m.vapidKeys()).toEqual([]); // no agent has sent a key yet
+
+    // Each agent delivers its OWN sealed VAPID key.
+    wsA.recv({ box: boxSeal(keyA, encodeVapidKey('Akey')) });
+    wsB.recv({ box: boxSeal(keyB, encodeVapidKey('Bkey')) });
+
+    // Both returned, tagged with their room in insertion order — the App uses this
+    // after a page kill to re-subscribe each agent under ITS OWN key.
+    expect(m.vapidKeys()).toEqual([
+      { room: a, key: 'Akey' },
+      { room: b, key: 'Bkey' },
+    ]);
+  });
 });
 
 describe('SessionManager persistence (ADR 0020)', () => {
