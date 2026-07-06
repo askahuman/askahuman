@@ -282,6 +282,40 @@ func TestAskTimeoutNeverApproves(t *testing.T) {
 	assert.Nil(t, dec.Result.Approved) // a timeout is never an approval.
 }
 
+// TestAskTimeoutReportsPhonePresence pins the timeout diagnostics: the same
+// ErrTimeout carries "re-pair" guidance when the phone never joined the room
+// during the request, and "human is slow" guidance when it did. The calling
+// model needs the distinction to recover (start_pairing) instead of retrying
+// into a dead room.
+func TestAskTimeoutReportsPhonePresence(t *testing.T) {
+	t.Run("phone never connected -> suggests re-pairing", func(t *testing.T) {
+		key := make([]byte, sealedbox.KeySize)
+		conn := newFakeConn()
+		a := pairedAgent(t, key, conn, nil)
+		pushSignal(t, conn, wire.SignalUndeliverable)
+
+		ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+		defer cancel()
+		_, err := a.Ask(ctx, yesnoReq())
+		require.ErrorIs(t, err, ErrTimeout)
+		assert.Contains(t, err.Error(), "never connected")
+		assert.Contains(t, err.Error(), "start_pairing")
+	})
+
+	t.Run("phone present but silent -> human did not answer", func(t *testing.T) {
+		key := make([]byte, sealedbox.KeySize)
+		conn := newFakeConn()
+		a := pairedAgent(t, key, conn, nil)
+		pushSignal(t, conn, wire.SignalPeerJoined) // phone in the room; nobody taps
+
+		ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+		defer cancel()
+		_, err := a.Ask(ctx, yesnoReq())
+		require.ErrorIs(t, err, ErrTimeout)
+		assert.Contains(t, err.Error(), "nobody answered")
+	})
+}
+
 func TestAskNotPaired(t *testing.T) {
 	a, err := New(Config{})
 	require.NoError(t, err)
