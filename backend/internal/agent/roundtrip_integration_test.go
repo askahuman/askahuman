@@ -322,3 +322,101 @@ func TestIntegrationRelayBlindness(t *testing.T) {
 	}
 	assert.True(t, sawBox, "expected at least one box frame to inspect")
 }
+
+// TestIntegrationPushSubAbsorbedWithoutAsk is the end-to-end regression for the
+// idle read-pump defect over the REAL relay: the phone seals + sends its Web
+// Push subscription right after pairing and BEFORE any request. The agent's
+// persistent reader must absorb it with no Ask in flight — otherwise a.sub stays
+// nil and a backgrounded phone can never be woken ("paired but requests go
+// nowhere"). Against the pre-fix code (reader ran only during an Ask) this fails.
+func TestIntegrationPushSubAbsorbedWithoutAsk(t *testing.T) {
+	relayURL := startRelay(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	ag, err := New(Config{RelayURL: relayURL})
+	require.NoError(t, err)
+	defer ag.Close()
+	p, err := ag.NewPairing()
+	require.NoError(t, err)
+
+	phone, err := dialPhone(ctx, relayURL, p.RoomID, p.Canon)
+	require.NoError(t, err)
+	defer phone.conn.CloseNow()
+
+	// Phone pairs, seals + sends its push subscription (like the real PWA), then
+	// keeps reading so the socket stays alive — but NEVER answers a request.
+	go func() {
+		if e := phone.pair(ctx); e != nil {
+			return
+		}
+		sub := wire.PushSub{Kind: wire.KindPushSub, Subscription: wire.PushSubscription{
+			Endpoint: "https://push.example/e2e-idle", Keys: wire.PushKeys{P256dh: testP256dh, Auth: testAuth},
+		}}
+		out, e := json.Marshal(sub)
+		if e != nil {
+			return
+		}
+		box, e := sealedbox.Seal(phone.key, out)
+		if e != nil {
+			return
+		}
+		if e := phone.write(ctx, envelope{Box: box}); e != nil {
+			return
+		}
+		for { // drain the agent's vapid key etc.; keeps the socket serviced.
+			if _, e := phone.read(ctx); e != nil {
+				return
+			}
+		}
+	}()
+
+	require.NoError(t, ag.Pair(ctx, p))
+
+	// With NO Ask in flight, the persistent reader must still absorb the sub.
+	require.Eventually(t, func() bool {
+		ag.mu.Lock()
+		defer ag.mu.Unlock()
+		return ag.sub != nil && ag.sub.Endpoint == "https://push.example/e2e-idle"
+	}, 6*time.Second, 25*time.Millisecond, "push sub must be absorbed with no Ask in flight")
+}
+
+// TestIntegrationIdleConnectionSurvivesPingCycle proves the persistent reader
+// keeps a paired-but-idle connection alive past the relay keepalive: with NO Ask
+// in flight for longer than the relay's ping interval (20s), a later request is
+// still delivered on the SAME session. Before the read-pump the idle socket was
+// reaped in ~20-40s and the agent stayed Paired() with a dead connection. Slow
+// by nature (idles ~25s); skipped under -short. Point it at the deployed relay
+// with AAH_RELAY_URL=wss://ask-a-human.ai/ws to check the production LB too.
+func TestIntegrationIdleConnectionSurvivesPingCycle(t *testing.T) {
+	if testing.Short() {
+		t.Skip("idles past the relay ping cycle (~25s)")
+	}
+	relayURL := startRelay(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	ag, err := New(Config{RelayURL: relayURL})
+	require.NoError(t, err)
+	defer ag.Close()
+	p, err := ag.NewPairing()
+	require.NoError(t, err)
+
+	phone, err := dialPhone(ctx, relayURL, p.RoomID, p.Canon)
+	require.NoError(t, err)
+	defer phone.conn.CloseNow()
+	done := phone.runPhone(ctx) // pairs, then answers the (later) request
+
+	require.NoError(t, ag.Pair(ctx, p))
+
+	// Idle well past the relay ping interval with NO Ask. The persistent reader
+	// on both ends must keep the sockets alive so the request below lands on the
+	// same connection rather than a reaped-then-reconnected one.
+	time.Sleep(25 * time.Second)
+
+	dec, err := ag.Ask(ctx, wire.Request{ID: "r_idle", Title: "t", Summary: "s", Response: wire.Response{Kind: wire.ResponseYesNo}})
+	require.NoError(t, err)
+	require.NotNil(t, dec.Result.Approved)
+	assert.True(t, *dec.Result.Approved)
+	require.NoError(t, <-done)
+}

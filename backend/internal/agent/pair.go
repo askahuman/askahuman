@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/askahuman/askahuman/backend/pkg/spake2"
@@ -38,15 +39,32 @@ type Session struct {
 	roomID   string
 	code     string
 	key      []byte
-	conn     frameConn
-	dial     dialer
+	// connMu guards conn, which the persistent reader swaps on reconnect while
+	// Ask writes and Close tears down. Access it only via currentConn/setConn.
+	connMu sync.Mutex
+	conn   frameConn
+	dial   dialer
 	// devicePub is the phone's per-device ECDSA P-256 public key, learned from a
 	// sealed device_key frame (absorbDeviceKey) and PINNED first-seen. Once set,
 	// every decision must carry a signature that verifies against it. It is
-	// touched only from the Ask read-loop; sequential Asks run on different
-	// goroutines but are serialized by the asking single-flight atomic (which
-	// establishes the happens-before), so it needs no lock.
+	// touched only from the single persistent reader goroutine (handleFrame), so
+	// it needs no lock.
 	devicePub *ecdsa.PublicKey
+}
+
+// currentConn returns the session's live connection under the lock (the reader
+// may swap it on reconnect).
+func (s *Session) currentConn() frameConn {
+	s.connMu.Lock()
+	defer s.connMu.Unlock()
+	return s.conn
+}
+
+// setConn swaps in a fresh connection (reconnect).
+func (s *Session) setConn(c frameConn) {
+	s.connMu.Lock()
+	s.conn = c
+	s.connMu.Unlock()
 }
 
 // SessionKey returns the 32-byte SPAKE2-derived key.
@@ -55,8 +73,12 @@ func (s *Session) SessionKey() []byte { return s.key }
 // RoomID returns the room id the session is paired in.
 func (s *Session) RoomID() string { return s.roomID }
 
-// Close tears down the relay connection.
+// Close tears down the relay connection. It does not stop the persistent
+// reader (the Agent owns that lifecycle via ensureReader); closing the conn
+// makes the reader's in-flight read fail, which it treats as a reconnect.
 func (s *Session) Close() error {
+	s.connMu.Lock()
+	defer s.connMu.Unlock()
 	if s.conn == nil {
 		return nil
 	}
