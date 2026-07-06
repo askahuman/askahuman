@@ -41,16 +41,23 @@ export interface Frame {
 }
 
 /** MessageKind tags an application message inside a box. */
-export type MessageKind = 'request' | 'decision' | 'push_sub' | 'vapid_key';
+export type MessageKind = 'request' | 'decision' | 'push_sub' | 'vapid_key' | 'device_key';
 
 export const KindRequest: MessageKind = 'request';
 export const KindDecision: MessageKind = 'decision';
 export const KindPushSub: MessageKind = 'push_sub';
 export const KindVAPIDKey: MessageKind = 'vapid_key';
+export const KindDeviceKey: MessageKind = 'device_key';
 
 /** validMessageKind reports whether k is a known app message kind. */
 export function validMessageKind(k: string): k is MessageKind {
-  return k === KindRequest || k === KindDecision || k === KindPushSub || k === KindVAPIDKey;
+  return (
+    k === KindRequest ||
+    k === KindDecision ||
+    k === KindPushSub ||
+    k === KindVAPIDKey ||
+    k === KindDeviceKey
+  );
 }
 
 /** ResponseKind is the answer shape a request asks the human for. */
@@ -107,6 +114,10 @@ export interface Decision {
   kind: MessageKind; // always KindDecision
   id: string;
   result: Result;
+  // sig is base64(raw IEEE-P1363 r||s, 64 bytes) of the phone's ECDSA P-256
+  // signature over decisionSigningMessage. Absent when the phone has no device
+  // key (compat); once present the agent verifies it. Mirrors wire.Decision.Sig.
+  sig?: string;
 }
 
 /** PushKeys are the client keys used to encrypt Web Push payloads (RFC 8291). */
@@ -137,8 +148,20 @@ export interface VapidKey {
   public_key: string;
 }
 
+/**
+ * DeviceKey delivers the phone's per-device ECDSA P-256 PUBLIC key to the agent,
+ * sealed. The phone signs every Decision with the matching non-extractable
+ * private key (WebCrypto, IndexedDB) so a stolen session key cannot forge an
+ * approval. Only the PUBLIC key (SPKI, base64) crosses the wire. Mirrors
+ * wire.DeviceKey.
+ */
+export interface DeviceKey {
+  kind: MessageKind; // always KindDeviceKey
+  public_key: string;
+}
+
 /** AppMessage is any plaintext message that lives sealed inside Frame.box. */
-export type AppMessage = Request | Decision | PushSub | VapidKey;
+export type AppMessage = Request | Decision | PushSub | VapidKey | DeviceKey;
 
 /**
  * parseFrame parses one WebSocket text frame into a Frame, or null if it is
@@ -198,6 +221,8 @@ const MAX_TEXT_LEN = 4096;
 const MAX_EXPIRES_S = 86_400; // 24h
 const MAX_INPUT_LEN = 16_384;
 const MAX_VAPID_KEY_LEN = 256; // base64url uncompressed P-256 is ~88 chars
+const MAX_DEVICE_KEY_LEN = 512; // base64 SPKI DER for P-256 is ~120 chars
+const MAX_SIG_LEN = 256; // base64 of raw 64-byte r||s is ~88 chars
 
 function checkStr(v: unknown, name: string, max: number, required: boolean): string {
   if (v === undefined || v === '') {
@@ -257,6 +282,9 @@ export function decodeDecision(plaintext: Uint8Array): Decision {
   }
   checkStr(res.choice, 'decision choice', MAX_OPTION_LEN, false);
   checkStr(res.text, 'decision text', MAX_TEXT_LEN, false);
+  // The signature is optional (an unsigned decision is valid on the wire); when
+  // present it is length-capped like any untrusted string. Mirrors Decision.Sig.
+  checkStr(msg.sig, 'decision sig', MAX_SIG_LEN, false);
   return msg as Decision;
 }
 
@@ -295,6 +323,53 @@ export function decodeVapidKey(plaintext: Uint8Array): VapidKey {
 export function encodeVapidKey(publicKey: string): Uint8Array {
   const v: VapidKey = { kind: KindVAPIDKey, public_key: publicKey };
   return new TextEncoder().encode(pad(JSON.stringify(v)));
+}
+
+/** decodeDeviceKey validates a sealed-box plaintext as a wire.DeviceKey. */
+export function decodeDeviceKey(plaintext: Uint8Array): DeviceKey {
+  const msg = JSON.parse(new TextDecoder().decode(plaintext)) as Partial<DeviceKey>;
+  if (!validMessageKind(msg.kind ?? '') || msg.kind !== KindDeviceKey) {
+    throw new Error(`wire: not a device_key (kind=${String(msg.kind)})`);
+  }
+  checkStr(msg.public_key, 'device_key public_key', MAX_DEVICE_KEY_LEN, true);
+  return msg as DeviceKey;
+}
+
+/** encodeDeviceKey serializes a DeviceKey to UTF-8 bytes for sealing, padded to
+ *  a fixed block so its length does not leak. Mirrors encodeVapidKey. */
+export function encodeDeviceKey(spkiB64: string): Uint8Array {
+  const v: DeviceKey = { kind: KindDeviceKey, public_key: spkiB64 };
+  return new TextEncoder().encode(pad(JSON.stringify(v)));
+}
+
+/**
+ * decisionSigningMessage builds the canonical byte string the phone signs and
+ * the agent verifies for one decision. It is a cross-language contract: the Go
+ * twin wire.DecisionSigningMessage MUST produce byte-identical output (both are
+ * pinned to the same hex in their wire tests). The message binds the room, the
+ * request id, and the exact result so a signature cannot be replayed across
+ * rooms, requests, or answers. Layout (no trailing separator):
+ *
+ *   UTF8("aah:decision:v1" 0x00 roomID 0x00 id 0x00 resultTag(result))
+ *
+ * resultTag picks the branch by which Result field is set, in the fixed priority
+ * order approved (yesno) -> choice -> text. See ADR 0021.
+ */
+export function decisionSigningMessage(
+  roomID: string,
+  id: string,
+  result: Result,
+): Uint8Array<ArrayBuffer> {
+  const msg = `aah:decision:v1\x00${roomID}\x00${id}\x00${resultTag(result)}`;
+  return new TextEncoder().encode(msg);
+}
+
+/** resultTag renders a Result as the canonical tag used by
+ *  decisionSigningMessage, matching the Go twin exactly. */
+function resultTag(result: Result): string {
+  if (result.approved !== undefined) return `yesno:${result.approved ? '1' : '0'}`;
+  if (result.choice) return `choice:${result.choice}`;
+  return `text:${result.text ?? ''}`;
 }
 
 /** newYesNoDecision builds a yesno Decision for request id. */
