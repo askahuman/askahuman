@@ -108,6 +108,12 @@ export class Session {
   private vapidKey?: string;
   private readonly onVapidKey?: (publicKey: string) => void;
   private readonly seenIDs = new Set<string>();
+  // sentDecisions retains each decision we believe we sent, keyed by request
+  // id. If the agent re-announces an id that is in seenIDs, our decision never
+  // arrived (the socket was half-open when we wrote it — iOS freezes a
+  // backgrounded socket without erroring); re-send the retained decision so
+  // the request doesn't hang unanswerable until its deadline. Bounded FIFO.
+  private readonly sentDecisions = new Map<string, Decision>();
   private readonly listeners = new Set<(s: SessionState) => void>();
   private confirmedTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -253,12 +259,24 @@ export class Session {
     }
     // De-dupe: a re-announced request with this id won't reopen the card.
     this.seenIDs.add(id);
+    this.retainDecision(id, decision);
     this.set({ screen: 'confirmed', result, request: null });
     // After a beat, return to the listening idle state (mirror the mockup).
     if (this.confirmedTimer) clearTimeout(this.confirmedTimer);
     this.confirmedTimer = setTimeout(() => {
       if (this.state.screen === 'confirmed') this.set({ screen: 'listening', result: null });
     }, 2600);
+  }
+
+  /** MAX_RETAINED_DECISIONS bounds sentDecisions (FIFO eviction). */
+  private static readonly MAX_RETAINED_DECISIONS = 32;
+
+  private retainDecision(id: string, decision: Decision): void {
+    this.sentDecisions.set(id, decision);
+    if (this.sentDecisions.size > Session.MAX_RETAINED_DECISIONS) {
+      const oldest = this.sentDecisions.keys().next().value;
+      if (oldest !== undefined) this.sentDecisions.delete(oldest);
+    }
   }
 
   private onConnState(conn: ConnState, attempt: number): void {
@@ -342,7 +360,16 @@ export class Session {
     } catch {
       return; // not a request we render (e.g. an ack) — ignore
     }
-    if (this.seenIDs.has(req.id)) return; // de-dupe re-announced requests
+    if (this.seenIDs.has(req.id)) {
+      // The agent re-announced an id we already handled. If we answered it,
+      // the agent is still asking, so our decision was lost in flight —
+      // re-send it (idempotent: the agent takes the first matching decision).
+      // A seen id WITHOUT a retained decision was expired locally; stay
+      // silent (the agent timed it out on its side too).
+      const dec = this.sentDecisions.get(req.id);
+      if (dec) this.relay.sendBox(boxSeal(this.sessionKey, encodeDecision(dec)));
+      return;
+    }
     this.seenIDs.add(req.id);
     this.set({
       request: req,
