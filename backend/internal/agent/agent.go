@@ -179,6 +179,14 @@ type Agent struct {
 	// rejected with ErrBusy rather than racing.
 	asking atomic.Bool
 
+	// peerSeenAt stamps (unix nanos) the last moment the phone proved present:
+	// pairing completed, a peer_joined arrived on the shared conn, or any
+	// authenticated frame opened. Ask uses it to annotate a timeout with
+	// whether the phone ever showed up, so the calling model can tell "human
+	// is slow" from "phone unreachable / lost pairing" and react (re-pair)
+	// instead of retrying into a dead room.
+	peerSeenAt atomic.Int64
+
 	// reWakeInterval caps how often the Ask loop's reactive branch re-sends a
 	// wake-up push for one request (see defaultReWakeInterval). A field so tests
 	// can shrink it; production uses the default set in New.
@@ -357,6 +365,7 @@ func (a *Agent) Pair(ctx context.Context, p Pairing) error {
 	a.mu.Lock()
 	a.sess = sess
 	a.mu.Unlock()
+	a.markPeerSeen() // pairing just completed: the phone is provably present
 
 	// Hand the phone the public key the agent signs wake-ups with, so it
 	// subscribes for Web Push under EXACTLY that key (signer == subscribe-key).
@@ -462,15 +471,23 @@ func (a *Agent) Ask(ctx context.Context, req wire.Request) (wire.Decision, error
 		})
 	}
 
+	// start anchors the peer-presence window for this request: a timeout is
+	// reported differently depending on whether the phone was EVER seen after
+	// this point (see timeoutErr).
+	start := time.Now()
+
 	backoff := baseBackoff
 	for {
 		if err := ctx.Err(); err != nil {
-			return wire.Decision{}, ErrTimeout
+			return wire.Decision{}, a.timeoutErr(start)
 		}
 
 		dec, sendErr := a.askOnce(ctx, sess, req, plain, wake)
 		if sendErr == nil {
 			return dec, nil
+		}
+		if errors.Is(sendErr, ErrTimeout) {
+			return wire.Decision{}, a.timeoutErr(start)
 		}
 		if !errors.Is(sendErr, errResend) {
 			return wire.Decision{}, sendErr
@@ -484,7 +501,7 @@ func (a *Agent) Ask(ctx context.Context, req wire.Request) (wire.Decision, error
 		if errors.Is(sendErr, errReconnect) {
 			if reconnectErr := a.reconnect(ctx, sess); reconnectErr != nil {
 				if waitErr := sleep(ctx, backoff); waitErr != nil {
-					return wire.Decision{}, ErrTimeout
+					return wire.Decision{}, a.timeoutErr(start)
 				}
 				backoff = nextBackoff(backoff)
 				continue
@@ -502,10 +519,31 @@ func (a *Agent) Ask(ctx context.Context, req wire.Request) (wire.Decision, error
 			a.wakePush(ctx)
 		}
 		if waitErr := sleep(ctx, backoff); waitErr != nil {
-			return wire.Decision{}, ErrTimeout
+			return wire.Decision{}, a.timeoutErr(start)
 		}
 		backoff = nextBackoff(backoff)
 	}
+}
+
+// markPeerSeen stamps now as the last proof the phone is present.
+func (a *Agent) markPeerSeen() { a.peerSeenAt.Store(time.Now().UnixNano()) }
+
+// peerSeenSince reports whether the phone proved present at or after t.
+func (a *Agent) peerSeenSince(t time.Time) bool {
+	return a.peerSeenAt.Load() >= t.UnixNano()
+}
+
+// timeoutErr wraps ErrTimeout with what the agent actually observed, so the
+// calling model can act instead of blindly retrying: a phone that never joined
+// the room during the request has almost certainly lost its pairing (page
+// killed / app removed), and only a fresh start_pairing can recover — whereas
+// a phone that was present just has a slow human. errors.Is(err, ErrTimeout)
+// holds for both.
+func (a *Agent) timeoutErr(since time.Time) error {
+	if a.peerSeenSince(since) {
+		return fmt.Errorf("%w: the phone was reachable but nobody answered — retry, or raise expires_in_s", ErrTimeout)
+	}
+	return fmt.Errorf("%w: the phone never connected while this request was pending — it has likely lost its pairing; call start_pairing and have the human enter the new code", ErrTimeout)
 }
 
 // errResend is the internal signal to re-announce the request. errReconnect
@@ -546,8 +584,11 @@ func (a *Agent) askOnce(ctx context.Context, sess *Session, req wire.Request, pl
 			// Peer absent or left mid-request: re-announce so the outer Ask
 			// loop re-wakes and re-sends when the phone returns.
 			return wire.Decision{}, errResend
+		case env.Relay == wire.SignalPeerJoined:
+			a.markPeerSeen()
+			continue // phone (re)joined: keep waiting for its decision.
 		case env.Relay != "":
-			continue // peer_joined: keep waiting.
+			continue // other relay signals: keep waiting.
 		case env.Box == "":
 			continue // pake/confirm stragglers post-pairing: ignore.
 		}
@@ -557,6 +598,7 @@ func (a *Agent) askOnce(ctx context.Context, sess *Session, req wire.Request, pl
 			// Unauthenticated frame: never trust it, keep waiting.
 			continue
 		}
+		a.markPeerSeen() // authenticated frame: only the paired phone can seal it
 		if a.absorbPush(plainResp) {
 			continue
 		}

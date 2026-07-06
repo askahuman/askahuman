@@ -136,6 +136,100 @@ func TestThirdJoinClosed4001(t *testing.T) {
 	assert.Equal(t, StatusRoomFull, ce.Code)
 }
 
+// TestRoomFullProbeReapsZombie exercises the iOS-resume recovery path: the
+// phone's previous socket is silently dead (open TCP, but it never reads, so
+// it never answers a ping — exactly what a frozen background PWA looks like).
+// A rejected third join must probe the room, reap the zombie within
+// probeTimeout, and let the retry join succeed.
+//
+// The live "agent" peer is drained by a background goroutine so it ALWAYS
+// answers the probe ping (coder/websocket only pongs while a Read is pending);
+// the zombie never reads, so only it is reaped — deterministic regardless of
+// CI scheduling. (An earlier version relied on the test thread happening to be
+// inside Read when the probe fired, which flaked on slow runners.)
+func TestRoomFullProbeReapsZombie(t *testing.T) {
+	origProbe := probeTimeout
+	probeTimeout = 500 * time.Millisecond
+	t.Cleanup(func() { probeTimeout = origProbe })
+
+	base := newServer(t)
+	agent := dialRoom(t, base, roomA)
+	defer agent.CloseNow()
+
+	// Continuously read the agent so its pings are always answered. Frames flow
+	// to a channel the test consumes in order.
+	frames := drainFrames(t, agent)
+	next := func() wire.Frame {
+		t.Helper()
+		select {
+		case f, ok := <-frames:
+			require.True(t, ok, "agent connection closed unexpectedly (was it reaped?)")
+			return f
+		case <-time.After(3 * time.Second):
+			t.Fatal("timed out waiting for a frame on the agent")
+			return wire.Frame{}
+		}
+	}
+
+	// The zombie joins and never reads; the live agent sees it arrive.
+	zombie := dialRoom(t, base, roomA)
+	defer zombie.CloseNow()
+	assert.Equal(t, wire.SignalPeerJoined, next().Relay)
+
+	// Fresh phone socket (the resume reconnect): rejected 4001, which triggers
+	// the probe.
+	third := dialRoom(t, base, roomA)
+	defer third.CloseNow()
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	_, _, err := third.Read(ctx)
+	require.Error(t, err)
+	var ce websocket.CloseError
+	require.ErrorAs(t, err, &ce)
+	assert.Equal(t, StatusRoomFull, ce.Code)
+
+	// The zombie (no pong) is reaped; the live agent survives and sees peer_left.
+	assert.Equal(t, wire.SignalPeerLeft, next().Relay)
+
+	// The retry (the phone's backoff reconnect) now gets the freed slot: both
+	// sides see peer_joined and traffic flows.
+	retry := dialRoom(t, base, roomA)
+	defer retry.CloseNow()
+	assert.Equal(t, wire.SignalPeerJoined, next().Relay)
+	assert.Equal(t, wire.SignalPeerJoined, readFrame(t, retry).Relay)
+	writeText(t, retry, `{"box":"aGVsbG8="}`)
+	assert.Equal(t, "aGVsbG8=", next().Box)
+}
+
+// drainFrames reads text frames from c in a background goroutine, decoding each
+// into a wire.Frame on the returned channel, until c errors/closes. It keeps a
+// Read pending so the connection answers the relay's keepalive/probe pings (a
+// coder/websocket conn pongs only while being read). The channel is closed when
+// the connection ends.
+func drainFrames(t *testing.T, c *websocket.Conn) <-chan wire.Frame {
+	t.Helper()
+	out := make(chan wire.Frame, 8)
+	go func() {
+		defer close(out)
+		for {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			typ, data, err := c.Read(ctx)
+			cancel()
+			if err != nil {
+				return
+			}
+			if typ != websocket.MessageText {
+				continue
+			}
+			var f wire.Frame
+			if json.Unmarshal(data, &f) == nil {
+				out <- f
+			}
+		}
+	}()
+	return out
+}
+
 func TestSeparateRoomsIsolated(t *testing.T) {
 	base := newServer(t)
 	a := dialRoom(t, base, roomA)

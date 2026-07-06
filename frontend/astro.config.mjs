@@ -40,6 +40,16 @@ export default defineConfig({
         "base-uri 'none'",
         "form-action 'none'",
       ],
+      // The React island renders a runtime <style>{KEYFRAMES}</style> (KEYFRAMES in
+      // src/components/App.tsx), injected AFTER hydration. Astro only auto-hashes the
+      // inline <style>/<script> it emits at build time, so this runtime one is invisible
+      // to the build-time hasher and gets blocked by style-src — killing every animation
+      // (blink/pulse/spin/slideDown/requestPulse/bob). We pin its sha256 here so it's
+      // allowed. This hash MUST be recomputed if KEYFRAMES changes; test/csp-keyframes.test.ts
+      // guards the drift. ref. console CSP violation observed 2026-07-03.
+      styleDirective: {
+        hashes: ["sha256-oio60tDXH6Kl4drHlaiJAyO+umKqem0O6mmR2GTbr7w="],
+      },
     },
   },
   integrations: [

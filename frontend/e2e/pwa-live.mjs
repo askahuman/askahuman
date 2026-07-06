@@ -52,7 +52,11 @@ log(`pairing code captured (${code})`);
 // 2) Drive the real PWA as the phone (role B). ignoreHTTPSErrors mimics a phone that has
 //    the mkcert root CA installed (trusts the local TLS proxy). The PWA opens at /app/ and
 //    the human TYPES the code into the pairing field — nothing secret is in the URL.
-const browser = await chromium.launch();
+// channel 'chromium': the default headless SHELL build crashes its renderer on
+// this app (macOS Metal shader compile aborts on the card's backdrop-filter
+// blur over the canvas starfield); the full-Chromium new-headless mode renders
+// it fine. ref. MTLCompilerService SIGABRT, 2026-07-03 e2e debugging.
+const browser = await chromium.launch({ channel: 'chromium' });
 const context = await browser.newContext({ ignoreHTTPSErrors: true });
 const page = await context.newPage();
 // CSP regression-guard: any securitypolicyviolation while loading /app fails the run (m6-csp-egress).

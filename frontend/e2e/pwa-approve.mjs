@@ -51,7 +51,11 @@ async function resolveCode() {
 const code = await resolveCode();
 log(`pairing code captured (${code})`);
 
-const browser = await chromium.launch();
+// channel 'chromium': the default headless SHELL build crashes its renderer on
+// this app (macOS Metal shader compile aborts on the card's backdrop-filter
+// blur over the canvas starfield); the full-Chromium new-headless mode renders
+// it fine. ref. MTLCompilerService SIGABRT, 2026-07-03 e2e debugging.
+const browser = await chromium.launch({ channel: 'chromium' });
 const context = await browser.newContext({ ignoreHTTPSErrors: true });
 const page = await context.newPage();
 page.on('console', (m) => { if (m.type() === 'error') console.error('  [pwa console.error]', m.text()); });

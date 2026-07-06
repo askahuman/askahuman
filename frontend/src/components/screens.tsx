@@ -4,7 +4,7 @@
 // callbacks and render. The swipe card owns its own pointer-event drag, exactly
 // like the mockup's onDown/onMove/onUp.
 
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { CSSProperties } from 'react';
 
 import type { AgentSummary } from '../lib/manager.ts';
@@ -400,6 +400,15 @@ export function YesNoScreen({
   const [dragging, setDragging] = useState(false);
   const startX = useRef(0);
   const committed = useRef(false);
+  // commitTimer holds the deferred (post-animation) decision fire. It MUST be
+  // cleared on unmount: App keys this card by request id, so switching agent or
+  // getting a new request unmounts this instance — if a swipe's timer survived,
+  // it would fire onApprove()/onDecline() against whatever session/request is
+  // active 330ms later, sealing an approval the human never gave to that agent.
+  const commitTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => {
+    if (commitTimer.current) clearTimeout(commitTimer.current);
+  }, []);
 
   const onDown = (e: React.PointerEvent) => {
     try {
@@ -422,7 +431,7 @@ export function YesNoScreen({
     committed.current = true;
     setDragging(false);
     setDx(approve ? 560 : -560);
-    setTimeout(() => (approve ? onApprove() : onDecline()), 330);
+    commitTimer.current = setTimeout(() => (approve ? onApprove() : onDecline()), 330);
   };
   // settle handles both pointerup and pointercancel: iOS fires pointercancel
   // mid/at-release when it hijacks the gesture, so a past-threshold swipe must
