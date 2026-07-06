@@ -263,11 +263,15 @@ export class RelayClient {
   private handleClose(code?: number): void {
     this.ws = null;
     this.stopHeartbeat();
-    // 4001 = room full (a third joiner). Do not loop on a fatal close.
-    if (this.stopped || code === 4001) {
+    if (this.stopped) {
       this.setState('closed');
       return;
     }
+    // 4001 (room full) is retryable: after an iOS resume the room's second slot
+    // is usually OUR OWN previous, silently-dead socket, which the relay only
+    // reaps via its keepalive (or a room-full probe). Backing off and retrying
+    // rejoins as soon as the slot frees; treating it as fatal stranded the phone
+    // on the offline screen until a manual Retry.
     this.setState('closed');
     this.scheduleReconnect();
   }

@@ -238,26 +238,34 @@ export class Session {
 
   // --- decisions (phone -> agent) -----------------------------------------
 
-  /** approve/decline send a yesno decision and advance to confirmed. */
+  /** approve/decline send a yesno decision and advance to confirmed. A no-op
+   *  when no request is active: a deferred swipe commit whose request already
+   *  expired or was switched away must never seal against a later request. */
   approve(): void {
-    this.sendDecision(this.req().id, { kind: 'decision', id: this.req().id, result: { approved: true } }, {
+    const req = this.state.request;
+    if (!req) return;
+    this.sendDecision(req.id, { kind: 'decision', id: req.id, result: { approved: true } }, {
       icon: '✓',
       label: 'Approved',
       approved: true,
-      detail: this.req().summary,
+      detail: req.summary,
     });
   }
   decline(): void {
-    this.sendDecision(this.req().id, { kind: 'decision', id: this.req().id, result: { approved: false } }, {
+    const req = this.state.request;
+    if (!req) return;
+    this.sendDecision(req.id, { kind: 'decision', id: req.id, result: { approved: false } }, {
       icon: '✗',
       label: 'Declined',
       approved: false,
-      detail: this.req().summary,
+      detail: req.summary,
     });
   }
   /** choose sends a choice decision. */
   choose(label: string): void {
-    this.sendDecision(this.req().id, { kind: 'decision', id: this.req().id, result: { choice: label } }, {
+    const req = this.state.request;
+    if (!req) return;
+    this.sendDecision(req.id, { kind: 'decision', id: req.id, result: { choice: label } }, {
       icon: '✓',
       label: 'Choice sent',
       approved: true,
@@ -266,9 +274,11 @@ export class Session {
   }
   /** reply sends a text decision (caller trims/clamps to max_len). */
   reply(text: string): void {
+    const req = this.state.request;
+    if (!req) return;
     const t = text.trim();
     if (!t) return;
-    this.sendDecision(this.req().id, { kind: 'decision', id: this.req().id, result: { text: t } }, {
+    this.sendDecision(req.id, { kind: 'decision', id: req.id, result: { text: t } }, {
       icon: '✓',
       label: 'Reply sent',
       approved: true,
