@@ -156,13 +156,21 @@ describe('RelayClient reconnect', () => {
     expect(timers[1]!.ms).toBe(200); // base * 2^1
   });
 
-  it('does NOT reconnect on a 4001 room-full close', () => {
+  it('reconnects with backoff on a 4001 room-full close (own zombie socket holds the slot)', () => {
     const { client, timers } = newClient();
     client.connect();
     FakeWS.instances[0]!.open();
+    // iOS resume: our previous dead socket still occupies the room, so the
+    // fresh join is rejected 4001. The slot frees once the relay reaps the
+    // zombie; keep retrying instead of stranding the phone offline.
     FakeWS.instances[0]!.serverClose(4001);
-    expect(timers).toHaveLength(0);
     expect(client.currentState()).toBe('closed');
+    expect(timers).toHaveLength(1);
+    expect(timers[0]!.ms).toBe(100); // base * 2^0
+    timers[0]!.fn(); // fire reconnect
+    expect(FakeWS.instances).toHaveLength(2);
+    FakeWS.instances[1]!.serverClose(4001);
+    expect(timers[1]!.ms).toBe(200); // still backing off while the slot is held
   });
 
   it('close() stops reconnection', () => {
