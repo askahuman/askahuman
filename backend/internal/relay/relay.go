@@ -283,8 +283,11 @@ func (r *Relay) serveConn(ctx context.Context, roomID, ip string, conn *websocke
 		// The fullness is often the joiner's OWN previous, silently-dead socket
 		// (an iOS PWA resume): probe the current peers so a zombie is reaped in
 		// seconds instead of waiting out the keepalive cycle. The rejected
-		// client retries with backoff and gets in once the slot frees.
-		go r.probeRoom(roomID)
+		// client retries with backoff and gets in once the slot frees. Read
+		// probeTimeout HERE (synchronously in the handler goroutine, which the
+		// server shutdown waits for) and pass it in, so the detached probe
+		// goroutine never reads the test-mutable global — that was a data race.
+		go r.probeRoom(roomID, probeTimeout)
 		_ = conn.Close(StatusRoomFull, "relay: room full")
 		r.releaseIP(ip)
 		return
@@ -375,12 +378,15 @@ func relaySet(data []byte) bool {
 }
 
 // probeRoom pings every current peer of roomID once; a peer that fails to
-// pong within probeTimeout is closed, so its pump exits and leave() frees the
+// pong within timeout is closed, so its pump exits and leave() frees the
 // slot (and tells the survivor peer_left). Fired when a joiner is rejected on
 // a full room — without it, a silently-dead peer (an iOS PWA whose socket the
 // OS froze without a close) blocks its own reconnect for up to two keepalive
-// cycles. At most one probe runs per room at a time.
-func (r *Relay) probeRoom(roomID string) {
+// cycles. At most one probe runs per room at a time. timeout is passed in (read
+// synchronously at the call site) rather than read from the package global: this
+// goroutine is detached and outlives the HTTP server, so reading the (test-
+// mutable) global here would race a test restoring it in cleanup.
+func (r *Relay) probeRoom(roomID string, timeout time.Duration) {
 	r.mu.Lock()
 	rm := r.rooms[roomID]
 	if rm == nil || rm.probing {
@@ -396,7 +402,7 @@ func (r *Relay) probeRoom(roomID string) {
 		wg.Add(1)
 		go func(p *peer) {
 			defer wg.Done()
-			ctx, cancel := context.WithTimeout(context.Background(), probeTimeout)
+			ctx, cancel := context.WithTimeout(context.Background(), timeout)
 			defer cancel()
 			if err := p.conn.Ping(ctx); err != nil {
 				// Dead socket: closing it unblocks its pump, which leaves the
