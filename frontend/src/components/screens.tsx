@@ -35,7 +35,10 @@ function Frame({ c, children, style }: { c: Palette; children: React.ReactNode; 
   return (
     <div
       style={{
-        height: '100dvh',
+        // Track the VISIBLE viewport (--app-vvh, set by App's
+        // useVisualViewportLock): when the iOS keyboard opens, the screen
+        // shrinks to the area above it instead of being scrolled off-screen.
+        height: 'var(--app-vvh, 100dvh)',
         width: '100%',
         // Transparent so the shared starfield/aurora (SpaceBackground, fixed at
         // z-0 behind the app) shows through; cards keep their own opaque surfaces.
@@ -653,7 +656,11 @@ export function TextScreen({
   };
   return (
     <Frame c={c} style={{ padding: 'calc(60px + env(safe-area-inset-top)) 20px 28px', boxSizing: 'border-box', display: 'flex', flexDirection: 'column' }}>
-      <div style={{ flex: 1, display: 'flex', flexDirection: 'column' }}>
+      {/* minHeight: 0 down the column + overflowY on the card: with the iOS
+          keyboard open the Frame shrinks to the visible area (--app-vvh), so
+          the card must be allowed to compress and scroll internally while the
+          reply input stays pinned above the keyboard. */}
+      <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
         <div
           style={{
             background: c.surface,
@@ -661,6 +668,8 @@ export function TextScreen({
             borderRadius: 24,
             padding: '24px 22px',
             boxShadow: '0 18px 50px rgba(0,0,0,0.4)',
+            minHeight: 0,
+            overflowY: 'auto',
           }}
         >
           <CardHeader c={c} req={req} expiresIn={expiresIn} />
@@ -668,7 +677,7 @@ export function TextScreen({
           <CardFooter c={c} req={req} marginTop={20} />
         </div>
         <div style={{ flex: 1 }} />
-        <div style={{ fontSize: 11, color: c.faint, marginBottom: 9 }}>your reply · sealed before it leaves the phone</div>
+        <div style={{ fontSize: 11, color: c.faint, margin: '9px 0' }}>your reply · sealed before it leaves the phone</div>
         <div
           style={{
             background: c.surface,
@@ -687,6 +696,7 @@ export function TextScreen({
             onKeyDown={(e) => {
               if (e.key === 'Enter') send();
             }}
+            enterKeyHint="send"
             placeholder={clip(req.response.placeholder ?? '', MAX_PLACEHOLDER)}
             maxLength={maxLen}
             style={{

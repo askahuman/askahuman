@@ -96,9 +96,18 @@ body {
 /* App shell ONLY (Layout.astro sets .app-shell on <body>): block iOS long-press
    selection/callout so a horizontal "approve" drag reaches the card instead of
    selecting text. The marketing landing (LandingLayout) omits this class, so all
-   its copy — including the npx / mcp.json snippet — stays selectable + copyable. */
+   its copy — including the npx / mcp.json snippet — stays selectable + copyable.
+
+   position: fixed pins the shell: the app never scrolls as a document, so the
+   focus-scroll iOS performs when the on-screen keyboard opens cannot leave a
+   residual window scroll offset behind (page stuck half-scrolled after replying
+   to a free-text request). Keyboard layout is handled by tracking the visual
+   viewport into --app-vvh instead (App.tsx useVisualViewportLock, ADR 0024). */
 body.app-shell {
   -webkit-user-select: none;
   user-select: none;
   -webkit-touch-callout: none;
+  position: fixed;
+  inset: 0;
+  overflow: hidden;
 }
