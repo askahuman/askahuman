@@ -12,6 +12,7 @@
 // ADR 0007); all multi-agent logic lives here. No relay/crypto/wire change.
 
 import { b64Decode, b64Encode } from './b64.ts';
+import type { ConnState } from './relay.ts';
 import type { PairPayload } from './payload.ts';
 import type { Persistence, StoredSession } from './store.ts';
 import type { PushSubscription } from './wire.ts';
@@ -42,6 +43,14 @@ interface Entry {
   lastReqID: string | null;
   /** whether the retained push subscription has been delivered to this session. */
   pushSent: boolean;
+  /** sub is this room's OWN subscription, produced under its agent's VAPID key
+   *  (sendPushSubscriptionTo). Retained even when the write fails — the next
+   *  open transition delivers it — and it always wins over the fanout lastSub
+   *  (which is signed by a different key and would be rejected 403). */
+  sub: PushSubscription | null;
+  /** last-seen transport state, so we can re-arm push delivery on each fresh
+   *  connection (the sub is re-sent whenever conn transitions back to open). */
+  conn: ConnState;
 }
 
 /**
@@ -136,7 +145,16 @@ export class SessionManager {
 
   /** attach registers a constructed session under room and starts it. */
   private attach(room: string, r: string, session: Session): void {
-    const entry: Entry = { session, r, unsub: () => {}, unread: 0, lastReqID: null, pushSent: false };
+    const entry: Entry = {
+      session,
+      r,
+      unsub: () => {},
+      unread: 0,
+      lastReqID: null,
+      pushSent: false,
+      sub: null,
+      conn: 'closed',
+    };
     entry.unsub = session.onChange(() => this.onSessionChange(room));
     this.entries.set(room, entry);
     this.order.push(room);
@@ -220,6 +238,20 @@ export class SessionManager {
     return undefined;
   }
 
+  /** vapidKeys returns every known agent VAPID key tagged with its room
+   *  (insertion order). The App uses it after a page kill to re-subscribe each
+   *  restored agent under ITS OWN key: onVapidKey does not re-fire for a restored
+   *  session (the agent sends its key only once, right after pairing), so without
+   *  this only the first agent's key would ever be re-subscribed. */
+  vapidKeys(): Array<{ room: string; key: string }> {
+    const out: Array<{ room: string; key: string }> = [];
+    for (const room of this.order) {
+      const key = this.entries.get(room)?.session.getVapidKey();
+      if (key) out.push({ room, key });
+    }
+    return out;
+  }
+
   /** activeState returns the active session's snapshot, or the pre-pair state. */
   activeState(): SessionState {
     const entry = this.active ? this.entries.get(this.active) : undefined;
@@ -267,12 +299,16 @@ export class SessionManager {
     this.activeSession()?.expire(id);
   }
 
-  /** sendPushSubscription fans out the phone's push sub to every paired session
-   *  and retains it so agents added later also receive it (see add). */
+  /** sendPushSubscription fans out the phone's BUILD-key push sub to every
+   *  paired session and retains it so agents added later also receive it (see
+   *  add). A room that already holds its OWN agent-keyed sub is skipped: that
+   *  sub always wins (the fanout sub was produced under a different key and the
+   *  agent's pushes against it would be rejected 403). */
   sendPushSubscription(sub: PushSubscription): boolean {
     this.lastSub = sub;
     let any = false;
     for (const entry of this.entries.values()) {
+      if (entry.sub) continue; // the room's own agent-keyed sub always wins
       if (entry.session.sendPushSubscription(sub)) {
         entry.pushSent = true;
         any = true;
@@ -282,17 +318,20 @@ export class SessionManager {
   }
 
   /**
-   * sendPushSubscriptionTo delivers a push subscription to exactly one room. It
-   * is used when an agent's OWN VAPID key produced this subscription: the sub is
-   * bound to that key's signer, so it is delivered back to that agent only and
-   * NOT retained for fanout (another agent signs with a different key and would
-   * be rejected). Each agent supplies its own key and gets its own subscription.
+   * sendPushSubscriptionTo delivers a push subscription to exactly one room and
+   * retains it on that room's entry. It is used when an agent's OWN VAPID key
+   * produced this subscription: the sub is bound to that key's signer, so it is
+   * delivered (and re-delivered on every fresh connection) to that agent only,
+   * never fanned out — another agent signs with a different key and would be
+   * rejected. Retained even when the write fails (page restore races the socket
+   * open): the open transition in onSessionChange is the retry that delivers it.
    */
   sendPushSubscriptionTo(room: string, sub: PushSubscription): boolean {
     const entry = this.entries.get(room);
     if (!entry) return false;
+    entry.sub = sub;
     const sent = entry.session.sendPushSubscription(sub);
-    if (sent) entry.pushSent = true;
+    entry.pushSent = sent;
     return sent;
   }
 
@@ -327,9 +366,23 @@ export class SessionManager {
   private onSessionChange(room: string): void {
     const entry = this.entries.get(room);
     if (entry) {
-      // Deliver the retained push subscription once this agent is paired — an
-      // agent added after the phone subscribed has no session key until then.
-      if (this.lastSub && !entry.pushSent && entry.session.sendPushSubscription(this.lastSub)) {
+      // Re-arm push delivery on every fresh connection. pushSent latches on a
+      // socket WRITE (relay accepted the frame), NOT on agent receipt — a sub
+      // written while the agent was briefly absent counts "sent" yet never
+      // reached it, and the relay is content-blind so nothing replays it. On each
+      // transition back to open we clear pushSent so the retained sub is
+      // re-delivered below. Idempotent on the agent (it just overwrites a.sub, see
+      // ADR 0022), so a redundant re-send is harmless.
+      const conn = entry.session.getState().conn;
+      if (conn === 'open' && entry.conn !== 'open') entry.pushSent = false;
+      entry.conn = conn;
+      // Deliver the room's retained subscription once this agent is paired (and
+      // again after each re-arm) — an agent added after the phone subscribed has
+      // no session key until then. The room's OWN agent-keyed sub (entry.sub)
+      // always wins; the build-key fanout sub (lastSub) covers only rooms whose
+      // agent never sent a key.
+      const sub = entry.sub ?? this.lastSub;
+      if (sub && !entry.pushSent && entry.session.sendPushSubscription(sub)) {
         entry.pushSent = true;
       }
       const s = entry.session.getState();

@@ -40,6 +40,17 @@ export function toWireSubscription(sub: PushSubscriptionJSON): WirePushSubscript
   };
 }
 
+/** sameServerKey compares a subscription's stored applicationServerKey to the
+ *  requested VAPID key bytes. A null/absent stored key, or any length/byte
+ *  difference, is NOT a match — the caller then resubscribes under `want`. */
+function sameServerKey(stored: ArrayBuffer | null, want: Uint8Array): boolean {
+  if (!stored) return false;
+  const a = new Uint8Array(stored);
+  if (a.length !== want.length) return false;
+  for (let i = 0; i < a.length; i++) if (a[i] !== want[i]) return false;
+  return true;
+}
+
 /**
  * subscribeForPush registers/uses the active service worker, requests
  * Notification permission, and subscribes for Web Push with the VAPID key.
@@ -56,13 +67,27 @@ export async function subscribeForPush(vapidPublicKey: string): Promise<WirePush
     if (permission !== 'granted') return null;
 
     const reg = await navigator.serviceWorker.ready;
-    const existing = await reg.pushManager.getSubscription();
-    const sub =
-      existing ??
-      (await reg.pushManager.subscribe({
+    const wantKey = urlBase64ToUint8Array(vapidPublicKey);
+    let sub = await reg.pushManager.getSubscription();
+    // A stored subscription is bound to the exact VAPID key it was created under.
+    // If that differs from the agent's current key (re-paired agent, multiple
+    // agents, a regenerated agent key), every push the agent signs is rejected
+    // (403) forever — so drop the stale sub and resubscribe under the right key.
+    // A null applicationServerKey (unknown binding) is treated as a mismatch.
+    if (sub && !sameServerKey(sub.options.applicationServerKey, wantKey)) {
+      try {
+        await sub.unsubscribe();
+      } catch {
+        /* best-effort: fall through and subscribe fresh anyway */
+      }
+      sub = null;
+    }
+    if (!sub) {
+      sub = await reg.pushManager.subscribe({
         userVisibleOnly: true,
-        applicationServerKey: urlBase64ToUint8Array(vapidPublicKey),
-      }));
+        applicationServerKey: wantKey,
+      });
+    }
     return toWireSubscription(sub.toJSON());
   } catch {
     return null; // best-effort: a missing push service must not break the app

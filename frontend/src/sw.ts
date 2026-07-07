@@ -125,19 +125,55 @@ self.addEventListener('push', (event) => {
   );
 });
 
-// Tapping the notification focuses an open PWA window or opens a new one.
+// The PWA lives at scope '/app'; the marketing landing at '/' is OUTSIDE it
+// (astro.config.mjs scope/start_url). A wake tap MUST land inside the PWA — it
+// restores its persisted sessions and reconnects over WS to receive the sealed
+// request. Opening '/' would strand the tap on the marketing page in the browser
+// and the request would never be seen.
+const APP_SCOPE = '/app';
+const APP_URL = '/app/';
+
+/** inAppScope is true when a client URL is inside the PWA scope ('/app'). */
+function inAppScope(url: string): boolean {
+  try {
+    return new URL(url).pathname.startsWith(APP_SCOPE);
+  } catch {
+    return false;
+  }
+}
+
+// Tapping the notification focuses an open PWA window (or steers/opens one),
+// always landing inside the PWA scope so restore + reconnect can run.
 self.addEventListener('notificationclick', (event) => {
   event.notification.close();
   event.waitUntil(
     (async () => {
       const all = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
+      // Prefer an already-open PWA window: focus it. Its visibilitychange
+      // handler forces the WS reconnect that pulls the sealed request.
       for (const client of all) {
-        if ('focus' in client) {
+        if (inAppScope(client.url)) {
           await client.focus();
           return;
         }
       }
-      await self.clients.openWindow('/');
+      // No PWA window open. If a marketing-page window ('/', outside scope) is
+      // open, steer it into the PWA — navigate() only works on a controlled
+      // (in-scope) client, so it typically rejects here; fall through and open a
+      // fresh PWA window instead of leaving the tap on '/'.
+      for (const client of all) {
+        try {
+          const w = await client.navigate(APP_URL);
+          if (w) {
+            await w.focus();
+            return;
+          }
+        } catch {
+          /* uncontrolled client: open a fresh PWA window below */
+        }
+        break; // only the first window is worth steering
+      }
+      await self.clients.openWindow(APP_URL);
     })(),
   );
 });

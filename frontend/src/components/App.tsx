@@ -13,6 +13,7 @@ import { type PairPayload } from '../lib/payload.ts';
 import { subscribeForPush } from '../lib/push.ts';
 import { localStorePersistence } from '../lib/store.ts';
 import { type SessionState } from '../lib/session.ts';
+import { type PushSubscription } from '../lib/wire.ts';
 import { PairScreen } from './PairScreen.tsx';
 import {
   ConfirmedScreen,
@@ -44,6 +45,35 @@ export const KEYFRAMES = `
 /** PUBLIC_VAPID_KEY is a build-time placeholder; the agent may also send one. */
 const VAPID_KEY =
   (import.meta as unknown as { env?: Record<string, string> }).env?.PUBLIC_VAPID_KEY ?? '';
+
+// BUILD_VAPID_ROOM keys the single build-time-key subscription in the push-done
+// set: it fans out to every agent that never sent its own key, so it has no
+// owning room. The NUL prefix can never collide with a 16-hex relay room id.
+const BUILD_VAPID_ROOM = '\0build';
+
+/**
+ * subscribeOnce subscribes for `key`, delivers the resulting subscription via
+ * `deliver`, and records `room` in `done` ONLY on success (a subscription was
+ * obtained AND delivered) — a single early failure never latches push off for
+ * the page, and each agent is tracked independently so one denied agent never
+ * blocks the others. A delivery that fails only because the room's socket is
+ * not open yet is NOT retried here: the manager retains the sub per room
+ * (sendPushSubscriptionTo) and re-delivers it when that connection (re)opens.
+ * The undone mark matters for forget-then-re-pair (onRemove clears the room) and
+ * keeps a permission-denied room retryable if a future trigger fires. Exported
+ * for test.
+ */
+export async function subscribeOnce(
+  done: Set<string>,
+  room: string,
+  key: string,
+  subscribe: (k: string) => Promise<PushSubscription | null>,
+  deliver: (sub: PushSubscription) => boolean,
+): Promise<void> {
+  if (done.has(room)) return;
+  const sub = await subscribe(key);
+  if (sub && deliver(sub)) done.add(room);
+}
 
 function usePalette(): Palette {
   // Dark-only, to match the dark-only marketing site and the shared cosmic
@@ -111,7 +141,12 @@ export default function App() {
   const [pairing, setPairing] = useState(true);
   // pairError surfaces a bad typed code inline; never opens a socket.
   const [pairError, setPairError] = useState<string | null>(null);
-  const pushDoneRef = useRef(false);
+  // pushDoneRef holds the rooms that already have a delivered push subscription;
+  // a room is added ONLY after subscribeOnce succeeds. Per-room + mark-on-success
+  // so a denied/failed first attempt never permanently disables push, and every
+  // agent subscribes under its own VAPID key (not just the first). The
+  // BUILD_VAPID_ROOM sentinel stands in for the single build-time-key fanout sub.
+  const pushDoneRef = useRef<Set<string>>(new Set());
 
   // Subscribe to the manager once; tear every session down on unmount.
   useEffect(() => {
@@ -121,18 +156,16 @@ export default function App() {
     // pending request within seconds. Storage stays put on unmount.
     if (manager.restoreAll() > 0) {
       setPairing(false);
-      // Re-subscribe for push with the persisted agent VAPID key: the agent
-      // sends its key only once (right after pairing), so a restored session
-      // never re-receives it. Permission was granted at original pairing, so
-      // this resolves silently; the sub is retained and delivered to each
-      // session once its socket opens.
-      const restoredKey = manager.firstVapidKey();
-      if (restoredKey && !pushDoneRef.current) {
-        pushDoneRef.current = true;
-        (async () => {
-          const sub = await subscribeForPush(restoredKey);
-          if (sub) manager.sendPushSubscription(sub);
-        })();
+      // Re-subscribe each restored agent under ITS OWN persisted VAPID key: the
+      // agent sends its key only once (right after pairing), so a restored session
+      // never re-receives it and onVapidKey won't fire. Permission was granted at
+      // original pairing, so this resolves silently; each sub routes back to its
+      // own room. subscribeOnce marks per-room on success, so one agent's denial
+      // never blocks another's, and a build-time-only agent falls to anyPaired.
+      for (const { room, key } of manager.vapidKeys()) {
+        void subscribeOnce(pushDoneRef.current, room, key, subscribeForPush, (sub) =>
+          manager.sendPushSubscriptionTo(room, sub),
+        );
       }
     }
     return () => {
@@ -185,16 +218,14 @@ export default function App() {
   // MUST subscribe with exactly that key so the push signer == subscribe key
   // (one prebuilt PWA, many laptop agents — a build-time key can't match). When
   // an agent's key arrives, subscribe with it and route the subscription back to
-  // THAT room (room A's key produces room A's subscription). pushDoneRef keeps it
-  // to a single subscribe across both this path and the build-time fallback.
+  // THAT room (room A's key produces room A's subscription). subscribeOnce tracks
+  // per-room done so each agent subscribes once, across this path, restore, and
+  // the build-time fallback — and a denied attempt stays retryable.
   useEffect(() => {
     manager.onVapidKey((publicKey, room) => {
-      if (pushDoneRef.current) return;
-      pushDoneRef.current = true;
-      (async () => {
-        const sub = await subscribeForPush(publicKey);
-        if (sub) manager.sendPushSubscriptionTo(room, sub);
-      })();
+      void subscribeOnce(pushDoneRef.current, room, publicKey, subscribeForPush, (sub) =>
+        manager.sendPushSubscriptionTo(room, sub),
+      );
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -204,19 +235,16 @@ export default function App() {
   // path above, routed back to its own room) is the preferred source. Here we
   // only fall back to the build-time VAPID_KEY for an agent that never sends a
   // key (older agent); if there is no build key either, we wait for onVapidKey.
-  // pushDoneRef keeps the subscribe to a single fire across both paths.
+  // subscribeOnce keeps the build-time fanout to a single SUCCESSFUL fire.
   const anyPaired = roster.some((a) => a.status === 'paired' || a.status === 'offline');
   useEffect(() => {
     if (!anyPaired) return;
     setPairing(false);
-    if (pushDoneRef.current) return;
-    if (manager.firstVapidKey()) return; // an agent key arrived — onVapidKey owns it
+    if (manager.firstVapidKey()) return; // an agent key arrived — onVapidKey/restore owns it
     if (!VAPID_KEY) return; // no build-time key: wait for the agent's sealed key
-    pushDoneRef.current = true;
-    (async () => {
-      const sub = await subscribeForPush(VAPID_KEY);
-      if (sub) manager.sendPushSubscription(sub);
-    })();
+    void subscribeOnce(pushDoneRef.current, BUILD_VAPID_ROOM, VAPID_KEY, subscribeForPush, (sub) =>
+      manager.sendPushSubscription(sub),
+    );
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [anyPaired]);
 
@@ -267,7 +295,13 @@ export default function App() {
             setPairError(null);
             setPairing(true);
           }}
-          onRemove={(id) => manager.remove(id)}
+          onRemove={(id) => {
+            // Forget-this-agent must also forget its push-done mark: room ids
+            // are deterministic from the pairing code, so re-pairing the same
+            // code reuses the SAME id and must be able to subscribe again.
+            pushDoneRef.current.delete(id);
+            manager.remove(id);
+          }}
         />
       )}
       {renderScreen(c, state, expiresIn, {
