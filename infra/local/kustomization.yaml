@@ -18,3 +18,13 @@ images:
 
 patches:
   - path: dev-patches.yaml
+
+# Local-only: a relaxed-CSP nginx conf mounted over the web image's baked-in
+# /etc/nginx/conf.d/default.conf so the headless E2E browser can reach the kind
+# relay over plain ws (prod pins connect-src to wss://ask-a-human.ai). The image
+# is unchanged; dev-patches.yaml mounts this ConfigMap. The content-hash suffix
+# rolls the web pod whenever nginx-local.conf changes.
+configMapGenerator:
+  - name: web-nginx-local
+    files:
+      - default.conf=nginx-local.conf

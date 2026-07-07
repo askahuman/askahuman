@@ -25,6 +25,17 @@ echo "==> building the agent binary"
 echo "==> live integration suite vs the deployed relay"
 ( cd backend && AAH_RELAY_URL="$RELAY_WS" go test -tags integration -count=1 ./internal/agent/ )
 
+echo "==> guard: infra/local/nginx-local.conf in sync with frontend/nginx.conf"
+# The kind overlay serves a hand-copied nginx conf whose ONLY functional delta is
+# a relaxed connect-src (the local relay speaks plain ws). Mask that one delta on
+# both sides, strip comments/blank lines, and fail on ANY other divergence so the
+# copy cannot silently drift from the prod conf.
+conf_norm() { grep -vE '^[[:space:]]*(#|$)' "$1" | sed -E 's#(connect-src)[^;]*#\1 X#'; }
+diff <(conf_norm frontend/nginx.conf) <(conf_norm infra/local/nginx-local.conf) || {
+  echo "infra/local/nginx-local.conf drifted from frontend/nginx.conf — re-sync the copy (connect-src is the only allowed delta)" >&2
+  exit 1; }
+echo "    in sync (connect-src is the only allowed delta)"
+
 echo "==> real PWA (headless Chromium) vs the deployed relay+web"
 export AGENT_BIN="$ROOT/bin/agent" RELAY_WS WEB_ORIGIN
 for k in yesno choice text; do
