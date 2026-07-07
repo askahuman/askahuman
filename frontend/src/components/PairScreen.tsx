@@ -127,7 +127,10 @@ export function PairScreen({ c, onSubmitCode, error }: PairScreenProps) {
   return (
     <div
       style={{
-        height: '100dvh',
+        // Visible-viewport height (see screens.tsx Frame): with the iOS
+        // keyboard open, the code input stays on-screen instead of the page
+        // being focus-scrolled out of alignment.
+        height: 'var(--app-vvh, 100dvh)',
         width: '100%',
         // Transparent so the shared starfield/aurora (SpaceBackground) shows
         // through behind the pairing UI, matching the marketing landing.

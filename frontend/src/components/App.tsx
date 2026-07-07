@@ -75,6 +75,49 @@ export async function subscribeOnce(
   if (sub && deliver(sub)) done.add(room);
 }
 
+/**
+ * effectiveViewportHeight converts a visual viewport (height, scale) into the
+ * CSS px the app shell should occupy. Scale-corrected so pinch-zoom does not
+ * shrink the layout — only the on-screen keyboard (scale stays 1) does. Returns
+ * null for unusable readings (0/NaN), meaning "keep the 100dvh fallback".
+ * Exported for test.
+ */
+export function effectiveViewportHeight(height: number, scale: number): number | null {
+  const h = Math.round(height * (scale || 1));
+  return Number.isFinite(h) && h > 0 ? h : null;
+}
+
+/**
+ * useVisualViewportLock keeps the app shell sized to the VISIBLE viewport. iOS
+ * overlays the on-screen keyboard instead of resizing the layout viewport and
+ * then scrolls/pans the page to reveal the focused input, which (a) shoves the
+ * request card off-screen while typing a free-text reply and (b) can leave the
+ * page misaligned afterwards. Publishing visualViewport.height as --app-vvh
+ * lets every screen shrink to exactly the visible area (the reply input lands
+ * right above the keyboard, the card stays on-screen), and resetting any window
+ * scroll undoes the focus-scroll artifact — the shell is position:fixed
+ * (global.css), so a non-zero scroll is never intended. ref. ADR 0024.
+ */
+function useVisualViewportLock(): void {
+  useEffect(() => {
+    const vv = window.visualViewport;
+    if (!vv) return;
+    const apply = () => {
+      const h = effectiveViewportHeight(vv.height, vv.scale);
+      if (h !== null) document.documentElement.style.setProperty('--app-vvh', `${h}px`);
+      if (window.scrollX !== 0 || window.scrollY !== 0) window.scrollTo(0, 0);
+    };
+    apply();
+    vv.addEventListener('resize', apply);
+    vv.addEventListener('scroll', apply);
+    return () => {
+      vv.removeEventListener('resize', apply);
+      vv.removeEventListener('scroll', apply);
+      document.documentElement.style.removeProperty('--app-vvh');
+    };
+  }, []);
+}
+
 function usePalette(): Palette {
   // Dark-only, to match the dark-only marketing site and the shared cosmic
   // background (SpaceBackground paints the starfield under html.dark). We do NOT
@@ -126,6 +169,7 @@ function useExpiryCountdown(state: SessionState, onExpire?: (id: string) => void
 
 export default function App() {
   const c = usePalette();
+  useVisualViewportLock();
 
   // One SessionManager owns all live agents; the App re-renders off its single
   // onChange. tick forces a re-render when the manager (any session/roster) changes.
