@@ -59,14 +59,33 @@ describe('wake-only workers', () => {
   });
   it('routes an existing app window to the owning room and ignores a supplied room', async () => {
     const w = await worker();
-    const client = { url: ORIGIN + '/app/', postMessage: vi.fn(), focus: vi.fn(async () => {}) };
+    const client = {
+      url: ORIGIN + '/app/', focus: vi.fn(async () => {}), navigate: vi.fn(),
+      postMessage: vi.fn((_data, ports: MessagePort[]) => ports[0].postMessage({ type: 'aah:push-opened', room: ROOM })),
+    };
     w.clients.matchAll.mockResolvedValue([{ url: 'https://other.example/app/' }, { url: ORIGIN + '/application' }, client]);
     const close = vi.fn();
     await w.event('notificationclick', { notification: { close, data: { room: 'bad', key: 'secret' } } });
     expect(close).toHaveBeenCalledOnce();
-    expect(client.postMessage).toHaveBeenCalledWith({ type: 'aah:push-open', room: ROOM });
+    expect(client.postMessage).toHaveBeenCalledWith({ type: 'aah:push-open', room: ROOM }, [expect.anything()]);
     expect(client.focus).toHaveBeenCalledOnce();
+    expect(client.navigate).not.toHaveBeenCalled();
     expect(w.clients.openWindow).not.toHaveBeenCalled();
+  });
+  it.each([false, true])('opens a durable room URL after a bounded acknowledgement wait (wrong room: %s)', async (wrongRoom) => {
+    const w = await worker();
+    const client = {
+      url: ORIGIN + '/app/', focus: vi.fn(async () => {}),
+      postMessage: vi.fn((_data, ports: MessagePort[]) => {
+        if (wrongRoom) ports[0].postMessage({ type: 'aah:push-opened', room: 'ffffffffffffffff' });
+      }),
+      navigate: vi.fn(),
+    };
+    w.clients.matchAll.mockResolvedValue([client]);
+    await w.event('notificationclick', { notification: { close: () => {} } });
+    expect(client.navigate).not.toHaveBeenCalled();
+    expect(client.focus).toHaveBeenCalledOnce();
+    expect(w.clients.openWindow).toHaveBeenCalledWith(`/app/#wake=${ROOM}`);
   });
   it('opens only the canonical app with an opaque room fragment when no app is open', async () => {
     const w = await worker();

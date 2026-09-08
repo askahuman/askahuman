@@ -36,6 +36,55 @@ async function pair(name) {
   await page.getByTestId('listening-badge').waitFor();
   return agent;
 }
+async function clickNotification(scope) {
+  for (const worker of context.serviceWorkers()) {
+    if (await worker.evaluate(() => self.registration.scope) !== scope) continue;
+    return worker.evaluate(async () => {
+      // Exercise the built worker's real click handler and native message ports /
+      // navigation. A synthetic event has no OS gesture, so only focus is stubbed.
+      const [client] = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
+      const proto = Object.getPrototypeOf(client);
+      const focus = Object.getOwnPropertyDescriptor(proto, 'focus');
+      Object.defineProperty(proto, 'focus', { configurable: true, value: async function () { return this; } });
+      try {
+        const pending = [];
+        const event = new Event('notificationclick');
+        Object.defineProperties(event, {
+          notification: { value: { close() {} } },
+          waitUntil: { value: (task) => pending.push(task) },
+        });
+        self.dispatchEvent(event);
+        await Promise.all(pending);
+      } finally {
+        if (focus) Object.defineProperty(proto, 'focus', focus);
+        else delete proto.focus;
+      }
+    });
+  }
+  throw new Error('room worker not found');
+}
+async function holdAppHydration() {
+  return page.evaluate(async () => {
+    const component = document.querySelector('astro-island[component-url*="/App."]').getAttribute('component-url');
+    // Delay only App's module execution in this disposable test cache. Worker
+    // delivery and navigation stay native, and the saved roster remains real.
+    for (const name of await caches.keys()) {
+      const cache = await caches.open(name);
+      const key = (await cache.keys()).find((request) => new URL(request.url).pathname === component);
+      if (!key) continue;
+      const original = await (await cache.match(key)).text();
+      const gate = 'await new Promise((resolve) => { window.__releaseAppHydration = resolve; window.__appHydrationHeld = true; });\n';
+      await cache.put(key, new Response(gate + original, { headers: { 'Content-Type': 'application/javascript' } }));
+      return { name, key: key.url, original };
+    }
+    throw new Error('App is not precached');
+  });
+}
+async function restoreAppModule(saved) {
+  await page.evaluate(async ({ name, key, original }) => {
+    await (await caches.open(name)).put(key, new Response(original, { headers: { 'Content-Type': 'application/javascript' } }));
+  }, saved);
+}
 try {
   await page.goto(h.origin + '/app/');
   const a = await pair('notification-agent-a');
@@ -101,25 +150,42 @@ try {
 
   const roomA = new URL(scopeA).pathname.split('/').at(-2), roomB = new URL(scopeB).pathname.split('/').at(-2);
   const active = async () => page.locator(`[data-testid="roster-chip-${roomB}"]`).getAttribute('aria-pressed');
-  // A real wake-worker message must select B. Other senders and unknown rooms
-  // cannot import a pairing or select a different agent.
+  // The real wake-worker handler must select B through an acknowledged message,
+  // without navigating an app which is already hydrated.
   assert.ok(context.serviceWorkers().some((worker) => worker.url() === h.origin + '/sw.js?mode=push'));
   await page.getByTestId(`roster-chip-${roomA}`).click();
-  for (const worker of context.serviceWorkers()) {
-    if (await worker.evaluate(() => self.registration.scope) !== scopeB) continue;
-    await worker.evaluate(async (room) => {
-      for (const client of await self.clients.matchAll({ type: 'window', includeUncontrolled: true })) client.postMessage({ type: 'aah:push-open', room });
-    }, roomB);
-  }
+  const navigations = [];
+  const navigated = (frame) => { if (frame === page.mainFrame()) navigations.push(frame.url()); };
+  page.on('framenavigated', navigated);
+  await clickNotification(scopeB);
   await page.waitForFunction((room) => document.querySelector(`[data-testid="roster-chip-${room}"]`)?.getAttribute('aria-pressed') === 'true', roomB);
   assert.equal(await active(), 'true');
+  assert.deepEqual(navigations, [], 'acknowledged room selection must not navigate or reload the app');
+  page.off('framenavigated', navigated);
   await page.goto(h.origin + '/app/#wake=' + roomA);
   await page.waitForFunction((room) => document.querySelector(`[data-testid="roster-chip-${room}"]`)?.getAttribute('aria-pressed') === 'true', roomA);
   assert.equal(new URL(page.url()).hash, '');
   await page.goto(h.origin + '/app/#wake=0000000000000000');
   await page.waitForFunction(() => location.hash === '');
   assert.equal(await page.locator('[data-testid^="roster-chip-"]').count(), 2);
-  checks.push('same-origin wake-worker message and cold-launch opaque fragment select the right saved agent; unknown room does not create a session');
+  checks.push('native wake-worker click is acknowledged without navigation; cold-launch opaque fragment selects the right saved agent; unknown room does not create a session');
+
+  await page.getByTestId(`roster-chip-${roomA}`).click();
+  const savedModule = await holdAppHydration();
+  try {
+    await page.reload({ waitUntil: 'commit' });
+    await page.waitForFunction(() => window.__appHydrationHeld === true);
+    assert.equal(await page.locator('[data-testid^="roster-chip-"]').count(), 0, 'App has not restored the roster or installed its message listener yet');
+    await clickNotification(scopeB);
+    assert.equal(new URL(page.url()).hash, '#wake=' + roomB, 'the app shell durably retains the click across delayed React hydration');
+    await restoreAppModule(savedModule);
+    await page.waitForFunction(() => window.__appHydrationHeld === true);
+    await page.evaluate(() => window.__releaseAppHydration());
+    await page.waitForFunction((room) => document.querySelector(`[data-testid="roster-chip-${room}"]`)?.getAttribute('aria-pressed') === 'true', roomB);
+    assert.equal(new URL(page.url()).hash, '');
+    await ready(2);
+  } finally { await restoreAppModule(savedModule); }
+  checks.push('a B notification arriving before App hydration survives as an opaque fragment, then selects B from the saved A-active roster and clears the fragment');
 
   await page.getByTestId(`roster-remove-${roomA}`).click();
   await ready(1);
@@ -129,6 +195,40 @@ try {
   assert.deepEqual((await readFixture('subscriptions', {}))[scopeB], subscriptions[scopeB]);
   await page.reload(); await ready(1);
   checks.push('forget removes only its room subscription/registration, preserves the sibling and shell, and remains removed after reload');
+
+  await page.setViewportSize({ width: 320, height: 568 });
+  await context.setOffline(true);
+  for (const permission of ['denied', 'default']) {
+    await fixture('permission', permission);
+    await page.reload();
+    await page.getByTestId('offline-badge').waitFor();
+    const status = page.getByTestId('push-status');
+    await status.waitFor();
+    assert.doesNotMatch(await status.innerText(), /Notifications set up/);
+    if (permission === 'denied') {
+      assert.match(await status.innerText(), /blocked/);
+      await shot('offline-denied-320');
+    } else {
+      const enable = page.getByRole('button', { name: 'Enable notifications' });
+      await enable.scrollIntoViewIfNeeded();
+      const rect = await enable.boundingBox();
+      assert.ok(rect && rect.height >= 44 && rect.y >= 0 && rect.y + rect.height <= 568);
+      await shot('offline-permission-320');
+      await enable.click();
+      assert.equal((await readFixture('events', [])).filter((e) => e.type === 'permission').at(-1).gesture, true);
+      await page.getByRole('button', { name: 'Retry notifications' }).waitFor();
+      assert.doesNotMatch(await status.innerText(), /Notifications set up/);
+    }
+    const retry = page.getByTestId('retry-button');
+    await retry.scrollIntoViewIfNeeded();
+    assert.ok((await retry.boundingBox()).height >= 44);
+  }
+  await fixture('unsupported', true); await page.reload();
+  await page.getByTestId('offline-badge').waitFor();
+  await page.getByTestId('push-status').getByText(/unavailable here/).waitFor();
+  await fixture('unsupported', false); await context.setOffline(false);
+  await page.reload(); await ready(1);
+  checks.push('restored unavailable relay retains denied, permission, failed, and unsupported notification disclosure at 320 × 568; enable and reconnect controls remain usable');
   a.kill(); b.kill();
 
   const badgeContext = await h.browser.newContext();
@@ -149,6 +249,6 @@ try {
   console.log(JSON.stringify({ passed: checks.length, checks, limits: ['PushManager service is deterministic; live FCM/APNs subscriptions and locked iPhone delivery require the documented device test.'] }, null, 2));
 } catch (error) {
   await shot('failure');
-  console.error(JSON.stringify({ body: await page.locator('body').innerText(), sessions: await page.evaluate(() => JSON.parse(localStorage.getItem('aah:sessions:v1') || '[]').map(({ room, vapid }) => ({ room, hasVapid: Boolean(vapid) }))), errors }, null, 2));
+  console.error(JSON.stringify({ url: page.url(), body: await page.locator('body').innerText(), sessions: await page.evaluate(() => JSON.parse(localStorage.getItem('aah:sessions:v1') || '[]').map(({ room, vapid }) => ({ room, hasVapid: Boolean(vapid) }))), errors }, null, 2));
   throw error;
 } finally { await h.cleanup(); }

@@ -32,15 +32,23 @@ Permission is requested directly from **Enable notifications**. Pairing and
 reload never prompt automatically. When permission is already granted, new and
 restored rooms subscribe silently. Setup is reported only after obtaining a
 subscription and awaiting its sealed delivery; unavailable, denied, waiting,
-and failed states stay visible. Persist the sealed VAPID public key on receipt,
+and failed states stay visible on both listening and offline screens, with
+controls reachable at small touch heights. Persist the sealed VAPID public key on receipt,
 even when pairing is followed by no request or other state change.
 
 A push always starts a fixed generic visible notification before optional
 badge storage work. The worker ignores all payload content and derives the
 target room from its own registration. A click sends the opaque room to a
-same-origin app client, or opens `/app/#wake=<room>` when no app is open. App
-validates the worker sender and existing roster membership before selecting
-and reconnecting that room. It clears the fragment and never creates a pairing
+same-origin app client over an acknowledged message channel. A hydrated app
+selects the room without navigation. A small shell receiver loads independently
+of React; before hydration it retains `/app/#wake=<room>` with `replaceState`
+before acknowledging. App restores its roster and consumes that fragment when
+hydration finishes. If no receiver acknowledges within 700 ms, the worker opens
+the durable URL through the notification gesture. It also opens that URL when
+no app client is available. Room workers cannot navigate a client controlled
+by the shell worker. The shell receiver validates the worker sender; App
+validates roster membership before selecting or reconnecting a room. It clears
+the fragment and never creates a pairing
 or approves a request from a notification. Badge increments use one IndexedDB
 read/write transaction across workers; the visible app remains authoritative.
 
@@ -63,6 +71,10 @@ the shell worker must never be unregistered as room cleanup.
   checks activation while permission is default and proceeds directly when
   already granted. That supports an explicit permission action followed by
   automatic setup of additional rooms. Sources reviewed on 2026-09-08.
+- The [Service Workers navigation algorithm](https://www.w3.org/TR/service-workers/#client-navigate)
+  rejects navigation by a worker which does not control the client. Native
+  Chrome testing confirmed that restriction for wake-only workers; the early
+  page receiver retains the fragment without worker-driven navigation.
 
 These sources support the design; they do not substitute for testing the
 shipping iOS version, install state, service-worker quotas, or APNs delivery.
@@ -86,10 +98,16 @@ The browser test runs two real local Go agents with independently generated
 VAPID keys, a real relay, encrypted pairing, native worker registrations and
 cache/persistence behavior. A deterministic PushManager service fixture keeps
 external delivery out of this test. It checks permission gesture, independent
-bindings, reload reuse, failure/retry/denied/unsupported states, saved-room
-navigation, exact cleanup, a 320 × 568 touch target, and concurrent IndexedDB
+bindings, reload reuse, failure/retry/denied/unsupported states (including an
+unavailable relay), acknowledged selection without navigation, a click while
+App hydration is deliberately held, saved-room navigation, exact cleanup,
+320 × 568 touch targets, and concurrent IndexedDB
 increments from four tabs. Worker regressions separately check fixed visible
-content, no room precache/claim, validated navigation, and badge handling.
+content, no room precache/claim, acknowledgement and bounded fallback navigation,
+and badge handling. The browser click fixture invokes the built native worker
+handler and stubs only focus, which otherwise requires a trusted OS gesture.
+The no-receiver timeout and fallback `openWindow` URL are unit-tested. A trusted
+OS click opening or reusing the installed app remains part of the device test.
 
 A fresh native Chrome prototype activated two registrations with the shared
 script but actual `PushManager.subscribe()` returned `AbortError: Registration

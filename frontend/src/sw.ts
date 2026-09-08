@@ -66,6 +66,31 @@ self.addEventListener('push', (event) => {
   event.waitUntil(Promise.all([shown, badge]));
 });
 
+// The small app-shell receiver retains a wake in the fragment while React is
+// loading, or selects directly when hydrated. No response within the bound
+// means we must open the durable URL through the trusted notification gesture.
+function selectRoom(client: WindowClient, target: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    const channel = new MessageChannel();
+    let finished = false;
+    const finish = (selected: boolean) => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timer);
+      channel.port1.close();
+      channel.port2.close();
+      resolve(selected);
+    };
+    const timer = setTimeout(() => finish(false), 700);
+    channel.port1.onmessage = ({ data }) => {
+      if (data?.type === 'aah:push-opened' && data.room === target) finish(true);
+    };
+    try {
+      client.postMessage({ type: 'aah:push-open', room: target }, [channel.port2]);
+    } catch { finish(false); }
+  });
+}
+
 self.addEventListener('notificationclick', (event) => {
   event.notification.close();
   event.waitUntil((async () => {
@@ -75,12 +100,15 @@ self.addEventListener('notificationclick', (event) => {
       // The target comes from this worker's own registration, never a payload.
       // App validates both sender and known roster membership before selecting.
       try {
-        if (room) client.postMessage({ type: 'aah:push-open', room });
+        const selected = room ? selectRoom(client, room) : Promise.resolve(true);
         await client.focus();
-        return;
+        if (await selected) return;
+        break;
       } catch { /* The window may have closed; try another app window. */ }
     }
-    // A fragment is not sent in HTTP requests. It contains only an opaque room.
+    // Room workers do not control app clients, so client.navigate() is forbidden
+    // here. openWindow may reuse the installed app's existing window. A fragment
+    // is not sent in HTTP requests and contains only an opaque room.
     await self.clients.openWindow(pushOpenURL(room));
   })());
 });

@@ -11,7 +11,8 @@ import { syncBadge } from '../lib/badge.ts';
 import { canonicalizeCode, roomFromCode } from '../lib/codegen.ts';
 import { SessionManager, type AgentSummary } from '../lib/manager.ts';
 import { type PairPayload } from '../lib/payload.ts';
-import { roomFromPushHash, roomFromPushMessage } from '../lib/push-routing.ts';
+import { roomFromPushHash } from '../lib/push-routing.ts';
+import { onPushRoom } from '../lib/push-page.ts';
 import { localStorePersistence } from '../lib/store.ts';
 import { type SessionState } from '../lib/session.ts';
 import { PairScreen } from './PairScreen.tsx';
@@ -190,13 +191,12 @@ export default function App() {
       history.replaceState(history.state, '', window.location.pathname + window.location.search);
       select(room);
     };
-    const fromMessage = (event: MessageEvent) => select(roomFromPushMessage(event, window.location.origin));
+    const stopPush = onPushRoom(select);
     fromHash();
     window.addEventListener('hashchange', fromHash);
-    navigator.serviceWorker?.addEventListener('message', fromMessage);
     return () => {
       window.removeEventListener('hashchange', fromHash);
-      navigator.serviceWorker?.removeEventListener('message', fromMessage);
+      stopPush();
     };
   }, [manager]);
 
@@ -380,7 +380,7 @@ function renderScreen(c: Palette, state: SessionState, expiresIn: number | null,
         <ListeningScreen c={c} agent={state.agent} roomID={state.roomID} />
       );
     case 'offline':
-      return <OfflineScreen c={c} attempt={state.attempt} onRetry={h.onRetry} />;
+      return <OfflineScreen c={c} attempt={state.attempt} onRetry={h.onRetry}>{pushControl}</OfflineScreen>;
     default:
       return <ListeningScreen c={c} agent={state.agent} roomID={state.roomID} />;
   }

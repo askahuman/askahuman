@@ -19,6 +19,11 @@ import SpaceBackground from "../components/SpaceBackground.astro";
   </div>
 </Layout>
 
+<script>
+  import { installPushReceiver } from '../lib/push-page.ts';
+  installPushReceiver();
+</script>
+
 <style>
   .app-content {
     position: relative;
