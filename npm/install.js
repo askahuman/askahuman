@@ -10,6 +10,7 @@ const os = require("os");
 const path = require("path");
 const https = require("https");
 const crypto = require("crypto");
+const { pipeline } = require("stream");
 const { execFileSync } = require("child_process");
 
 const REPO = "askahuman/askahuman";
@@ -85,6 +86,7 @@ function download(u, dest, redirects = 0) {
     }
     https
       .get(u, { headers: { "User-Agent": "@askahuman/mcp-installer" } }, (res) => {
+        res.on("error", reject);
         if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
           res.resume();
           let next;
@@ -102,10 +104,10 @@ function download(u, dest, redirects = 0) {
           res.resume();
           return reject(new Error(`HTTP ${res.statusCode} for ${u}`));
         }
-        const out = fs.createWriteStream(dest);
-        res.pipe(out);
-        out.on("finish", () => out.close(resolve));
-        out.on("error", reject);
+        // The private directory prevents another local account from placing a
+        // link here. Exclusive creation also refuses an unexpected existing file.
+        const out = fs.createWriteStream(dest, { flags: "wx", mode: 0o600 });
+        pipeline(res, out, (error) => error ? reject(error) : resolve());
       })
       .on("error", reject);
   });
@@ -113,24 +115,10 @@ function download(u, dest, redirects = 0) {
 
 // downloadText fetches a small text resource (checksums.txt) through the same
 // hardened path and returns its body. Rejects on any non-200.
-function downloadText(u) {
-  return new Promise((resolve, reject) => {
-    const tmp = path.join(os.tmpdir(), `aah-${process.pid}-checksums-${Date.now()}.txt`);
-    download(u, tmp)
-      .then(() => {
-        try {
-          const body = fs.readFileSync(tmp, "utf8");
-          resolve(body);
-        } catch (e) {
-          reject(e);
-        } finally {
-          try {
-            fs.unlinkSync(tmp);
-          } catch {}
-        }
-      })
-      .catch(reject);
-  });
+async function downloadText(u, tempDir) {
+  const tmp = path.join(tempDir, "checksums.txt");
+  await download(u, tmp);
+  return fs.readFileSync(tmp, "utf8");
 }
 
 function sha256File(file) {
@@ -143,18 +131,18 @@ function sha256File(file) {
 //   (a) AAH_BINARY_SHA256 env  — out-of-band pin (air-gapped / self-rebuilt mirror)
 //   (b) ${base}/checksums.txt  — TLS-TOFU on the release tag (goreleaser default)
 // Returns "" when neither yields a digest, which the caller treats as failure.
-async function expectedDigest() {
+async function expectedDigest(tempDir) {
   const pin = process.env.AAH_BINARY_SHA256;
   // A set-but-malformed pin must fail closed, not silently fall back to
   // checksums.txt — the operator asked to pin, honoring a weaker source instead
   // would defeat the intent. Only an *unset* pin falls back.
   if (pin !== undefined && pin !== "") {
     if (!/^[0-9a-fA-F]{64}$/.test(pin.trim())) {
-      fail("AAH_BINARY_SHA256 set but not a valid 64-hex sha256");
+      throw new Error("AAH_BINARY_SHA256 set but not a valid 64-hex sha256");
     }
     return pin.trim().toLowerCase();
   }
-  const text = await downloadText(`${base}/checksums.txt`);
+  const text = await downloadText(`${base}/checksums.txt`, tempDir);
   return parseChecksum(text, asset);
 }
 
@@ -213,26 +201,26 @@ if (process.env.AAH_SKIP_DOWNLOAD) {
 
 (async () => {
   fs.mkdirSync(binDir, { recursive: true });
-  const tmp = path.join(os.tmpdir(), `aah-${process.pid}-${asset}`);
+  // mkdtemp creates an unpredictable directory with owner-only access on Unix.
+  // Never download to predictable paths in a shared temporary directory.
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "aah-install-"));
+  const tmp = path.join(tempDir, asset);
   try {
     console.log(`@askahuman/mcp: downloading ${asset} ...`);
     await download(url, tmp);
     // Integrity gate (fail-closed): verify sha256 BEFORE extract+chmod, so a
     // tampered archive never reaches disk as an executable.
-    const want = await expectedDigest();
-    if (!want) fail("could not determine expected sha256 (no checksums.txt and no AAH_BINARY_SHA256)");
+    const want = await expectedDigest(tempDir);
+    if (!want) throw new Error("could not determine expected sha256 (no checksums.txt and no AAH_BINARY_SHA256)");
     const got = sha256File(tmp);
-    if (got !== want) fail(`sha256 mismatch for ${asset}: got ${got}, want ${want}`);
+    if (got !== want) throw new Error(`sha256 mismatch for ${asset}: got ${got}, want ${want}`);
     console.log("@askahuman/mcp: sha256 verified.");
     extract(tmp, binDir);
-    if (!fs.existsSync(binPath)) fail(`binary ${binName} not found in archive`);
+    if (!fs.existsSync(binPath)) throw new Error(`binary ${binName} not found in archive`);
     if (goos !== "windows") fs.chmodSync(binPath, 0o755);
     console.log("@askahuman/mcp: installed.");
-  } catch (e) {
-    fail(`download/extract failed: ${e.message}`);
   } finally {
-    try {
-      fs.unlinkSync(tmp);
-    } catch {}
+    // Cleanup finishes before the outer failure reporter can exit the process.
+    fs.rmSync(tempDir, { recursive: true, force: true });
   }
-})();
+})().catch((e) => fail(`download/extract failed: ${e.message}`));

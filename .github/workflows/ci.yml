@@ -110,3 +110,13 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - name: Topology, redaction, and public release probe regressions
         run: python3 -m unittest discover -s scripts -p test_release_verification.py -v
+
+  npm-installer:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "20"
+      - name: Installer isolation, integrity failures, and interrupted response regressions
+        run: node --test npm/test/install.test.cjs
