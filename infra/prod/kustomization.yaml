@@ -13,6 +13,9 @@ resources:
   - ingress.yaml
   - frontend-config.yaml
 
+patches:
+  - path: relay-proxy.yaml
+
 # Image refs are intentionally generic placeholders. The deploy workflow injects
 # the real (private) Artifact Registry + released tag at apply time via
 #   kustomize edit set image ask-a-human-relay=$GAR_REGISTRY/relay:$TAG

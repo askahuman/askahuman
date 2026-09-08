@@ -1,0 +1,28 @@
+# Google global/classic L7 appends <client-ip>,<forwarding-rule-ip> to XFF.
+# Only GFE TCP peers may supply it. Keep this out of base/local overlays.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ask-a-human-relay
+spec:
+  template:
+    spec:
+      containers:
+        - name: relay
+          env:
+            - name: AAH_RELAY_TRUST_PROXY
+              value: "1"
+            - name: AAH_RELAY_TRUSTED_PROXY_CIDRS
+              value: "35.191.0.0/16,130.211.0.0/22,2600:2d00:1:1::/64"
+            - name: AAH_RELAY_XFF_CLIENT_FROM_RIGHT
+              value: "2"
+            - name: AAH_RELAY_MAX_CONNS_PER_IP
+              value: "256"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ask-a-human-relay
+  annotations:
+    # VPC-native GKE: GFE -> pod, without a node/proxy rewriting the TCP peer.
+    cloud.google.com/neg: '{"ingress": true}'
