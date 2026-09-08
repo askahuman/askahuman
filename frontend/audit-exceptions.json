@@ -8,5 +8,11 @@
     "id": "GHSA-8hv8-536x-4wqp",
     "reason": "Requires Astro server-side reflected slot-name rendering. Production serves static HTML with nginx and request text is rendered by React. Reassess the Astro/PWA integration and remove this exception when upgrading.",
     "expires": "2026-12-01"
+  },
+  {
+    "id": "GHSA-26w7-cxv4-gfx2",
+    "package": "astro",
+    "reason": "Astro's fix raises Sharp to 0.35.4, which this project already overrides. Audit and every Astro config/build verify the reviewed image dependency versions, Astro-resolved ESM Sharp 0.35.4, packaged native addon, runtime libvips 8.18.6 and bundled libheif 1.23.2 metadata. Missing or changed evidence fails closed. Reassess during the Astro/PWA upgrade; upstream fix: https://github.com/withastro/astro/commit/ecb4082131490b4fe9a56aa44fda84b54ef8967b",
+    "expires": "2026-10-08"
   }
 ]
