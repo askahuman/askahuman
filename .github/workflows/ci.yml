@@ -63,6 +63,7 @@ jobs:
       - name: Phone interaction, recovery, hosted pairing, and notification regressions
         run: |
           node e2e/phone-interactions.mjs
+          node e2e/text-entry.mjs
           node e2e/session-recovery.mjs
           node e2e/hosted-pairing.mjs
           node e2e/multi-agent-push.mjs
