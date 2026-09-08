@@ -379,12 +379,11 @@ export class Session {
     this.inbox.length = 0;
     this.relay.close();
   }
-  forget(): void {
+  forget(): Promise<void> {
     this.close();
-    void this.ready
+    return this.ready
       .then(() => this.protocolReady)
-      .then(() => this.ledger?.forget())
-      .catch(() => {});
+      .then(() => this.ledger?.forget());
   }
   private ledgerFailed(): void {
     this.onPairError(
@@ -422,6 +421,29 @@ export class Session {
       result: null,
       delivery: null,
     });
+  }
+  /** Check durable pair membership before touching a native push registration.
+   * A different tab can forget the pairing while this Session remains alive.
+   * Restored mode validates the existing ledger without allocating counters or
+   * recreating a missing record. The caller holds the room's push lock. */
+  async canReconcilePush(): Promise<boolean> {
+    if (this.closed) return false;
+    await this.ready;
+    if (this.closed) return false;
+    await this.protocolReady;
+    const ledger = this.ledger;
+    if (!ledger || !this.state.paired || !this.agentSigner ||
+        !this.pinnedDeviceSigner || !this.sessionKey || !this.deviceKey || this.closed)
+      return false;
+    try {
+      await this.ledgerLoader(protocolScope(
+        this.state.roomID, this.agentSigner, this.pinnedDeviceSigner,
+      ), true);
+      return !this.closed && this.state.paired && this.ledger === ledger;
+    } catch {
+      if (!this.closed) this.ledgerFailed();
+      return false;
+    }
   }
   async sendPushSubscription(sub: PushSubscription): Promise<boolean> {
     await this.ready;

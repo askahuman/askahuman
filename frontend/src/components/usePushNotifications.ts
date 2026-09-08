@@ -1,9 +1,7 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useState } from 'react';
 import type { AgentSummary, SessionManager } from '../lib/manager.ts';
-import { pushPermission, removePushForRoom, requestPushPermission, subscribeForPush, type PushPermission } from '../lib/push.ts';
-import { subscribeAndDeliver } from '../lib/push-delivery.ts';
+import { pushPermission, requestPushPermission, type PushPermission } from '../lib/push.ts';
 
-export type RoomPushStatus = 'working' | 'ready' | 'failed' | 'waiting';
 export interface PushStatus {
   permission: PushPermission;
   total: number;
@@ -12,7 +10,6 @@ export interface PushStatus {
   failed: boolean;
   enable: () => void;
   retry: () => void;
-  forget: (room: string) => void;
 }
 
 /** The native prompt is only called by enable(), directly from a button.
@@ -21,8 +18,6 @@ export function usePushNotifications(manager: SessionManager, roster: AgentSumma
   const [permission, setPermission] = useState<PushPermission>(pushPermission);
   const [generation, setGeneration] = useState(0);
   const [, setKeyVersion] = useState(0);
-  const [states, setStates] = useState<Record<string, RoomPushStatus>>({});
-  const done = useRef(new Map<string, string>());
   const agentKeys = new Map(manager.vapidKeys().map(({ room, key }) => [room, key]));
   const targets = roster.filter((a) => a.status === 'paired' || a.status === 'offline')
     .map((a) => ({ room: a.id, key: agentKeys.get(a.id) || fallbackKey, status: a.status }))
@@ -30,7 +25,6 @@ export function usePushNotifications(manager: SessionManager, roster: AgentSumma
   const signature = JSON.stringify(targets);
 
   const retry = () => {
-    done.current.clear();
     setPermission(pushPermission());
     setGeneration((v) => v + 1);
   };
@@ -49,27 +43,13 @@ export function usePushNotifications(manager: SessionManager, roster: AgentSumma
 
   useEffect(() => {
     let canceled = false;
-    if (permission !== 'granted') {
-      done.current.clear();
-      setStates({});
-      return;
-    }
-    const next: Record<string, RoomPushStatus> = {};
+    if (permission !== 'granted') return;
     for (const { room, key } of targets) {
-      next[room] = !key ? 'waiting' : done.current.get(room) === key ? 'ready' : 'working';
-    }
-    setStates(next);
-    for (const { room, key } of targets) {
-      if (next[room] !== 'working') continue;
+      if (!key) continue;
       const current = () => !canceled && pushPermission() === 'granted'
         && manager.list().some((a) => a.id === room)
         && (manager.vapidKeys().find((a) => a.room === room)?.key || fallbackKey) === key;
-      void subscribeAndDeliver(room, key, subscribeForPush, (sub) => manager.sendPushSubscriptionTo(room, sub), current)
-        .then((sent) => {
-          if (!current()) return;
-          if (sent) done.current.set(room, key);
-          setStates((old) => ({ ...old, [room]: sent ? 'ready' : 'failed' }));
-        });
+      void manager.reconcilePushSubscription(room, key, current);
     }
     return () => { canceled = true; };
     // signature includes the room, key, and connection status. A reconnect
@@ -86,11 +66,10 @@ export function usePushNotifications(manager: SessionManager, roster: AgentSumma
   return {
     permission,
     total: targets.length,
-    ready: targets.filter(({ room, key }) => states[room] === 'ready' && done.current.get(room) === key).length,
-    working: targets.some(({ room }) => states[room] === 'working'),
-    failed: targets.some(({ room }) => states[room] === 'failed'),
+    ready: targets.filter(({ room, key }) => manager.pushStatus(room, key) === 'ready').length,
+    working: targets.some(({ room, key }) => manager.pushStatus(room, key) === 'working'),
+    failed: targets.some(({ room, key }) => manager.pushStatus(room, key) === 'failed'),
     enable,
     retry,
-    forget: (room) => { done.current.delete(room); void removePushForRoom(room); },
   };
 }

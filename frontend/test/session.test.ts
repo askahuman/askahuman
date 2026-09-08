@@ -299,6 +299,59 @@ describe('authenticated Session protocol', () => {
     expect(session.getSessionKey()).toEqual(first.agentKey);
     expect(FakeWS.last).toBeNull();
   });
+  it('validates durable push membership without allocating a sequence and rejects a forgotten live peer', async () => {
+    const first = await paired();
+    expect(await first.session.canReconcilePush()).toBe(true);
+    expect(await first.session.canReconcilePush()).toBe(true);
+    const saved = { key: first.agentKey, ...first.session.persistState() };
+    const peer = newSession({}, saved);
+    await until(() => peer.session.getState().paired);
+    expect(await peer.session.canReconcilePush()).toBe(true);
+    const sub = { endpoint: 'https://push.example/synthetic', keys: { p256dh: 'p', auth: 'a' } };
+    expect(await first.session.sendPushSubscription(sub)).toBe(true);
+    const signed = first.ws.sent.filter((f) => f.box).map((f) => JSON.parse(new TextDecoder().decode(open(first.agentKey, f.box as string))));
+    expect(signed.find((m) => m.kind === 'push_sub').push_seq).toBe(1);
+    await first.session.forget();
+    expect(peer.session.getState().paired).toBe(true);
+    expect(await peer.session.canReconcilePush()).toBe(false);
+    expect(peer.session.getState().paired).toBe(false);
+    expect(peer.session.getState().pairError).toContain('sequence storage');
+  });
+
+  it('rejects a closed session after its delayed durable validity read completes', async () => {
+    let finish!: () => void;
+    const { session } = await paired({ protocolLedgerLoader: async (scope, restored) => {
+      if (restored) await new Promise<void>((resolve) => { finish = resolve; });
+      return protocolLedgerLoader(scope, restored);
+    } });
+    const pending = session.canReconcilePush();
+    await until(() => finish);
+    session.close();
+    finish();
+    expect(await pending).toBe(false);
+  });
+
+  it('exposes delayed and failed durable deletion to native cleanup callers', async () => {
+    let finish!: () => void;
+    const { session } = await paired({ protocolLedgerLoader: async (scope, restored) => {
+      const ledger = await protocolLedgerLoader(scope, restored);
+      return { ...ledger, forget: () => new Promise<void>((resolve) => { finish = resolve; }) };
+    } });
+    let completed = false;
+    const pending = session.forget().then(() => { completed = true; });
+    await until(() => finish);
+    expect(completed).toBe(false);
+    expect(await session.canReconcilePush()).toBe(false);
+    finish();
+    await pending;
+    expect(completed).toBe(true);
+    const failed = await paired({ protocolLedgerLoader: async (scope, restored) => {
+      const ledger = await protocolLedgerLoader(scope, restored);
+      return { ...ledger, forget: async () => { throw new Error('storage failed'); } };
+    } });
+    await expect(failed.session.forget()).rejects.toThrow('storage failed');
+  });
+
   it('reserves push sequences before signing and suppresses an older signing completion', async () => {
     const device = await deviceKeyLoader();
     let release!: () => void, entered!: () => void;

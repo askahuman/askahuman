@@ -15,7 +15,11 @@ import { b64Decode, b64Encode } from "./b64.ts";
 import type { ConnState } from "./relay.ts";
 import type { PairPayload } from "./payload.ts";
 import type { Persistence, StoredSession } from "./store.ts";
-import type { PushSubscription } from "./wire.ts";
+import { removePushForRoom, withPushSubscription } from "./push.ts";
+import {
+  subscribeAndDeliver,
+  type PushSubscriptionProvider,
+} from "./push-delivery.ts";
 import {
   Session,
   type SessionOptions,
@@ -37,6 +41,7 @@ export interface AgentSummary {
 }
 
 const CARD_SCREENS: ReadonlySet<string> = new Set(["yesno", "choice", "text"]);
+export type RoomPushStatus = "working" | "ready" | "failed" | "waiting";
 
 interface Entry {
   session: Session;
@@ -46,15 +51,10 @@ interface Entry {
   unread: number;
   /** id of the last request we counted, so a re-render doesn't re-bump unread. */
   lastReqID: string | null;
-  /** whether the retained push subscription has been delivered to this session. */
-  pushSent: boolean;
+  /** Retain retry intent, never a browser subscription snapshot. */
+  pushKey: string | null;
+  pushStatus: RoomPushStatus;
   pushEpoch: number;
-  pushInFlight: Promise<boolean> | null;
-  /** sub is this room's OWN subscription, produced under its agent's VAPID key
-   *  (sendPushSubscriptionTo). Retained even when the write fails — the next
-   *  open transition delivers it — and it always wins over the fanout lastSub
-   *  (which is signed by a different key and would be rejected 403). */
-  sub: PushSubscription | null;
   /** last-seen transport state, so we can re-arm push delivery on each fresh
    *  connection (the sub is re-sent whenever conn transitions back to open). */
   conn: ConnState;
@@ -63,16 +63,13 @@ interface Entry {
 /**
  * SessionManager owns a Map<roomID, Session> and one aggregate onChange. The App
  * re-renders off the single subscription; all decision/transport calls route to
- * the active session (sendPushSubscription fans out to every paired session).
+ * the active session. Push reconciliation always targets one room.
  */
 export class SessionManager {
   private readonly entries = new Map<string, Entry>();
   private readonly order: string[] = []; // insertion order for list()
   private active = "";
   private readonly listeners = new Set<(m: SessionManager) => void>();
-  // lastSub is the phone's most recent Web Push subscription, retained so an
-  // agent added AFTER the phone subscribed still receives it (fanout on add).
-  private lastSub: PushSubscription | null = null;
   // vapidKeyHandler is the App's per-session push-subscribe callback: when an
   // agent delivers its VAPID public key, the App subscribes with exactly that
   // key and delivers the resulting subscription back to THAT room (room A's key
@@ -88,13 +85,15 @@ export class SessionManager {
   constructor(
     private readonly opts: SessionOptions = {},
     private readonly persist?: Persistence,
+    private readonly pushProvider: PushSubscriptionProvider =
+      withPushSubscription,
   ) {}
 
   /**
    * onVapidKey registers the App's handler invoked (with the room id) when any
    * agent delivers its VAPID public key. The App subscribes for Web Push with
    * that key and routes the subscription back to the same room via
-   * sendPushSubscriptionTo. Set once on mount.
+   * reconcilePushSubscription. Set once on mount.
    */
   onVapidKey(handler: (publicKey: string, room: string) => void): void {
     this.vapidKeyHandler = handler;
@@ -115,8 +114,6 @@ export class SessionManager {
     }
 
     this.attach(room, payload.r, new Session(payload, this.sessionOpts(room)));
-    // A retained push subscription is delivered to this agent once it PAIRS
-    // (it has no session key yet here); see onSessionChange.
     this.emit();
     return room;
   }
@@ -174,10 +171,9 @@ export class SessionManager {
       unsub: () => {},
       unread: 0,
       lastReqID: null,
-      pushSent: false,
+      pushKey: null,
+      pushStatus: "waiting",
       pushEpoch: 0,
-      pushInFlight: null,
-      sub: null,
       conn: "closed",
     };
     entry.unsub = session.onChange(() => this.onSessionChange(room));
@@ -189,19 +185,21 @@ export class SessionManager {
 
   /**
    * remove closes the session and drops it; if it was active, re-picks the first
-   * remaining agent (or '' when none remain).
+   * remaining agent (or '' when none remain). Local removal is synchronous;
+   * the returned promise settles after durable deletion/native cleanup.
    */
-  remove(room: string): void {
+  remove(room: string): Promise<void> {
     const entry = this.entries.get(room);
-    if (!entry) return;
+    if (!entry) return Promise.resolve();
     entry.unsub();
-    entry.session.forget();
+    const cleanup = removePushForRoom(room, entry.session.forget());
     this.entries.delete(room);
     const i = this.order.indexOf(room);
     if (i >= 0) this.order.splice(i, 1);
     if (this.active === room) this.active = this.order[0] ?? "";
     this.persistAll(); // removal is the user's "forget this agent": wipe its key
     this.emit();
+    return cleanup;
   }
 
   /** list returns the roster ordered requests-first (leftmost), then insertion
@@ -255,8 +253,7 @@ export class SessionManager {
   }
 
   /** firstVapidKey returns the earliest agent-delivered VAPID public key across
-   *  sessions (insertion order), or undefined if no agent has sent one. The App
-   *  uses it to subscribe at first-paired time, preferring it over the build key. */
+   *  sessions (insertion order), or undefined if no agent has sent one. */
   firstVapidKey(): string | undefined {
     for (const room of this.order) {
       const key = this.entries.get(room)?.session.getVapidKey();
@@ -326,71 +323,42 @@ export class SessionManager {
     this.activeSession()?.expire(id);
   }
 
-  /** sendPushSubscription fans out the phone's BUILD-key push sub to every
-   *  paired session and retains it so agents added later also receive it (see
-   *  add). A room that already holds its OWN agent-keyed sub is skipped: that
-   *  sub always wins (the fanout sub was produced under a different key and the
-   *  agent's pushes against it would be rejected 403). */
-  async sendPushSubscription(sub: PushSubscription): Promise<boolean> {
-    this.lastSub = sub;
-    const results = await Promise.all(
-      Array.from(this.entries.values())
-        .filter((entry) => !entry.sub)
-        .map((entry) => {
-          entry.pushSent = false;
-          entry.pushEpoch++;
-          return this.deliverPush(entry, sub);
-        }),
-    );
-    return results.some(Boolean);
+  pushStatus(room: string, key: string): RoomPushStatus {
+    const entry = this.entries.get(room);
+    return entry?.pushKey === key ? entry.pushStatus : "waiting";
   }
 
-  /**
-   * sendPushSubscriptionTo delivers a push subscription to exactly one room and
-   * retains it on that room's entry. It is used when an agent's OWN VAPID key
-   * produced this subscription: the sub is bound to that key's signer, so it is
-   * delivered (and re-delivered on every fresh connection) to that agent only,
-   * never fanned out — another agent signs with a different key and would be
-   * rejected. Retained even when the write fails (page restore races the socket
-   * open): the open transition in onSessionChange is the retry that delivers it.
-   */
-  async sendPushSubscriptionTo(
+  /** Resolve the browser's current room/key subscription before EVERY fresh
+   * signature, including reconnects. The provider's lock remains held through
+   * sequence allocation/sign/send; an older tab cannot sign a cached endpoint
+   * after a newer tab has replaced and delivered the native subscription. */
+  async reconcilePushSubscription(
     room: string,
-    sub: PushSubscription,
+    key: string,
+    current: () => boolean = () => true,
   ): Promise<boolean> {
     const entry = this.entries.get(room);
-    if (!entry) return false;
-    if (entry.sub !== sub) {
-      entry.sub = sub;
-      entry.pushSent = false;
-      entry.pushEpoch++;
-    }
-    return this.deliverPush(entry, sub);
-  }
-
-  private deliverPush(entry: Entry, sub: PushSubscription): Promise<boolean> {
-    if (entry.pushSent) return Promise.resolve(true);
-    if (entry.pushInFlight)
-      return entry.pushInFlight.then(() => {
-        if (entry.sub && entry.sub !== sub) return false;
-        return entry.pushSent || this.deliverPush(entry, sub);
-      });
-    const epoch = entry.pushEpoch;
-    const pending = entry.session
-      .sendPushSubscription(sub)
-      .then((sent) => {
-        const room = entry.session.getState().roomID;
-        if (this.entries.get(room) !== entry || entry.pushEpoch !== epoch)
-          return false;
-        entry.pushSent = sent;
-        return sent;
-      })
-      .catch(() => false)
-      .finally(() => {
-        if (entry.pushInFlight === pending) entry.pushInFlight = null;
-      });
-    entry.pushInFlight = pending;
-    return pending;
+    if (!entry || !key || !current()) return false;
+    const agentKey = entry.session.getVapidKey();
+    if (agentKey && agentKey !== key) return false;
+    entry.pushKey = key;
+    entry.pushStatus = "working";
+    const epoch = ++entry.pushEpoch;
+    const active = () => {
+      const liveKey = entry.session.getVapidKey();
+      return this.entries.get(room) === entry && entry.pushEpoch === epoch
+        && (!liveKey || liveKey === key) && current();
+    };
+    this.emit();
+    const sent = await subscribeAndDeliver(
+      room, key, this.pushProvider,
+      (sub) => entry.session.sendPushSubscription(sub), active,
+      () => entry.session.canReconcilePush(),
+    );
+    if (!active()) return false;
+    entry.pushStatus = sent ? "ready" : "failed";
+    this.emit();
+    return sent;
   }
 
   /** closeAll tears down every session (unmount). */
@@ -424,27 +392,16 @@ export class SessionManager {
   private onSessionChange(room: string): void {
     const entry = this.entries.get(room);
     if (entry) {
-      // Re-arm push delivery on every fresh connection. pushSent latches on a
-      // socket WRITE (relay accepted the frame), NOT on agent receipt — a sub
-      // written while the agent was briefly absent counts "sent" yet never
-      // reached it, and the relay is content-blind so nothing replays it. On each
-      // transition back to open we clear pushSent so the retained sub is
-      // re-delivered below. Idempotent on the agent (it just overwrites a.sub, see
-      // ADR 0022), so a redundant re-send is harmless.
+      // A socket write is not an agent receipt. Reconcile and send again on a
+      // fresh connection, reading native state instead of replaying a cached
+      // subscription that another tab might already have replaced.
       const conn = entry.session.getState().conn;
-      if (conn === "open" && entry.conn !== "open") {
-        entry.pushSent = false;
-        entry.pushEpoch++;
-      }
+      const opened = conn === "open" && entry.conn !== "open";
       entry.conn = conn;
-      // Deliver the room's retained subscription once this agent is paired (and
-      // again after each re-arm) — an agent added after the phone subscribed has
-      // no session key until then. The room's OWN agent-keyed sub (entry.sub)
-      // always wins; the build-key fanout sub (lastSub) covers only rooms whose
-      // agent never sent a key.
-      const sub = entry.sub ?? this.lastSub;
-      if (sub && !entry.pushSent && !entry.pushInFlight)
-        void this.deliverPush(entry, sub);
+      if (opened && entry.pushKey)
+        void this.reconcilePushSubscription(
+          room, entry.session.getVapidKey() || entry.pushKey,
+        );
       const s = entry.session.getState();
       const reqID = s.request?.id ?? null;
       const isCard = s.request != null && CARD_SCREENS.has(s.screen);

@@ -24,9 +24,40 @@ Each registration subscribes under its own agent's public key. Same-room key
 rotation may replace that room's subscription. Different rooms never share a
 subscription, including when they happen to use the same key. Removing an agent
 unsubscribes and unregisters only its exact reserved scope and known script.
-Cleanup waits for that page's in-flight subscription operation and still
+Cleanup waits for in-flight subscription operations across same-origin pages and still
 unregisters if the push service fails to unsubscribe. Storage/network/browser
 failures remain best effort and never interrupt approval handling.
+
+Every delivery, including a reconnect, reconciles the current native room
+subscription under an exclusive Web Lock. The lock covers subscription lookup,
+creation/replacement, and the complete asynchronous sequence allocation,
+signature, and socket write. Cleanup uses the same lock. Managers retain only
+the room/key retry intent, never an endpoint snapshot. This prevents a stale
+tab that once delivered E1 from freshly signing E1 with a higher sequence after
+another tab has renewed and delivered E2. A delayed older lookup must complete
+before a newer tab can mutate/deliver; queued work reads native state after
+acquiring the lock. Local generations suppress replaced effects and removed
+sessions. A still-live peer can outlast another tab's Forget, so the Session
+also validates existing durable pairing membership inside the lock before any
+native mutation. This uses the existing ledger loader in restored mode; it
+never allocates a sequence or recreates a deleted pairing. Signing, ledger,
+and wire formats are unchanged.
+
+The manager owns the whole Forget lifecycle: close/remove the local session,
+await its existing durable ledger deletion, then clean up native state under
+the room lock. A stale peer queued before cleanup either sees the deletion or
+finishes before cleanup; one queued afterward cannot recreate a registration.
+If durable deletion rejects, native cleanup is skipped because revocation was
+not confirmed. Storage failures remain best effort and must not be interpreted
+as successful revocation; failed validity reads never report notification setup.
+
+Unavailable/rejected coordination or native lookup failures report failed
+setup without a cached fallback. A setup waiting more than ten seconds for a
+lock fails and can be retried; an acquired lock is never stolen or released
+before its asynchronous operation settles. Forget remains queued for cleanup
+even beyond this setup timeout. A frozen page holding the lock may therefore
+delay setup or cleanup until it resumes or closes. These bounds preserve
+ordering rather than pretending a timed-out operation stopped executing.
 
 Permission is requested directly from **Enable notifications**. Pairing and
 reload never prompt automatically. When permission is already granted, new and
@@ -75,6 +106,11 @@ the shell worker must never be unregistered as room cleanup.
   rejects navigation by a worker which does not control the client. Native
   Chrome testing confirmed that restriction for wake-only workers; the early
   page receiver retains the fragment without worker-driven navigation.
+- The [W3C Web Locks API](https://www.w3.org/TR/web-locks/)
+  holds an exclusive origin-scoped lock until the callback's promise settles.
+  [WebKit added Web Locks in Safari 15.4](https://webkit.org/blog/12445/new-webkit-features-in-safari-15-4/),
+  before its iOS Web Push release. Browsers without this coordination API
+  remain visibly unconfigured; there is no unlocked signing fallback.
 
 These sources support the design; they do not substitute for testing the
 shipping iOS version, install state, service-worker quotas, or APNs delivery.
@@ -92,6 +128,8 @@ bun run check
 bun run build
 CHROME_EXECUTABLE='/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' \
   RECOVERY_PORT=23080 node e2e/multi-agent-push.mjs
+RECOVERY_PORT=23180 node e2e/push-reconciliation.mjs
+RECOVERY_BROWSER=webkit RECOVERY_PORT=23280 node e2e/push-reconciliation.mjs
 ```
 
 The browser test runs two real local Go agents with independently generated
@@ -108,6 +146,20 @@ and badge handling. The browser click fixture invokes the built native worker
 handler and stubs only focus, which otherwise requires a trusted OS gesture.
 The no-receiver timeout and fallback `openWindow` URL are unit-tested. A trusted
 OS click opening or reusing the installed app remains part of the device test.
+
+The separate reconciliation harness first pairs with a real local agent, then
+restores production managers in two pages using captured local transports.
+Actual Web Locks, worker registrations, shared IndexedDB counters, and device
+signatures verify E1 → E2 → E2 on stale-tab reconnect. A deliberately delayed
+native lookup blocks the other tab's renewal/signing until the older write
+completes, while a sibling room can proceed. It also checks lookup failure,
+retry, and cross-page Forget while another operation holds the lock. An
+additional still-paired peer then reconnects without any previous failed write;
+its durable check suppresses both a signature and native registration recreation.
+Unit cases also cover delayed/failed deletion, stale work queued before/after
+cleanup, and a session closed during the durable read. The push service is
+deterministic, and captured signed updates
+are not evidence of external provider acceptance or OS notification delivery.
 
 A fresh native Chrome prototype activated two registrations with the shared
 script but actual `PushManager.subscribe()` returned `AbortError: Registration
