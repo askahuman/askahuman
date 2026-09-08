@@ -28,6 +28,19 @@ builds:
 archives:
   - id: agent
     ids: [agent]
+    # Archive metadata must not inherit the build machine's user/group identity.
+    builds_info:
+      owner: root
+      group: root
+    files:
+      - src: LICENSE
+        info:
+          owner: root
+          group: root
+      - src: README.md
+        info:
+          owner: root
+          group: root
     # install.js depends on this exact name: ask-a-human_<os>_<arch>.<ext>
     name_template: "ask-a-human_{{ .Os }}_{{ .Arch }}"
     formats: [tar.gz]
