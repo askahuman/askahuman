@@ -24,9 +24,9 @@ key material is stored or committed — the GitHub Actions OIDC identity is the 
 - **Sign the checksum, not each archive.** `checksums.txt` already chains to every archive via sha256,
   so a single cosign signature over it covers the whole release. GoReleaser's `signs:` block runs
   `cosign sign-blob --bundle=${artifact}.sigstore.json checksums.txt --yes`, producing one
-  `checksums.txt.sigstore.json` bundle (certificate + signature combined). Verification is
-  `cosign verify-blob --bundle checksums.txt.sigstore.json checksums.txt`, asserting the Rekor
-  transparency-log entry and the OIDC identity (this repo's release workflow).
+  `checksums.txt.sigstore.json` bundle (certificate + signature combined). Verification checks the
+  Rekor transparency-log entry and must constrain the certificate to this repository's release
+  workflow, the expected version tag, and the GitHub Actions OIDC issuer.
 - **SLSA build provenance** (`actions/attest-build-provenance`) is attached over the built archives
   (`dist/ask-a-human_*.tar.gz,*.zip`), recording who built what, from which commit, with which builder
   — verifiable with `gh attestation verify`.
@@ -37,10 +37,26 @@ key material is stored or committed — the GitHub Actions OIDC identity is the 
   identity comes from the ephemeral OIDC token, the certificate is short-lived, and the proof of
   signing lives in the public Rekor transparency log.
 
+Download `checksums.txt` and `checksums.txt.sigstore.json` from the same release, then set `VERSION`
+to the version you intend to verify, without the `v` prefix:
+
+```sh
+VERSION=0.2.0
+cosign verify-blob \
+  --bundle checksums.txt.sigstore.json \
+  --certificate-identity "https://github.com/askahuman/askahuman/.github/workflows/release.yml@refs/tags/v${VERSION}" \
+  --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+  checksums.txt
+```
+
+Both certificate constraints are required for keyless verification by the
+[pinned cosign version](https://github.com/sigstore/cosign/blob/v2.6.1/cmd/cosign/cli/options/certificate.go).
+After this succeeds, compare the downloaded archive's SHA-256 with its entry in the verified
+`checksums.txt`.
+
 ## Consequences
-- A downloader can verify a release is **authentic**, not merely self-consistent: a swapped binary
-  fails `cosign verify-blob` because the attacker cannot re-sign `checksums.txt` under this workflow's
-  OIDC identity. Provenance additionally proves the build source.
+- A downloader can verify the checksum file under the expected release workflow/tag identity, then
+  check the archive against those signed checksums. Provenance additionally records the build source.
 - **Composes with B2 (installer verification), via a deferred upgrade.** Today B2
   ([0019](0019_install_checksum_verify.md)) fetches `checksums.txt` and verifies the archive's sha256
   against it before extract — integrity, but **not** signature authenticity (it does not yet run
