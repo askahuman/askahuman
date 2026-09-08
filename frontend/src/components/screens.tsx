@@ -14,15 +14,8 @@ import { type Palette, catColor, countdown } from './theme.ts';
 const MONO = "'JetBrains Mono', ui-monospace, monospace";
 const SANS = "'IBM Plex Sans', sans-serif";
 
-// Display bounds for untrusted request strings. React escapes text by default
-// (no dangerouslySetInnerHTML/innerHTML anywhere), so XSS isn't the risk here;
-// these caps stop a hostile/oversized request from breaking layout or hanging
-// the render. Keep them as display-only clamps — the wire payload is unchanged.
-const MAX_TITLE = 120;
-const MAX_SUMMARY = 600;
-const MAX_CATEGORY = 24;
-const MAX_OPTION = 80;
-const MAX_OPTIONS = 12;
+// Admission bounds live in wire.decodeRequest. Accepted authorization context
+// must remain readable in full; only the optional input hint is shortened.
 const MAX_PLACEHOLDER = 80;
 
 /** clip truncates s to n chars (with an ellipsis) for safe display. */
@@ -31,7 +24,14 @@ function clip(s: string, n: number): string {
 }
 
 /** Frame fills the viewport with the screen's bg (no device bezel). */
-function Frame({ c, children, style }: { c: Palette; children: React.ReactNode; style?: CSSProperties }) {
+function Frame({ c, children, style, announcement }: { c: Palette; children: React.ReactNode; style?: CSSProperties; announcement?: string }) {
+  const [status, setStatus] = useState('');
+  useEffect(() => {
+    // Populate the live region after it exists in the accessibility tree.
+    setStatus('');
+    const timer = setTimeout(() => setStatus(announcement ?? ''), 50);
+    return () => clearTimeout(timer);
+  }, [announcement]);
   return (
     <div
       style={{
@@ -52,6 +52,11 @@ function Frame({ c, children, style }: { c: Palette; children: React.ReactNode; 
         ...style,
       }}
     >
+      {announcement && (
+        <div role="status" aria-live="polite" aria-atomic="true" style={{ position: 'absolute', width: 1, height: 1, padding: 0, margin: -1, overflow: 'hidden', clipPath: 'inset(50%)', whiteSpace: 'nowrap' }}>
+          {status}
+        </div>
+      )}
       {children}
     </div>
   );
@@ -251,7 +256,7 @@ export function ListeningScreen({
   roomID: string;
 }) {
   return (
-    <Frame c={c} style={{ padding: 'calc(66px + env(safe-area-inset-top)) 26px 40px', boxSizing: 'border-box', display: 'flex', flexDirection: 'column' }}>
+    <Frame c={c} announcement="Connected. Listening for requests." style={{ padding: 'calc(66px + env(safe-area-inset-top)) 26px 40px', boxSizing: 'border-box', display: 'flex', flexDirection: 'column' }}>
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
         <div style={{ fontSize: 11, letterSpacing: 2, color: c.muted, textTransform: 'uppercase' }}>ask-a-human</div>
         <div
@@ -327,14 +332,14 @@ export function ListeningScreen({
 function CardHeader({ c, req, expiresIn }: { c: Palette; req: Request; expiresIn: number | null }) {
   const cat = (req.category as string) || 'other';
   return (
-    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-        <span style={{ width: 9, height: 9, borderRadius: '50%', background: catColor(cat) }} />
-        <span style={{ fontSize: 11, letterSpacing: 1.5, color: c.muted, textTransform: 'uppercase' }}>
-          {clip(cat, MAX_CATEGORY)}
+    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexShrink: 0 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
+        <span style={{ width: 9, height: 9, borderRadius: '50%', background: catColor(cat), flexShrink: 0 }} />
+        <span style={{ fontSize: 11, letterSpacing: 1.5, color: c.muted, textTransform: 'uppercase', overflowWrap: 'anywhere' }}>
+          {cat}
         </span>
       </div>
-      {expiresIn !== null && <span style={{ fontSize: 11, color: c.faint }}>expires {countdown(expiresIn)}</span>}
+      {expiresIn !== null && <span style={{ fontSize: 11, color: c.faint, flexShrink: 0 }}>expires {countdown(expiresIn)}</span>}
     </div>
   );
 }
@@ -342,11 +347,11 @@ function CardHeader({ c, req, expiresIn }: { c: Palette; req: Request; expiresIn
 function CardBody({ c, req }: { c: Palette; req: Request }) {
   return (
     <>
-      <div style={{ fontWeight: 700, fontSize: 26, lineHeight: 1.15, marginTop: 20, color: c.text }}>
-        {clip(req.title, MAX_TITLE)}
-      </div>
-      <div style={{ fontFamily: SANS, fontSize: 17, lineHeight: 1.5, marginTop: 12, color: c.text, textWrap: 'pretty' }}>
-        {clip(req.summary, MAX_SUMMARY)}
+      <h1 data-testid="request-title" style={{ fontWeight: 700, fontSize: 26, lineHeight: 1.15, margin: '20px 0 0', color: c.text, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', flexShrink: 0 }}>
+        {req.title}
+      </h1>
+      <div data-testid="request-summary" style={{ fontFamily: SANS, fontSize: 17, lineHeight: 1.5, marginTop: 12, color: c.text, textWrap: 'pretty', whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', flexShrink: 0 }}>
+        {req.summary}
       </div>
     </>
   );
@@ -364,6 +369,9 @@ function CardFooter({ c, req, marginTop }: { c: Palette; req: Request; marginTop
         borderTop: `1px solid ${c.borderSoft}`,
         paddingTop: 14,
         marginTop,
+        gap: 12,
+        overflowWrap: 'anywhere',
+        flexShrink: 0,
       }}
     >
       <span>from {req.agent || 'your agent'}</span>
@@ -376,9 +384,8 @@ const COMMIT_PX = 110;
 
 /**
  * swipeOutcome decides what a horizontal drag commits to. Pure so the commit
- * math is unit-testable without a DOM env (vitest here has no jsdom). Same rule
- * for pointerup and pointercancel: |dx| past commitPx wins, else reset — a real
- * past-threshold drag still commits even when iOS cancels the gesture at release.
+ * math is unit-testable without a DOM env (vitest here has no jsdom). Call this
+ * only for a completed horizontal gesture. Cancellation always resets.
  */
 export function swipeOutcome(dx: number, commitPx: number): 'approve' | 'decline' | 'reset' {
   if (dx > commitPx) return 'approve';
@@ -401,7 +408,7 @@ export function YesNoScreen({
 }) {
   const [dx, setDx] = useState(0);
   const [dragging, setDragging] = useState(false);
-  const startX = useRef(0);
+  const gesture = useRef<{ pointerID: number; startX: number; startY: number; horizontal: boolean } | null>(null);
   const committed = useRef(false);
   // commitTimer holds the deferred (post-animation) decision fire. It MUST be
   // cleared on unmount: App keys this card by request id, so switching agent or
@@ -413,62 +420,104 @@ export function YesNoScreen({
     if (commitTimer.current) clearTimeout(commitTimer.current);
   }, []);
 
+  const cancelGesture = () => {
+    gesture.current = null;
+    setDragging(false);
+    if (!committed.current) setDx(0);
+  };
+  useEffect(() => {
+    const interrupt = () => {
+      gesture.current = null;
+      setDragging(false);
+      if (!committed.current) setDx(0);
+    };
+    const onVisibility = () => {
+      if (document.visibilityState !== 'visible') interrupt();
+    };
+    window.addEventListener('blur', interrupt);
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => {
+      window.removeEventListener('blur', interrupt);
+      document.removeEventListener('visibilitychange', onVisibility);
+    };
+  }, []);
   const onDown = (e: React.PointerEvent) => {
+    if (committed.current) return;
+    // A second contact interrupts consent; it cannot take over the first
+    // pointer's accumulated movement or complete its gesture.
+    if (gesture.current || !e.isPrimary || e.button !== 0) {
+      cancelGesture();
+      return;
+    }
     try {
       e.currentTarget.setPointerCapture(e.pointerId);
     } catch {
       /* ignore */
     }
-    startX.current = e.clientX;
-    setDragging(true);
+    gesture.current = { pointerID: e.pointerId, startX: e.clientX, startY: e.clientY, horizontal: false };
   };
   const onMove = (e: React.PointerEvent) => {
-    if (!dragging) return;
-    // Stop iOS from reclaiming the drag as scroll/edge-pan. Cancelable on a
-    // touch-action:none element; guard in case an ancestor re-enables touch.
-    if (e.cancelable) e.preventDefault();
-    setDx(e.clientX - startX.current);
+    const active = gesture.current;
+    if (!active || e.pointerId !== active.pointerID) return;
+    const movedX = e.clientX - active.startX;
+    const movedY = e.clientY - active.startY;
+    if (!active.horizontal) {
+      if (Math.max(Math.abs(movedX), Math.abs(movedY)) < 12) return;
+      if (Math.abs(movedX) <= Math.abs(movedY) * 1.5) {
+        cancelGesture();
+        return;
+      }
+      active.horizontal = true;
+      setDragging(true);
+    }
+    setDx(movedX);
   };
   const commit = (approve: boolean) => {
     if (committed.current) return;
     committed.current = true;
+    gesture.current = null;
     setDragging(false);
     setDx(approve ? 560 : -560);
     commitTimer.current = setTimeout(() => (approve ? onApprove() : onDecline()), 330);
   };
-  // settle handles both pointerup and pointercancel: iOS fires pointercancel
-  // mid/at-release when it hijacks the gesture, so a past-threshold swipe must
-  // still commit. commit() is idempotent (committed.current) -> no double-fire.
-  const settle = () => {
-    if (!dragging) return;
-    setDragging(false);
-    switch (swipeOutcome(dx, COMMIT_PX)) {
+  const onUp = (e: React.PointerEvent) => {
+    const active = gesture.current;
+    if (!active || e.pointerId !== active.pointerID) return;
+    const outcome = active.horizontal ? swipeOutcome(e.clientX - active.startX, COMMIT_PX) : 'reset';
+    cancelGesture();
+    switch (outcome) {
       case 'approve':
         commit(true);
         break;
       case 'decline':
         commit(false);
         break;
-      default:
-        setDx(0);
     }
+  };
+  const onCancel = (e: React.PointerEvent) => {
+    if (e.pointerId === gesture.current?.pointerID) cancelGesture();
   };
 
   const approveOpacity = Math.max(0, Math.min(1, dx / COMMIT_PX));
   const declineOpacity = Math.max(0, Math.min(1, -dx / COMMIT_PX));
 
   return (
-    <Frame c={c} style={{ padding: 'calc(60px + env(safe-area-inset-top)) 20px 28px', boxSizing: 'border-box', display: 'flex', flexDirection: 'column' }}>
-      <div style={{ flex: 1, display: 'flex', flexDirection: 'column' }}>
+    <Frame c={c} announcement={`New approval request: ${req.title}`} style={{ padding: 'calc(60px + env(safe-area-inset-top)) 20px 28px', boxSizing: 'border-box', display: 'flex', flexDirection: 'column' }}>
+      <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
         <div
           data-testid="yesno-card"
+          role="region"
+          aria-label="Request details"
+          tabIndex={0}
           onPointerDown={onDown}
           onPointerMove={onMove}
-          onPointerUp={settle}
-          onPointerCancel={settle}
+          onPointerUp={onUp}
+          onPointerCancel={onCancel}
+          onLostPointerCapture={onCancel}
           style={{
             flex: 1,
-            touchAction: 'none',
+            minHeight: 0,
+            touchAction: 'pan-y',
             cursor: 'grab',
             userSelect: 'none',
             WebkitUserSelect: 'none',
@@ -483,10 +532,13 @@ export function YesNoScreen({
             flexDirection: 'column',
             boxShadow: '0 18px 50px rgba(0,0,0,0.4)',
             position: 'relative',
-            overflow: 'hidden',
+            overflowY: 'auto',
+            overflowX: 'hidden',
+            overscrollBehaviorY: 'contain',
           }}
         >
           <div
+            aria-hidden="true"
             style={{
               position: 'absolute',
               top: 22,
@@ -506,6 +558,7 @@ export function YesNoScreen({
             APPROVE
           </div>
           <div
+            aria-hidden="true"
             style={{
               position: 'absolute',
               top: 22,
@@ -526,13 +579,13 @@ export function YesNoScreen({
           </div>
           <CardHeader c={c} req={req} expiresIn={expiresIn} />
           <CardBody c={c} req={req} />
-          <div style={{ flex: 1 }} />
+          <div style={{ flex: 1, minHeight: 20 }} />
           <CardFooter c={c} req={req} />
         </div>
         <div style={{ textAlign: 'center', fontSize: 11, color: c.faint, margin: '14px 0 12px', letterSpacing: 0.5 }}>
           ← swipe to decline · swipe to approve →
         </div>
-        <div style={{ display: 'flex', gap: 12 }}>
+        <div style={{ display: 'flex', gap: 12, flexShrink: 0 }}>
           <button
             data-testid="decline-button"
             onClick={() => commit(false)}
@@ -586,11 +639,11 @@ export function ChoiceScreen({
   expiresIn: number | null;
   onChoose: (label: string) => void;
 }) {
-  // Cap the option count so a hostile request can't render thousands of buttons.
-  const options = (req.response.options ?? []).slice(0, MAX_OPTIONS);
+  // The wire decoder bounds the list. Every admitted option remains available.
+  const options = req.response.options ?? [];
   return (
-    <Frame c={c} style={{ padding: 'calc(60px + env(safe-area-inset-top)) 20px 28px', boxSizing: 'border-box', display: 'flex', flexDirection: 'column' }}>
-      <div style={{ flex: 1, display: 'flex', flexDirection: 'column' }}>
+    <Frame c={c} announcement={`New choice request: ${req.title}`} style={{ padding: 'calc(60px + env(safe-area-inset-top)) 20px 28px', boxSizing: 'border-box', display: 'flex', flexDirection: 'column' }}>
+      <div data-testid="choice-scroll" role="region" aria-label="Request and answers" tabIndex={0} style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', overflowY: 'auto', overflowX: 'hidden', overscrollBehaviorY: 'contain' }}>
         <div
           style={{
             background: c.surface,
@@ -598,22 +651,24 @@ export function ChoiceScreen({
             borderRadius: 24,
             padding: '24px 22px',
             boxShadow: '0 18px 50px rgba(0,0,0,0.4)',
+            flexShrink: 0,
           }}
         >
           <CardHeader c={c} req={req} expiresIn={expiresIn} />
           <CardBody c={c} req={req} />
           <CardFooter c={c} req={req} marginTop={20} />
         </div>
-        <div style={{ marginTop: 18, fontSize: 11, color: c.faint, textAlign: 'center', letterSpacing: 0.5 }}>tap an answer</div>
+        <div style={{ margin: '18px 0 12px', fontSize: 11, color: c.faint, textAlign: 'center', letterSpacing: 0.5 }}>tap an answer</div>
         <div style={{ flex: 1 }} />
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+        <div role="group" aria-label="Answers" style={{ display: 'flex', flexDirection: 'column', gap: 10, flexShrink: 0 }}>
           {options.map((label, i) => (
             <button
               key={i}
               data-testid="choice-option"
               onClick={() => onChoose(label)}
               style={{
-                height: 54,
+                minHeight: 54,
+                flexShrink: 0,
                 borderRadius: 16,
                 background: c.surface,
                 border: `1px solid ${c.border}`,
@@ -625,11 +680,13 @@ export function ChoiceScreen({
                 display: 'flex',
                 alignItems: 'center',
                 justifyContent: 'space-between',
-                padding: '0 18px',
+                padding: '14px 18px',
+                gap: 12,
+                textAlign: 'left',
               }}
             >
-              <span>{clip(label, MAX_OPTION)}</span>
-              <span style={{ color: c.faint }}>→</span>
+              <span style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', minWidth: 0 }}>{label}</span>
+              <span aria-hidden="true" style={{ color: c.faint, flexShrink: 0 }}>→</span>
             </button>
           ))}
         </div>
@@ -655,13 +712,17 @@ export function TextScreen({
     if (value.trim()) onSend(value);
   };
   return (
-    <Frame c={c} style={{ padding: 'calc(60px + env(safe-area-inset-top)) 20px 28px', boxSizing: 'border-box', display: 'flex', flexDirection: 'column' }}>
+    <Frame c={c} announcement={`New text request: ${req.title}`} style={{ padding: 'calc(60px + env(safe-area-inset-top)) 20px 28px', boxSizing: 'border-box', display: 'flex', flexDirection: 'column' }}>
       {/* minHeight: 0 down the column + overflowY on the card: with the iOS
           keyboard open the Frame shrinks to the visible area (--app-vvh), so
           the card must be allowed to compress and scroll internally while the
           reply input stays pinned above the keyboard. */}
       <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
         <div
+          data-testid="text-request"
+          role="region"
+          aria-label="Request details"
+          tabIndex={0}
           style={{
             background: c.surface,
             border: `1px solid ${c.border}`,
@@ -670,6 +731,8 @@ export function TextScreen({
             boxShadow: '0 18px 50px rgba(0,0,0,0.4)',
             minHeight: 0,
             overflowY: 'auto',
+            overflowX: 'hidden',
+            overscrollBehaviorY: 'contain',
           }}
         >
           <CardHeader c={c} req={req} expiresIn={expiresIn} />
@@ -687,10 +750,12 @@ export function TextScreen({
             display: 'flex',
             alignItems: 'center',
             gap: 8,
+            flexShrink: 0,
           }}
         >
           <input
             data-testid="text-input"
+            aria-label="Your reply"
             value={value}
             onChange={(e) => setValue(e.target.value.slice(0, maxLen))}
             onKeyDown={(e) => {
@@ -713,6 +778,8 @@ export function TextScreen({
           />
           <button
             data-testid="text-send"
+            aria-label="Send reply"
+            disabled={!value.trim()}
             onClick={send}
             style={{
               width: 46,
@@ -761,6 +828,7 @@ export function ConfirmedScreen({
   return (
     <Frame
       c={c}
+      announcement={`${label}. ${detail}`}
       style={{
         padding: 'calc(60px + env(safe-area-inset-top)) 26px 40px',
         boxSizing: 'border-box',
@@ -828,7 +896,7 @@ export function ConfirmedScreen({
 
 export function OfflineScreen({ c, attempt, onRetry }: { c: Palette; attempt: number; onRetry: () => void }) {
   return (
-    <Frame c={c} style={{ padding: 'calc(66px + env(safe-area-inset-top)) 26px 40px', boxSizing: 'border-box', display: 'flex', flexDirection: 'column' }}>
+    <Frame c={c} announcement="Disconnected. Reconnecting to your agent." style={{ padding: 'calc(66px + env(safe-area-inset-top)) 26px 40px', boxSizing: 'border-box', display: 'flex', flexDirection: 'column' }}>
       <div
         data-testid="offline-badge"
         style={{

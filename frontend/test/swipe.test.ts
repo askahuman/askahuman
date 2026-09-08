@@ -1,5 +1,6 @@
 // Unit tests for the swipe commit decision (YesNoScreen). Pure function so the
-// commit math + iOS cancel-rescue are covered without a DOM env (no jsdom here).
+// commit math is covered without a DOM env. Real event cancellation, pointer
+// ownership, and scrolling regressions live in e2e/phone-interactions.mjs.
 
 import { describe, expect, it } from 'vitest';
 
@@ -23,11 +24,5 @@ describe('swipeOutcome', () => {
   it('exactly at commitPx -> reset (strictly greater commits)', () => {
     expect(swipeOutcome(COMMIT_PX, COMMIT_PX)).toBe('reset');
     expect(swipeOutcome(-COMMIT_PX, COMMIT_PX)).toBe('reset');
-  });
-  // Cancel-rescue: pointercancel and pointerup share this same path, so a real
-  // past-threshold drag still commits when iOS cancels at release.
-  it('past-threshold commits regardless of how the gesture ended', () => {
-    expect(swipeOutcome(130, COMMIT_PX)).toBe('approve');
-    expect(swipeOutcome(50, COMMIT_PX)).toBe('reset');
   });
 });

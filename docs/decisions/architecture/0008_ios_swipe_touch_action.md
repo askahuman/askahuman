@@ -1,6 +1,30 @@
 # 0008 — iOS PWA swipe: root-level touch-action/overscroll lock + pointercancel-commit
 
-**Status:** accepted · 2026-06-21
+**Status:** amended · 2026-09-07 (original decision 2026-06-21)
+
+## Safety amendment — 2026-09-07
+
+The cancellation behavior described below is superseded. A canceled gesture is
+not consent: `pointercancel`, lost pointer capture, a second pointer, window
+blur, and leaving the visible document reset the card and send no decision.
+Only the original primary pointer completing a horizontal gesture can commit.
+The explicit Approve and Decline buttons remain available.
+
+The card now uses `touch-action: pan-y` with an internal vertical scroll region.
+Vertical movement relinquishes the swipe, so a human can read the complete
+accepted title and summary without approving while scrolling. Choice screens
+likewise expose every accepted option and its full label in a scroll region;
+display-only truncation is no longer used for authorization context.
+
+`frontend/e2e/phone-interactions.mjs` exercises actual browser touch scrolling and
+completed touch swipes, canceled/interrupted pointer events, keyboard operation,
+and small/keyboard-sized viewports. Run it from `frontend` with
+`node e2e/phone-interactions.mjs` after installing the Playwright browser, or set
+`CHROME_EXECUTABLE` to an installed Chrome binary. `PHONE_SHOTS` optionally saves
+screenshots. This component harness does not replace physical iPhone testing or
+the full agent/relay integration tests.
+
+The original context and decision follow for historical reference.
 
 ## Context
 The YesNoScreen approve/decline swipe worked on desktop but did nothing on iPhone (Safari +
