@@ -2,6 +2,9 @@
 # built Go binaries (scripts go build -o ./bin/...)
 /bin/
 
+# Generated GoReleaser artifacts and build metadata
+/dist/
+
 # Python verification scripts
 __pycache__/
 
