@@ -2,7 +2,7 @@
 """Read-only GKE release checks. Never print command output or runtime identity.
 
 The CLI requires an Actions runner and uses an isolated Connect Gateway config.
-The existing deployer permissions suffice: no Compute API or cluster-wide read.
+No Compute API or cluster-wide read; missing namespace permissions fail closed.
 """
 import json
 import os
@@ -19,33 +19,104 @@ BACKEND = "ask-a-human-relay-backend-config"
 NEG_READY = "cloud.google.com/load-balancer-neg-ready"
 VERSION = re.compile(r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)(?:-(?:alpha|beta|rc)\.[0-9]+)?\Z")
 COMMIT = re.compile(r"[0-9a-f]{40}\Z")
+FAILURE_CLASSES = frozenset({"forbidden", "not_found", "unauthenticated", "timeout",
+                             "unavailable", "rate_limited", "invalid_request", "api_error",
+                             "network_error", "tls_error", "tool_unavailable", "tool_error",
+                             "invalid_json", "invalid_data", "unknown_error"})
+
+
+class CheckFailure(Exception):
+    def __init__(self, category):
+        self.category = category if category in FAILURE_CLASSES else "unknown_error"
+        super().__init__(self.category)
+
+
+def failure_class(error):
+    if isinstance(error, CheckFailure):
+        return error.category if error.category in FAILURE_CLASSES else "unknown_error"
+    if isinstance(error, subprocess.TimeoutExpired):
+        return "timeout"
+    if isinstance(error, json.JSONDecodeError):
+        return "invalid_json"
+    if isinstance(error, (KeyError, TypeError, ValueError)):
+        return "invalid_data"
+    return "unknown_error"
 
 
 class Report:
     def __init__(self):
         self.ok = True
 
-    def check(self, name, predicate):
+    def _result(self, field, name, predicate):
         # Names are constants at call sites. Untrusted API/CLI exception messages
         # may contain credentials, headers or private resource paths: discard.
+        result = {field: name}
         try:
             ok = bool(predicate())
-        except Exception:
+        except Exception as error:
             ok = False
-        self.ok = self.ok and ok
-        print(json.dumps({"check": name, "ok": ok}), flush=True)
+            result["failure"] = failure_class(error)
+        result["ok"] = ok
+        print(json.dumps(result), flush=True)
         return ok
+
+    def check(self, name, predicate):
+        ok = self._result("check", name, predicate)
+        self.ok = self.ok and ok
+        return ok
+
+    def diagnostic(self, name, predicate):
+        # Additional evidence never satisfies or bypasses a required check.
+        return self._result("diagnostic", name, predicate)
+
+
+def command_failure(stdout, stderr):
+    """Map known CLI/API errors to a closed vocabulary; never return raw text."""
+    reasons = {"Forbidden": "forbidden", "NotFound": "not_found",
+               "Unauthorized": "unauthenticated", "Timeout": "timeout",
+               "ServerTimeout": "timeout", "ServiceUnavailable": "unavailable",
+               "TooManyRequests": "rate_limited", "BadRequest": "invalid_request",
+               "InternalError": "api_error"}
+    for raw in (stdout, stderr):
+        try:
+            status = json.loads(raw)
+            if isinstance(status, dict) and status.get("kind") == "Status":
+                return reasons.get(status.get("reason"), "api_error")
+        except (ValueError, TypeError):
+            pass
+    for reason, category in reasons.items():
+        if re.search(r"^Error from server \(" + reason + r"\):", stderr, re.MULTILINE):
+            return category
+    text = stderr.lower()
+    for fragments, category in [
+        (("permission_denied",), "forbidden"),
+        (("the server doesn't have a resource type", "the server could not find the requested resource"), "not_found"),
+        (("you must be logged in to the server", "invalid_grant", "unauthenticated"), "unauthenticated"),
+        (("i/o timeout", "context deadline exceeded", "timed out"), "timeout"),
+        (("x509:", "tls handshake", "certificate verify failed"), "tls_error"),
+        (("connection refused", "no such host", "network is unreachable", "connection reset"), "network_error"),
+    ]:
+        if any(fragment in text for fragment in fragments):
+            return category
+    return "tool_error"
 
 
 def command(args, env):
-    result = subprocess.run(args, env=env, capture_output=True, text=True,
-                            timeout=45, check=False)
+    try:
+        result = subprocess.run(args, env=env, capture_output=True, text=True,
+                                timeout=45, check=False)
+    except subprocess.TimeoutExpired:
+        raise CheckFailure("timeout") from None
+    except FileNotFoundError:
+        raise CheckFailure("tool_unavailable") from None
+    except OSError:
+        raise CheckFailure("tool_error") from None
     if result.returncode != 0:
-        raise RuntimeError("command failed")
+        raise CheckFailure(command_failure(result.stdout, result.stderr)) from None
     return result.stdout
 
 
-def read_object(report, key, args, env):
+def read_object(report, key, args, env, *, diagnostic=False):
     obj = {}
 
     def read():
@@ -53,11 +124,12 @@ def read_object(report, key, args, env):
         value = json.loads(command(["kubectl", "--namespace", NAMESPACE,
                                     "--request-timeout=30s", "get", *args, "-o", "json"], env))
         if not isinstance(value, dict):
-            return False
+            raise CheckFailure("invalid_data")
         obj = value
         return True
 
-    report.check(key + "_read", read)
+    emit = report.diagnostic if diagnostic else report.check
+    emit(key + "_read", read)
     return obj
 
 
@@ -165,18 +237,89 @@ def healthy_neg(service, ingress, pods):
         if c["status"] != "True" or c["reason"] != "LoadBalancerNegReady":
             return False
         message = c.get("message", "")
-        healthy_messages = set()
-        for zone in neg_status["zones"]:
-            # Controller uses Go %q around meta.Key.String(); the resources are
-            # GCE names (ASCII). Require the current NEG, zone and global backend.
-            neg_key = json.dumps(f'Key{{"{neg}", zone: "{zone}"}}')
-            backend_key = json.dumps(f'Key{{"{neg}"}}')
-            for spacing in ("", " "):
-                healthy_messages.add(f'Pod has become Healthy in NEG {neg_key} attached to BackendService '
-                                     f'{backend_key}.{spacing}Marking condition "{NEG_READY}" to True.')
-        if message not in healthy_messages:
+        if message not in healthy_neg_messages(neg_status):
             return False
     return True
+
+
+def healthy_neg_messages(neg_status):
+    # The existing positive health gate remains an exact match against current
+    # NEG/zone/global-backend identity and the reviewed controller formats.
+    neg = neg_status["network_endpoint_groups"]["8080"]
+    messages = set()
+    for zone in neg_status["zones"]:
+        neg_key = json.dumps(f'Key{{"{neg}", zone: "{zone}"}}')
+        backend_key = json.dumps(f'Key{{"{neg}"}}')
+        for spacing in ("", " "):
+            messages.add(f'Pod has become Healthy in NEG {neg_key} attached to BackendService '
+                         f'{backend_key}.{spacing}Marking condition "{NEG_READY}" to True.')
+    return messages
+
+
+def positive_neg_message(message):
+    # Diagnostic parsing only: this does not relax healthy_neg's exact identity
+    # gate. JSON strings cover Go's %q escaping of the resource-key strings.
+    quoted = r'("(?:[^"\\\n]|\\.)*")'
+    match = re.fullmatch(r'Pod has become Healthy in NEG ' + quoted
+                         + r' attached to BackendService ' + quoted
+                         + r'\. ?Marking condition "' + re.escape(NEG_READY) + r'" to True\.', message)
+    if not match:
+        return None
+    return json.loads(match[1]), json.loads(match[2])
+
+
+def neg_diagnostics(report, service, ingress, pods):
+    def neg_status():
+        return annotation(service, "cloud.google.com/neg-status")
+
+    def neg_name():
+        return neg_status()["network_endpoint_groups"]["8080"]
+
+    def backends():
+        return annotation(ingress, "ingress.kubernetes.io/backends")
+
+    def selected():
+        value = active_pods(pods)
+        if not value:
+            raise CheckFailure("invalid_data")
+        return value
+
+    def conditions():
+        result = []
+        for pod in selected():
+            found = [c for c in pod["status"]["conditions"] if c["type"] == NEG_READY]
+            if len(found) != 1:
+                raise CheckFailure("invalid_data")
+            result.append(found[0])
+        return result
+
+    report.diagnostic("relay_neg_backend_registered", lambda: neg_name() in backends())
+    report.diagnostic("relay_neg_backend_healthy", lambda: backends().get(neg_name()) == "HEALTHY")
+    report.diagnostic("relay_neg_pod_readiness_gate", lambda:
+                      all({"conditionType": NEG_READY} in p["spec"].get("readinessGates", []) for p in selected()))
+    report.diagnostic("relay_neg_pod_condition_present", lambda: bool(conditions()))
+    report.diagnostic("relay_neg_pod_condition_true", lambda: all(c["status"] == "True" for c in conditions()))
+    report.diagnostic("relay_neg_pod_positive_reason", lambda:
+                      all(c.get("reason") == "LoadBalancerNegReady" for c in conditions()))
+    report.diagnostic("relay_neg_pod_positive_message_format", lambda:
+                      all(positive_neg_message(c.get("message", "")) is not None for c in conditions()))
+    report.diagnostic("relay_neg_pod_message_current_identity", lambda:
+                      all(c.get("message", "") in healthy_neg_messages(neg_status()) for c in conditions()))
+    # Known controller reason/message branches only. Never echo unknown reason
+    # strings, including future values that may contain runtime identity.
+    categories = {
+        "relay_neg_reason_timeout": lambda c: c.get("reason") == "LoadBalancerNegTimeout",
+        "relay_neg_reason_no_health_check": lambda c: c.get("reason") == "LoadBalancerNegWithoutHealthCheck",
+        "relay_neg_reason_not_ready": lambda c: c.get("reason") == "LoadBalancerNegNotReady",
+        "relay_neg_reason_no_neg": lambda c: c.get("reason") == "LoadBalancerNegReady" and c.get("message", "").startswith("Pod does not belong to any NEG."),
+        "relay_neg_reason_non_default_subnet": lambda c: c.get("reason") == "LoadBalancerNegReady" and c.get("message", "").startswith("Pod belongs to a node in non-default subnet."),
+    }
+    for name, matches in categories.items():
+        report.diagnostic(name, lambda matches=matches: any(matches(c) for c in conditions()))
+    report.diagnostic("relay_neg_condition_unrecognized", lambda: any(
+        not any(matches(c) for matches in categories.values())
+        and not (c.get("reason") == "LoadBalancerNegReady" and positive_neg_message(c.get("message", "")))
+        for c in conditions()))
 
 
 def endpoints_match(pods, slices):
@@ -198,6 +341,22 @@ def endpoints_match(pods, slices):
                 return False
             observed.update((ref["uid"], ip) for ip in endpoint["addresses"])
     return bool(expected) and expected == observed
+
+
+def core_endpoints_match(pods, endpoints):
+    # This is additional evidence only, never an EndpointSlice fallback gate.
+    # Refuse the deprecated API's truncated representation and unready entries.
+    if endpoints["metadata"].get("annotations", {}).get("endpoints.kubernetes.io/over-capacity"):
+        return False
+    slices = {"items": []}
+    for subset in endpoints.get("subsets", []):
+        if subset.get("notReadyAddresses"):
+            return False
+        slices["items"].append({"ports": subset["ports"], "endpoints": [
+            {"conditions": {"ready": True}, "targetRef": a["targetRef"], "addresses": [a["ip"]]}
+            for a in subset.get("addresses", [])
+        ]})
+    return endpoints_match(pods, slices)
 
 
 def proxy_settings(deployment):
@@ -229,6 +388,7 @@ def check_cluster(report, env, expected_version=""):
     }
     for key, args in reads.items():
         objects[key] = read_object(report, key, args, env)
+    core_endpoints = read_object(report, "relay_core_endpoints", ["endpoints", RELAY], env, diagnostic=True)
     relay, web = objects["relay_deployment"], objects["web_deployment"]
     service, ingress, pods = objects["relay_service"], objects["ingress"], objects["relay_pods"]
     report.check("relay_rollout_and_image", lambda: rollout_ready(relay, pods, "relay", expected_version, env.get("GAR_REGISTRY")))
@@ -236,7 +396,9 @@ def check_cluster(report, env, expected_version=""):
     report.check("ingress_gce_relay_routes", lambda: ingress_routes(ingress))
     report.check("relay_service_ingress_neg", lambda: service_neg(service))
     report.check("relay_neg_observed_healthy", lambda: healthy_neg(service, ingress, pods))
+    neg_diagnostics(report, service, ingress, pods)
     report.check("relay_ready_endpoints_match_pods", lambda: endpoints_match(pods, objects["relay_endpoints"]))
+    report.diagnostic("relay_core_endpoints_match_pods", lambda: core_endpoints_match(pods, core_endpoints))
     report.check("relay_logging_disabled_in_backendconfig", lambda:
                  annotation(service, "cloud.google.com/backend-config") == {"default": BACKEND}
                  and objects["relay_backendconfig"]["spec"]["logging"]["enable"] is False)
