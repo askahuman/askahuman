@@ -21,3 +21,5 @@ builds:
     ldflags:
       - -s
       - -w
+      - -X github.com/askahuman/askahuman/backend/pkg/buildinfo.Version={{if .Env.AAH_BUILD_VERSION}}{{.Env.AAH_BUILD_VERSION}}{{else}}dev{{end}}
+      - -X github.com/askahuman/askahuman/backend/pkg/buildinfo.Commit={{if .Env.AAH_BUILD_COMMIT}}{{.Env.AAH_BUILD_COMMIT}}{{else}}unknown{{end}}

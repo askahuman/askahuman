@@ -4,10 +4,9 @@
 # JSON key anywhere. The private project / registry / cluster identity lives
 # ONLY in GitHub Secrets, never in this public repo.
 #
-# HARDENED so a credential can never reach the public log: no `set -x`, no env
-# dumps, no `-o yaml`/`-o json`/`describe` on any manifest (the relay + web carry
-# zero server-side secrets, so there is nothing secret to render — but we keep the
-# discipline anyway). ref. docs/decisions/architecture/0013.
+# Keep credentials and private infrastructure identity out of public logs: no
+# `set -x`, env dumps or raw manifest/describe output. The scoped preflight reads
+# JSON into memory and emits fixed booleans only. ref. architecture/0013.
 #
 # One-time setup (NOT in this repo):
 #   - Artifact Registry repo holding relay/ + web/ images.
@@ -77,12 +76,15 @@ jobs:
           KO_DOCKER_REPO: ${{ secrets.GAR_REGISTRY }}/relay
         run: |
           go install github.com/google/ko@v0.18.1
+          export AAH_BUILD_VERSION="${TAG#v}" AAH_BUILD_COMMIT="$GITHUB_SHA"
           "$(go env GOPATH)/bin/ko" build --bare --platform=linux/amd64 \
             --tags "${TAG#v},latest" ./cmd/relay
 
       - name: Build + push web image
         run: |
           docker buildx build --push \
+            --build-arg PUBLIC_BUILD_VERSION="${TAG#v}" \
+            --build-arg PUBLIC_BUILD_COMMIT="$GITHUB_SHA" \
             -t "${GAR_REGISTRY}/web:${TAG#v}" \
             -t "${GAR_REGISTRY}/web:latest" \
             frontend
@@ -107,3 +109,13 @@ jobs:
         run: |
           kubectl rollout status deploy/ask-a-human-relay -n ask-a-human --timeout=180s
           kubectl rollout status deploy/ask-a-human-web   -n ask-a-human --timeout=180s
+
+      - name: Verify production topology and released images
+        run: |
+          export EXPECTED_VERSION="${TAG#v}"
+          python3 scripts/production_preflight.py
+
+      - name: Verify public versions and actual proxy path
+        run: |
+          export EXPECTED_VERSION="${TAG#v}" EXPECTED_COMMIT="$GITHUB_SHA"
+          python3 scripts/verify_public_release.py

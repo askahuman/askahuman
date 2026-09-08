@@ -26,6 +26,8 @@ jobs:
       - run: go build ./...
       - run: go vet ./...
       - run: go test -race ./...
+      - name: Agent build identity and command-line smoke test
+        run: python3 ../scripts/check_agent_version.py
       - name: golangci-lint (v2)
         run: |
           curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/v2.11.3/install.sh \
@@ -66,10 +68,16 @@ jobs:
 
   web-container:
     runs-on: ubuntu-24.04
+    env:
+      EXPECTED_VERSION: "0.0.0"
+      EXPECTED_COMMIT: ${{ github.sha }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - name: Build production Linux image
-        run: docker build --tag askahuman-web:ci frontend
+        run: |
+          docker build --tag askahuman-web:ci \
+            --build-arg PUBLIC_BUILD_VERSION="$EXPECTED_VERSION" \
+            --build-arg PUBLIC_BUILD_COMMIT="$EXPECTED_COMMIT" frontend
       - name: Scan final runtime image for high and critical vulnerabilities
         run: |
           curl --fail --silent --show-error --location --max-time 120 \
@@ -94,3 +102,10 @@ jobs:
         run: |
           docker logs web-smoke || true
           docker rm --force web-smoke || true
+
+  release-verification:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - name: Topology, redaction, and public release probe regressions
+        run: python3 -m unittest discover -s scripts -p test_release_verification.py -v

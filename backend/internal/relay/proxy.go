@@ -63,18 +63,25 @@ func clientIP(req *http.Request) string {
 		return host
 	}
 	remote = remote.Unmap()
+	if ip, _ := forwardedIdentity(req, remote); ip.IsValid() {
+		return ip.String()
+	}
+	return remote.String()
+}
+
+// forwardedIdentity is the single trust/suffix classifier used by both client
+// accounting and the public boolean-only deployment probe. The bool distinguishes
+// an allowlisted TCP peer with an invalid suffix from an untrusted direct peer.
+func forwardedIdentity(req *http.Request, remote netip.Addr) (netip.Addr, bool) {
 	for _, prefix := range trustedProxy.trustedPeers {
 		if prefix.Contains(remote) {
 			// Header.Get sees only the first field line. Join all lines before
 			// counting from the right, matching a proxy's append semantics.
 			xff := strings.Join(req.Header.Values("X-Forwarded-For"), ",")
-			if ip := xffClientIP(xff, trustedProxy.clientFromRight); ip.IsValid() {
-				return ip.String()
-			}
-			break
+			return xffClientIP(xff, trustedProxy.clientFromRight), true
 		}
 	}
-	return remote.String()
+	return netip.Addr{}, false
 }
 
 func xffClientIP(xff string, fromRight int) netip.Addr {

@@ -28,6 +28,9 @@ COPY --from=deps /app/node_modules ./node_modules
 COPY package.json bun.lock tsconfig.json astro.config.mjs ./
 COPY src ./src
 COPY public ./public
+ARG PUBLIC_BUILD_VERSION=dev
+ARG PUBLIC_BUILD_COMMIT=unknown
+ENV PUBLIC_BUILD_VERSION=${PUBLIC_BUILD_VERSION} PUBLIC_BUILD_COMMIT=${PUBLIC_BUILD_COMMIT}
 RUN bun run build
 
 # Stage 3: serve dist/ as static files.

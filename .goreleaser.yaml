@@ -22,6 +22,8 @@ builds:
       - -s -w
       - -X main.defaultRelayURL=wss://ask-a-human.ai/ws
       - -X main.defaultWebOrigin=https://ask-a-human.ai
+      - -X github.com/askahuman/askahuman/backend/pkg/buildinfo.Version={{ .Version }}
+      - -X github.com/askahuman/askahuman/backend/pkg/buildinfo.Commit={{ .FullCommit }}
 
 archives:
   - id: agent
