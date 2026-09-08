@@ -34,9 +34,9 @@ const longTitle = `${'A'.repeat(480)} KEEP THE BACKUPS`;
 const warning = ' WARNING: permanently delete all production backups.';
 const longSummary = 'Review the complete request. '.repeat(150).slice(0, 4096 - warning.length) + warning;
 
-async function render(page, kind, changes = {}) {
+async function render(page, kind, changes = {}, confirmation) {
   const req = { ...base, response: { kind }, ...changes };
-  const version = await page.evaluate(({ kind, req }) => window.phoneTest.render(kind, req), { kind, req });
+  const version = await page.evaluate(({ kind, req, confirmation }) => window.phoneTest.render(kind, req, confirmation), { kind, req, confirmation });
   await page.locator(`[data-render-version="${version}"]`).waitFor();
 }
 async function answers(page) {
@@ -49,10 +49,11 @@ async function pointer(page, type, x, y = 180, pointerId = 1, extra = {}) {
 }
 async function touchScroll(page, region, direction = 'down') {
   const box = await region.boundingBox();
-  assert.ok(box && box.height > 80, 'scroll region remains usable');
+  assert.ok(box && box.height >= 44, 'scroll region remains usable');
   const x = box.x + box.width / 2;
-  const low = Math.min(box.y + box.height - 24, page.viewportSize().height - 28);
-  const high = Math.max(box.y + 24, low - 320);
+  const inset = Math.min(24, box.height / 4);
+  const low = Math.min(box.y + box.height - inset, page.viewportSize().height - 28);
+  const high = Math.max(box.y + inset, low - 320);
   const from = direction === 'down' ? low : high;
   const to = direction === 'down' ? high : low;
   const cdp = await page.context().newCDPSession(page);
@@ -210,7 +211,58 @@ try {
     await page.evaluate(() => document.documentElement.style.removeProperty('--app-vvh'));
     results.push(`${size}: named text controls remain reachable at 350px visual height; Enter replies`);
 
-    for (const [kind, message] of [['yesno', 'New approval request: Review this request'], ['confirmed', 'Approved. Decision received.'], ['offline', 'Disconnected. Reconnecting to your agent.'], ['listening', 'Connected. Listening for requests.']]) {
+    const longReply = 'Reply: ' + '😀'.repeat(4000) + '\nFINAL REPLY';
+    for (const [name, detail, agent = 'test agent'] of [
+      ['emoji', 'Reply: ' + '😀'.repeat(4000) + '\nFINAL REPLY'],
+      ['multiline', 'Reply: ' + 'line\n'.repeat(817) + 'FINAL REPLY'],
+      ['long-choice', 'Choice: ' + 'C'.repeat(246) + 'FINAL KEEP'],
+      ['ascii-agent', longReply, 'A'.repeat(246) + 'FINAL NAME'],
+      ['multiline-agent', longReply, 'Agent\n'.repeat(41) + 'FINAL NAME'],
+      ['emoji-agent', longReply, '😀'.repeat(246) + 'FINAL NAME'],
+    ]) {
+      if (name.endsWith('-agent')) assert.equal([...agent].length, 256);
+      await render(page, 'confirmed', {}, { label: 'Answer received by agent', detail, agent });
+      const label = page.getByText('Answer received by agent', { exact: true });
+      const provenance = page.getByRole('region', { name: 'Receipt sender' });
+      const preview = page.getByRole('region', { name: 'Received answer' });
+      const done = page.getByRole('button', { name: 'Done', exact: true });
+      assert.equal(await preview.textContent(), detail, 'complete received answer remains available');
+      assert.equal(await provenance.locator('span').last().textContent(), `receipt verified from ${agent}`, 'complete sender identity remains available');
+      assert.ok(await preview.evaluate((el) => el.scrollWidth <= el.clientWidth + 1), 'unbroken content wraps without horizontal clipping');
+      for (const control of [label, provenance, preview, done]) await inViewport(page, control);
+      assert.ok((await done.boundingBox()).height >= 44, 'Done is a usable touch target');
+      for (const height of [viewport.height, 350]) {
+        await page.evaluate((height) => document.documentElement.style.setProperty('--app-vvh', `${height}px`), height);
+        for (const region of [preview, provenance]) {
+          await region.focus();
+          await page.keyboard.press('Home');
+          await page.waitForTimeout(250);
+          assert.ok(await region.evaluate(el => el.scrollWidth <= el.clientWidth + 1), 'full content wraps without horizontal clipping');
+          if (await region.evaluate(el => el.scrollHeight > el.clientHeight)) {
+            await touchScroll(page, region);
+            assert.ok(await region.evaluate(el => el.scrollTop) > 0, 'complete answer/sender scrolls by touch');
+          }
+          await region.focus();
+          await page.keyboard.press('End');
+          await page.waitForTimeout(250);
+          assert.ok(await region.evaluate(el => el.scrollTop + el.clientHeight >= el.scrollHeight - 2), 'keyboard reaches complete answer/sender suffix');
+        }
+        for (const control of [label, provenance, preview, done]) {
+          await inViewport(page, control);
+          const box = await control.boundingBox();
+          assert.ok(box.y + box.height <= height + 1, 'receipt context stays above the keyboard');
+        }
+        await shot(page, `receipt-${name}-${size}-${height}`);
+      }
+      await page.evaluate(() => document.documentElement.style.removeProperty('--app-vvh'));
+      assert.deepEqual(await answers(page), [], 'reading a receipt sends nothing');
+      await done.focus();
+      await page.keyboard.press('Enter');
+      assert.deepEqual(await answers(page), ['done'], 'Done is keyboard accessible');
+      results.push(`${size}: ${name} receipt keeps status and Done visible; full answer/sender are touch/keyboard readable at normal and 350px visual heights`);
+    }
+
+    for (const [kind, message] of [['yesno', 'New approval request: Review this request'], ['confirmed', 'Approved. Receipt verified from test agent.'], ['offline', 'Disconnected. Reconnecting to your agent.'], ['listening', 'Connected. Listening for requests.']]) {
       await render(page, kind);
       await page.getByRole('status').filter({ hasText: message }).waitFor();
     }

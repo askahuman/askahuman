@@ -291,6 +291,33 @@ describe("SessionManager", () => {
     await acknowledge(ws, agentKey);
     expect(m.activeState().request).toBeNull();
   });
+  it("a delayed Done from another agent cannot dismiss the active receipt", async () => {
+    const m = newManager();
+    const a = "aaaa777777777777", b = "bbbb888888888888";
+    m.add(payload(a));
+    m.add(payload(b));
+    const { ws: wsA, agentKey: keyA } = await pair(a);
+    const { ws: wsB, agentKey: keyB } = await pair(b);
+    await sendReq(wsA, keyA, yesno("same-id"));
+    m.approve();
+    await acknowledge(wsA, keyA);
+    const resultA = m.activeState().result!;
+    await sendReq(wsB, keyB, yesno("same-id"));
+    expect(m.getActive()).toBe(b);
+    m.approve();
+    await acknowledge(wsB, keyB);
+    const resultB = m.activeState().result!;
+    expect(resultB).toEqual(resultA);
+    m.dismissConfirmation(resultA);
+    expect(m.activeState().screen).toBe("confirmed");
+    expect(m.activeState().result).toBe(resultB);
+    m.dismissConfirmation(resultB);
+    expect(m.activeState().screen).toBe("listening");
+    m.setActive(a);
+    expect(m.activeState().result).toBe(resultA);
+    m.dismissConfirmation(resultA);
+    expect(m.activeState().screen).toBe("listening");
+  });
 
   it("a re-announced id that expired locally (never answered) stays silent", async () => {
     const m = newManager();
