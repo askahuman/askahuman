@@ -15,6 +15,8 @@ const BROWSER_TARGETS = ["chrome87", "edge88", "es2020", "firefox78", "safari14.
 // output 'static' => pure static dist/, no Node server at runtime (architecture/0004).
 export default defineConfig({
   output: "static",
+  // Match nginx's /app -> /app/ redirect and the actual precache URL.
+  trailingSlash: "always",
   // CSP: the PWA is the only key-holding party, so an XSS/clickjack defeats E2E.
   // Astro emits a <meta http-equiv="content-security-policy"> at build time and
   // auto-computes the sha256 for EVERY inline <script>/<style> it generates
@@ -74,10 +76,11 @@ export default defineConfig({
           "End-to-end-encrypted approvals from your AI agents, on your phone.",
         display: "standalone",
         orientation: "portrait",
-        // The installed app opens the PWA (pairing screen) at /app; the marketing
+        // The installed app opens the PWA (pairing screen) at /app/; the marketing
         // landing lives at / and is intentionally outside the PWA scope.
-        start_url: "/app",
-        scope: "/app",
+        id: "/app", // preserve the identity of previously installed PWAs
+        start_url: "/app/",
+        scope: "/app/",
         theme_color: THEME_COLOR,
         background_color: THEME_COLOR,
         icons: [

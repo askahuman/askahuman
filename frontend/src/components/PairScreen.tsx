@@ -23,7 +23,7 @@ export interface PairScreenProps {
   c: Palette;
   /** onSubmitCode pairs with a typed code + the chosen relay URL. */
   onSubmitCode: (code: string, relayURL: string) => void;
-  /** error is an inline message for a bad code (set by the App on a throw). */
+  /** error explains code validation or an authentication failure. */
   error: string | null;
 }
 
@@ -163,6 +163,8 @@ export function PairScreen({ c, onSubmitCode, error }: PairScreenProps) {
         <input
           id="pair-code"
           data-testid="code-input"
+          aria-invalid={Boolean(error)}
+          aria-describedby={error ? 'pair-error' : undefined}
           ref={codeInput}
           value={code}
           onChange={onCodeChange}
@@ -198,7 +200,7 @@ export function PairScreen({ c, onSubmitCode, error }: PairScreenProps) {
           }}
         />
         {error && (
-          <div data-testid="code-error" style={{ marginTop: 9, fontSize: 12.5, color: c.decline }}>
+          <div id="pair-error" role="alert" data-testid="code-error" style={{ marginTop: 9, fontSize: 12.5, color: c.decline }}>
             {error}
           </div>
         )}

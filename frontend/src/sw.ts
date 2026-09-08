@@ -14,7 +14,11 @@ declare const self: ServiceWorkerGlobalScope & {
 };
 
 // __WB_MANIFEST is injected by vite-plugin-pwa at build time.
-precacheAndRoute(self.__WB_MANIFEST);
+precacheAndRoute(self.__WB_MANIFEST, {
+  // Existing installs/bookmarks may still open /app. The server redirects that
+  // URL to /app/, so serve the same canonical cached shell while offline too.
+  urlManipulation: ({ url }) => url.pathname === '/app' ? [new URL('/app/', url.origin)] : [],
+});
 
 // --- app-icon badge ---------------------------------------------------------
 // The OS app-icon badge (the red number on the home-screen icon) counts

@@ -329,6 +329,52 @@ describe('Session full round trip', () => {
     expect(session.getState().screen).toBe('offline'); // card no longer actionable
   });
 
+  it('restores an unanswered card when only the agent reconnects and authenticates its re-announce', () => {
+    const { session } = newSession();
+    const { ws, agentKey } = pairSession(session);
+    const req: Request = { kind: KindRequest, id: 'agent_returns', title: 'T', summary: 'S', response: { kind: 'text' } };
+    const sealed = boxSeal(agentKey, new TextEncoder().encode(JSON.stringify(req)));
+    ws.recv({ box: sealed });
+    const original = session.getState().request;
+    ws.recv({ _relay: 'peer_left' });
+    ws.recv({ _relay: 'peer_joined' });
+    expect(session.getState().screen).toBe('offline'); // relay presence alone is not authentication
+    ws.recv({ box: sealed });
+    expect(session.getState().screen).toBe('text');
+    expect(session.getState().request).toBe(original); // preserve the exact active request
+    session.close();
+  });
+
+  it('does not restore an expired request when its agent returns', () => {
+    const { session } = newSession();
+    const { ws, agentKey } = pairSession(session);
+    const req: Request = { kind: KindRequest, id: 'expired_returns', title: 'T', summary: 'S', response: { kind: 'yesno' } };
+    const sealed = boxSeal(agentKey, new TextEncoder().encode(JSON.stringify(req)));
+    ws.recv({ box: sealed });
+    ws.recv({ _relay: 'peer_left' });
+    session.expire(req.id);
+    ws.recv({ _relay: 'peer_joined' });
+    ws.recv({ box: sealed });
+    expect(session.getState().request).toBeNull();
+    expect(session.getState().screen).toBe('listening');
+    session.close();
+  });
+
+  it('stops a failed handshake and retains a visible failure for a fresh attempt', () => {
+    const { session, timers } = newSession();
+    const ws = FakeWS.last!;
+    ws.open();
+    ws.recv({ _relay: 'peer_joined' });
+    ws.recv({ pake: 'invalid-pake' });
+    expect(session.getState().paired).toBe(false);
+    expect(session.getSessionKey()).toBeUndefined();
+    expect(session.getState().pairError).toBeTruthy();
+    expect(session.getState().screen).toBe('pair');
+    expect(session.getState().conn).toBe('closed');
+    expect(timers).toHaveLength(0); // a failed single-shot handshake cannot reconnect itself
+    session.close();
+  });
+
   it('does NOT show confirmed when the decision send drops; keeps card answerable + resend accepted', () => {
     const { session, timers } = newSession();
     const { ws, agentKey } = pairSession(session);

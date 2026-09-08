@@ -94,12 +94,17 @@ export class SessionManager {
 
   /**
    * add constructs a Session for the payload, starts it, and stores it under the
-   * room id. A duplicate room id returns the existing id without a second socket.
+   * room id. A duplicate live room keeps its socket; a terminally failed
+   * handshake is replaced so another submission can start fresh.
    * The first agent added becomes active.
    */
   add(payload: PairPayload): string {
     const room = payload.room;
-    if (this.entries.has(room)) return room; // idempotent: no second socket
+    const existing = this.entries.get(room)?.session.getState();
+    if (existing) {
+      if (existing.paired || !existing.pairError) return room; // no second socket for a live attempt
+      this.remove(room); // a failed single-shot handshake needs a fresh Session
+    }
 
     this.attach(room, payload.r, new Session(payload, this.sessionOpts(room)));
     // A retained push subscription is delivered to this agent once it PAIRS
@@ -398,7 +403,7 @@ export class SessionManager {
         }
       }
       // Forget a resolved request id so the next one (even same id reused) counts.
-      if (!isCard) entry.lastReqID = null;
+      if (!s.request) entry.lastReqID = null;
     }
     this.persistAll();
     this.emit();

@@ -185,6 +185,14 @@ describe('SessionManager', () => {
     wsB.recv(sealReq(keyB, yesno('rb')));
     expect(m.getActive()).toBe(a);
     expect(m.list().find((x) => x.id === b)!.unread).toBe(1);
+
+    // A returning peer is still asking the SAME unanswered question, not a
+    // second unread request. It must not steal the active agent's card.
+    wsB.recv({ _relay: 'peer_left' });
+    wsB.recv({ _relay: 'peer_joined' });
+    wsB.recv(sealReq(keyB, yesno('rb')));
+    expect(m.getActive()).toBe(a);
+    expect(m.list().find((x) => x.id === b)!.unread).toBe(1);
   });
 
   it('setActive switches + clears unread; decisions route to the active session', () => {
@@ -273,6 +281,23 @@ describe('SessionManager', () => {
     expect(m.add(payload(a))).toBe(a); // same id back
     expect(FakeWS.byRoom.get(a)).toBe(first); // same socket, not replaced
     expect(m.list()).toHaveLength(1);
+  });
+
+  it('replaces a failed same-room handshake when the human submits another attempt', () => {
+    const m = newManager();
+    const p = payload('failed-room');
+    m.add(p);
+    const failed = FakeWS.byRoom.get(p.room)!;
+    failed.open();
+    failed.recv({ _relay: 'peer_joined' });
+    failed.recv({ pake: 'invalid-pake' });
+    expect(m.activeState().pairError).toBeTruthy();
+    m.add(p);
+    const fresh = FakeWS.byRoom.get(p.room)!;
+    expect(fresh).not.toBe(failed);
+    expect(m.list()).toHaveLength(1);
+    expect(m.activeState().pairError).toBeNull();
+    m.closeAll();
   });
 
   it('retryAll forces a reconnect of every session (iOS resume recovery)', () => {
