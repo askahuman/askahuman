@@ -4,7 +4,7 @@
 
 import { describe, expect, it } from 'vitest';
 
-import { ROOM_RE, validRelayURL } from '../src/lib/payload.ts';
+import { ROOM_RE, relayURLProblem, validRelayURL } from '../src/lib/payload.ts';
 
 describe('validRelayURL (guards the WS scheme before opening a socket)', () => {
   it('accepts wss:// and ws://localhost only', () => {
@@ -25,9 +25,29 @@ describe('validRelayURL (guards the WS scheme before opening a socket)', () => {
       'file:///etc/passwd',
       'not a url',
       '',
+      'wss://user:password@relay.example/ws',
+      'wss://relay.example/ws#fragment',
+      'wss://relay.example/ws#',
     ]) {
       expect(validRelayURL(r)).toBe(false);
     }
+  });
+});
+
+describe('hosted relay policy', () => {
+  it('accepts the deployed origin including normalized host and default port', () => {
+    for (const relay of ['wss://ask-a-human.ai/ws', 'wss://ASK-A-HUMAN.AI:443/ws']) {
+      expect(relayURLProblem(relay, 'https://ask-a-human.ai')).toBeNull();
+    }
+  });
+  it('rejects hosted settings that the nginx CSP cannot connect to', () => {
+    for (const relay of ['wss://custom.example/ws', 'wss://ask-a-human.ai.evil.example/ws', 'wss://ask-a-human.ai:8443/ws', 'ws://localhost:8080/ws']) {
+      expect(relayURLProblem(relay, 'https://ask-a-human.ai')).toContain('own app installation');
+    }
+  });
+  it('retains custom relays for self-hosted installations and local development', () => {
+    expect(relayURLProblem('wss://relay.example/ws', 'https://app.example')).toBeNull();
+    expect(relayURLProblem('ws://localhost:8080/ws', 'http://localhost:8081')).toBeNull();
   });
 });
 

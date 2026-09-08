@@ -4,12 +4,12 @@
 // ever placed in a URL. There is no deep link.
 //
 // Optional "Advanced" relay URL (persisted in localStorage) lets self-hosters
-// point at their own relay; it is validated by validRelayURL before use.
+// point at their own relay; URL and hosted-origin policy are checked before use.
 
 import { useEffect, useRef, useState } from 'react';
 
 import { codeSymbolsBefore, defaultRelayURL, formatCodeInput } from '../lib/codegen.ts';
-import { validRelayURL } from '../lib/payload.ts';
+import { relayURLProblem } from '../lib/payload.ts';
 import type { Palette } from './theme.ts';
 
 const MONO = "'JetBrains Mono', ui-monospace, monospace";
@@ -45,7 +45,14 @@ export function PairScreen({ c, onSubmitCode, error }: PairScreenProps) {
   useEffect(() => {
     try {
       const stored = localStorage.getItem(RELAY_KEY);
-      if (stored) setRelay(stored);
+      if (stored) {
+        setRelay(stored);
+        const problem = relayURLProblem(stored, window.location.origin);
+        if (problem) {
+          setRelayError(problem);
+          setAdvancedOpen(true);
+        }
+      }
     } catch {
       /* ignore */
     }
@@ -104,8 +111,12 @@ export function PairScreen({ c, onSubmitCode, error }: PairScreenProps) {
 
   const submit = () => {
     const relayURL = relay.trim() || originRelayURL();
-    if (relay.trim() && !validRelayURL(relayURL)) {
-      setRelayError('relay must be a wss:// URL (ws:// only for localhost)');
+    const problem = relayURLProblem(relayURL, window.location.origin);
+    if (problem) {
+      setRelayError(problem);
+      setAdvancedOpen(true);
+      setWaiting(false);
+      if (waitTimer.current) clearTimeout(waitTimer.current);
       return;
     }
     setRelayError(null);
@@ -142,10 +153,11 @@ export function PairScreen({ c, onSubmitCode, error }: PairScreenProps) {
         boxSizing: 'border-box',
         display: 'flex',
         flexDirection: 'column',
-        overflow: 'hidden',
+        overflowY: 'auto',
+        overflowX: 'hidden',
       }}
     >
-      <div>
+      <div style={{ flexShrink: 0 }}>
         <div style={{ fontSize: 11, letterSpacing: 2, color: c.muted, textTransform: 'uppercase' }}>ask-a-human</div>
         <div style={{ fontSize: 25, fontWeight: 700, marginTop: 7, color: c.text }}>Pair a device</div>
         <div style={{ fontFamily: SANS, fontSize: 13.5, color: c.muted, marginTop: 10, lineHeight: 1.55 }}>
@@ -153,7 +165,7 @@ export function PairScreen({ c, onSubmitCode, error }: PairScreenProps) {
         </div>
       </div>
 
-      <div style={{ marginTop: 30 }}>
+      <div style={{ marginTop: 30, flexShrink: 0 }}>
         <label
           htmlFor="pair-code"
           style={{ fontSize: 11, letterSpacing: 2, color: c.muted, textTransform: 'uppercase' }}
@@ -244,7 +256,7 @@ export function PairScreen({ c, onSubmitCode, error }: PairScreenProps) {
         </button>
       </div>
 
-      <div style={{ flex: 1 }} />
+      <div style={{ flex: 1, minHeight: 20 }} />
 
       <button
         data-testid="advanced-toggle"
@@ -259,12 +271,13 @@ export function PairScreen({ c, onSubmitCode, error }: PairScreenProps) {
           cursor: 'pointer',
           padding: 0,
           marginBottom: advancedOpen ? 10 : 0,
+          flexShrink: 0,
         }}
       >
         {advancedOpen ? '▾ advanced' : '▸ advanced'}
       </button>
       {advancedOpen && (
-        <div style={{ marginBottom: 12 }}>
+        <div style={{ marginBottom: 12, flexShrink: 0 }}>
           <label
             htmlFor="relay-url"
             style={{ fontSize: 11, letterSpacing: 1, color: c.muted }}
@@ -274,6 +287,8 @@ export function PairScreen({ c, onSubmitCode, error }: PairScreenProps) {
           <input
             id="relay-url"
             data-testid="relay-input"
+            aria-invalid={Boolean(relayError)}
+            aria-describedby={relayError ? 'relay-error' : undefined}
             value={relay}
             onChange={(e) => setRelay(e.target.value)}
             placeholder={originRelayURL()}
@@ -298,9 +313,14 @@ export function PairScreen({ c, onSubmitCode, error }: PairScreenProps) {
             }}
           />
           {relayError && (
-            <div data-testid="relay-error" style={{ marginTop: 7, fontSize: 12, color: c.decline }}>
+            <div id="relay-error" role="alert" data-testid="relay-error" style={{ marginTop: 7, fontSize: 12, color: c.decline }}>
               {relayError}
             </div>
+          )}
+          {typeof window !== 'undefined' && window.location.origin === 'https://ask-a-human.ai' && (
+            <button onClick={() => { setRelay(''); setRelayError(null); }} style={{ marginTop: 8, background: 'transparent', color: c.muted, border: `1px solid ${c.border}`, borderRadius: 6, padding: '6px 8px', cursor: 'pointer' }}>
+              Use hosted relay
+            </button>
           )}
         </div>
       )}

@@ -37,7 +37,18 @@ export function validRelayURL(r: string): boolean {
   } catch {
     return false;
   }
+  if (u.username || u.password || u.href.includes('#')) return false;
   if (u.protocol === 'wss:') return true;
   if (u.protocol === 'ws:') return u.hostname === 'localhost' || u.hostname === '127.0.0.1';
   return false;
+}
+
+/** Match the hosted app's deliberately restricted nginx connect-src policy.
+ * Self-hosted installations control their own relay and CSP configuration. */
+export function relayURLProblem(r: string, appOrigin: string): string | null {
+  if (!validRelayURL(r)) return 'Relay must use wss:// (ws:// only for localhost), without credentials or a fragment.';
+  if (appOrigin === 'https://ask-a-human.ai' && new URL(r).origin !== 'wss://ask-a-human.ai') {
+    return 'This hosted app connects only to ask-a-human.ai. To use a custom relay, open its own app installation.';
+  }
+  return null;
 }
