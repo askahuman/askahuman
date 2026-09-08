@@ -183,6 +183,57 @@ describe('independent per-room subscriptions', () => {
 
 
 describe('subscription reconciliation and lock lifetime', () => {
+  it.each(['false', 'reject'])('does not touch native state when durable pairing validation fails (%s)', async (failure) => {
+    const f = install();
+    const send = vi.fn(async () => true);
+    const valid = async () => { if (failure === 'reject') throw new Error('storage unavailable'); return false; };
+    expect(await withPushSubscription(KEY_A, ROOM_A, send, () => true, valid)).toBe(false);
+    expect(f.register).not.toHaveBeenCalled();
+    expect(send).not.toHaveBeenCalled();
+  });
+
+  it.each(['before', 'after'])('waits for durable deletion and rejects a stale peer queued %s cleanup', async (position) => {
+    const f = install();
+    await subscribeForPush(KEY_A, ROOM_A);
+    let release!: (sent: boolean) => void;
+    const held = withPushSubscription(KEY_A, ROOM_A, () => new Promise<boolean>((resolve) => { release = resolve; }), () => true);
+    await vi.waitFor(() => expect(release).toBeDefined());
+    let deleted = false, finishDeletion!: () => void;
+    const deletion = new Promise<void>((resolve) => { finishDeletion = () => { deleted = true; resolve(); }; });
+    const reg = f.room(ROOM_A);
+    const registerCalls = f.register.mock.calls.length;
+    const stale = () => withPushSubscription(KEY_A, ROOM_A, async () => true, () => true, async () => !deleted);
+    let queued: Promise<boolean>;
+    let cleanup: Promise<void>;
+    if (position === 'before') { queued = stale(); cleanup = removePushForRoom(ROOM_A, deletion); }
+    else { cleanup = removePushForRoom(ROOM_A, deletion); queued = stale(); }
+    expect(reg.unregister).not.toHaveBeenCalled();
+    finishDeletion();
+    release(false);
+    expect(await held).toBe(false);
+    await cleanup;
+    expect(await queued).toBe(false);
+    expect(f.room(ROOM_A)).toBeUndefined();
+    expect(f.register).toHaveBeenCalledTimes(registerCalls);
+  });
+
+  it('does not remove native state before durable deletion completes or when deletion fails', async () => {
+    const f = install();
+    await subscribeForPush(KEY_A, ROOM_A);
+    const reg = f.room(ROOM_A);
+    let rejectDeletion!: (error: Error) => void;
+    const deletion = new Promise<void>((_resolve, reject) => { rejectDeletion = reject; });
+    const cleanup = removePushForRoom(ROOM_A, deletion);
+    await vi.waitFor(() => expect(f.locks.request).toHaveBeenCalledTimes(2));
+    expect(reg.unregister).not.toHaveBeenCalled();
+    rejectDeletion(new Error('durable deletion unavailable'));
+    await cleanup;
+    expect(reg.unregister).not.toHaveBeenCalled();
+    const send = vi.fn(async () => true);
+    expect(await withPushSubscription(KEY_A, ROOM_A, send, () => true, async () => { throw new Error('storage unavailable'); })).toBe(false);
+    expect(send).not.toHaveBeenCalled();
+  });
+
   it('does not replace a subscription after its delayed lookup was superseded', async () => {
     const f = install();
     await subscribeForPush(KEY_B, ROOM_A);

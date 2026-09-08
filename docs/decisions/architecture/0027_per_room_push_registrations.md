@@ -37,7 +37,19 @@ tab that once delivered E1 from freshly signing E1 with a higher sequence after
 another tab has renewed and delivered E2. A delayed older lookup must complete
 before a newer tab can mutate/deliver; queued work reads native state after
 acquiring the lock. Local generations suppress replaced effects and removed
-sessions. Signing, ledger, and wire formats are unchanged.
+sessions. A still-live peer can outlast another tab's Forget, so the Session
+also validates existing durable pairing membership inside the lock before any
+native mutation. This uses the existing ledger loader in restored mode; it
+never allocates a sequence or recreates a deleted pairing. Signing, ledger,
+and wire formats are unchanged.
+
+The manager owns the whole Forget lifecycle: close/remove the local session,
+await its existing durable ledger deletion, then clean up native state under
+the room lock. A stale peer queued before cleanup either sees the deletion or
+finishes before cleanup; one queued afterward cannot recreate a registration.
+If durable deletion rejects, native cleanup is skipped because revocation was
+not confirmed. Storage failures remain best effort and must not be interpreted
+as successful revocation; failed validity reads never report notification setup.
 
 Unavailable/rejected coordination or native lookup failures report failed
 setup without a cached fallback. A setup waiting more than ten seconds for a
@@ -141,8 +153,12 @@ Actual Web Locks, worker registrations, shared IndexedDB counters, and device
 signatures verify E1 → E2 → E2 on stale-tab reconnect. A deliberately delayed
 native lookup blocks the other tab's renewal/signing until the older write
 completes, while a sibling room can proceed. It also checks lookup failure,
-retry, and cross-page Forget waiting without a stale signature or resurrected
-registration. The push service is deterministic, and captured signed updates
+retry, and cross-page Forget while another operation holds the lock. An
+additional still-paired peer then reconnects without any previous failed write;
+its durable check suppresses both a signature and native registration recreation.
+Unit cases also cover delayed/failed deletion, stale work queued before/after
+cleanup, and a session closed during the durable read. The push service is
+deterministic, and captured signed updates
 are not evidence of external provider acceptance or OS notification delivery.
 
 A fresh native Chrome prototype activated two registrations with the shared

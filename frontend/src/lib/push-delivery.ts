@@ -5,6 +5,7 @@ export type PushSubscriptionProvider = (
   room: string,
   use: (sub: PushSubscription) => Promise<boolean>,
   current: () => boolean,
+  validPairing?: () => Promise<boolean>,
 ) => Promise<boolean>;
 
 /** The provider holds the room's cross-tab lock while obtaining its current
@@ -16,12 +17,13 @@ export async function subscribeAndDeliver(
   subscribe: PushSubscriptionProvider,
   deliver: (sub: PushSubscription) => boolean | Promise<boolean>,
   current: () => boolean,
+  validPairing?: () => Promise<boolean>,
 ): Promise<boolean> {
   try {
     if (!current()) return false;
     return await subscribe(key, room, async (sub) => {
       if (!current()) return false;
       return await deliver(sub) && current();
-    }, current) && current();
+    }, current, validPairing) && current();
   } catch { return false; }
 }

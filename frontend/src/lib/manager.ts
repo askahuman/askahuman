@@ -15,7 +15,7 @@ import { b64Decode, b64Encode } from "./b64.ts";
 import type { ConnState } from "./relay.ts";
 import type { PairPayload } from "./payload.ts";
 import type { Persistence, StoredSession } from "./store.ts";
-import { withPushSubscription } from "./push.ts";
+import { removePushForRoom, withPushSubscription } from "./push.ts";
 import {
   subscribeAndDeliver,
   type PushSubscriptionProvider,
@@ -185,19 +185,21 @@ export class SessionManager {
 
   /**
    * remove closes the session and drops it; if it was active, re-picks the first
-   * remaining agent (or '' when none remain).
+   * remaining agent (or '' when none remain). Local removal is synchronous;
+   * the returned promise settles after durable deletion/native cleanup.
    */
-  remove(room: string): void {
+  remove(room: string): Promise<void> {
     const entry = this.entries.get(room);
-    if (!entry) return;
+    if (!entry) return Promise.resolve();
     entry.unsub();
-    entry.session.forget();
+    const cleanup = removePushForRoom(room, entry.session.forget());
     this.entries.delete(room);
     const i = this.order.indexOf(room);
     if (i >= 0) this.order.splice(i, 1);
     if (this.active === room) this.active = this.order[0] ?? "";
     this.persistAll(); // removal is the user's "forget this agent": wipe its key
     this.emit();
+    return cleanup;
   }
 
   /** list returns the roster ordered requests-first (leftmost), then insertion
@@ -351,6 +353,7 @@ export class SessionManager {
     const sent = await subscribeAndDeliver(
       room, key, this.pushProvider,
       (sub) => entry.session.sendPushSubscription(sub), active,
+      () => entry.session.canReconcilePush(),
     );
     if (!active()) return false;
     entry.pushStatus = sent ? "ready" : "failed";

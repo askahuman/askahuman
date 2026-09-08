@@ -63,7 +63,8 @@ function payload(room: string, code = "PAIR-1"): PairPayload {
 
 const managers = new Set<SessionManager>();
 const nativeSubscriptions = new Map<string, PushSubscription>();
-const nativeProvider: PushSubscriptionProvider = async (_key, room, use, current) => {
+const nativeProvider: PushSubscriptionProvider = async (_key, room, use, current, valid) => {
+  if (valid && !(await valid())) return false;
   const sub = nativeSubscriptions.get(room);
   return !!sub && current() && await use(sub);
 };

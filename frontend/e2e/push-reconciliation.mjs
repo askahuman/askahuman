@@ -143,17 +143,22 @@ try {
   assert.equal(await reconcile(a), true);
   checks.push('native reconciliation failure on reconnect emits no signed fallback and reports failed; a later retry reads and delivers the current subscription');
 
-  await b.evaluate(() => window.manager.closeAll());
+  const stale = await context.newPage();
+  await stale.goto(h.origin + '/__recovery/blank');
+  await setupManager(stale, entry);
+  await readyManager(stale);
+  assert.equal(await reconcile(stale), true);
+  const beforeStale = (await pushes(stale)).length;
   await a.evaluate(() => {
     window.holdNative = true;
     window.pendingPush = window.manager.reconcilePushSubscription(window.pushEntry.room, window.pushEntry.vapid);
   });
   await a.waitForFunction(() => window.nativeHeld);
   const beforeForget = (await pushes(a)).length;
-  await a.evaluate(() => window.manager.remove(window.pushEntry.room));
-  await b.evaluate(async () => {
-    const { removePushForRoom } = await import('/__recovery/push.js');
-    window.pendingForget = removePushForRoom(window.pushEntry.room);
+  await b.evaluate(() => {
+    // The OTHER live manager forgets the pairing. A still has its own entry,
+    // retry intent and signer, so local generation checks cannot detect this.
+    window.pendingForget = window.manager.remove(window.pushEntry.room);
   });
   await b.waitForFunction(async () => (await navigator.locks.query()).pending.some((lock) => lock.name === `aah:push:${window.pushEntry.room}`));
   assert.ok(await subscription(b, scope));
@@ -161,11 +166,19 @@ try {
   assert.equal(await a.evaluate(() => window.pendingPush), false);
   await b.evaluate(() => window.pendingForget);
   assert.equal((await pushes(a)).length, beforeForget);
-  assert.equal(await subscription(b, scope), undefined);
+  assert.equal(Boolean(await subscription(b, scope)), false);
   assert.equal(await b.evaluate(async (scope) => (await navigator.serviceWorker.getRegistrations()).some((r) => r.scope === scope), scope), false);
   assert.ok(await subscription(b, `${h.origin}/app/_push/${otherRoom}/`));
-  assert.equal(await a.evaluate(() => window.manager.reconcilePushSubscription(window.pushEntry.room, window.pushEntry.vapid)), false);
-  checks.push('Forget from another page waits for the active room lock; removed-session work never signs or resurrects its registration and the sibling registration remains');
+  // This peer has not attempted a write since Forget: its in-memory pairing
+  // and retry intent remain live, so only a durable validity read can stop it.
+  assert.equal(await stale.evaluate(() => window.manager.activeState().paired), true);
+  await stale.evaluate(() => window.manager.retryAll());
+  await stale.waitForFunction(() => window.manager.pushStatus(window.pushEntry.room, window.pushEntry.vapid) === 'failed');
+  assert.equal(await reconcile(stale), false);
+  assert.equal((await pushes(stale)).length, beforeStale);
+  assert.equal(Boolean(await subscription(b, scope)), false);
+  assert.equal(await b.evaluate(async (scope) => (await navigator.serviceWorker.getRegistrations()).some((r) => r.scope === scope), scope), false);
+  checks.push('a different live manager forgets while A is held; cleanup waits, then stale A cannot sign or recreate the removed registration and the sibling remains');
   assert.deepEqual(errors, []);
   console.log(JSON.stringify({ passed: checks.length, checks, limits: [
     'Push provider is deterministic and restored manager transports are captured locally; no external push is sent. Actual APNs/FCM and locked iPhone delivery remain device release checks.',

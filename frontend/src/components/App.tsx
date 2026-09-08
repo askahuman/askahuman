@@ -298,7 +298,6 @@ export default function App() {
             setPairing(true);
           }}
           onRemove={(id) => {
-            push.forget(id);
             manager.remove(id);
           }}
         />

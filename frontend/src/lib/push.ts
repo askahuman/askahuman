@@ -107,13 +107,14 @@ async function activated(reg: ServiceWorkerRegistration): Promise<void> {
 
 /** Reconcile one native registration and consume its subscription while still
  * holding the room lock. Never prompts or returns a cacheable subscription. */
-export const withPushSubscription: PushSubscriptionProvider = async (vapidPublicKey, room, use, current) => {
+export const withPushSubscription: PushSubscriptionProvider = async (vapidPublicKey, room, use, current, validPairing = async () => true) => {
   try {
     const wantKey = urlBase64ToUint8Array(vapidPublicKey);
     if (wantKey.length !== 65 || wantKey[0] !== 4) return false;
     const scope = pushScope(room);
     return await withRoom(room, async () => {
       if (!current() || pushPermission() !== 'granted') return false;
+      if (!(await validPairing()) || !current()) return false;
       const reg = await navigator.serviceWorker.register(PUSH_WORKER_URL, { scope });
       await activated(reg);
       if (!current()) return false;
@@ -138,10 +139,15 @@ export const withPushSubscription: PushSubscriptionProvider = async (vapidPublic
 
 /** Forget only the exact room registration created by this application.
  * Wait across tabs for any in-flight subscribe/delivery, then clean it up. */
-export async function removePushForRoom(room: string): Promise<void> {
+export async function removePushForRoom(room: string, forgotten: Promise<void> = Promise.resolve()): Promise<void> {
   try {
+    // Observe rejection immediately, even while another page holds the lock.
+    const deleted = forgotten.then(() => true, () => false);
     const scope = new URL(pushScope(room), window.location.origin).href;
     await withRoom(room, async () => {
+      // Confirm durable revocation before removing native state. Otherwise a
+      // queued stale tab could still see a valid ledger and recreate it.
+      if (!(await deleted)) return;
       const reg = (await navigator.serviceWorker.getRegistrations()).find((r) => r.scope === scope);
       if (!reg) return;
       const worker = reg.active ?? reg.waiting ?? reg.installing;

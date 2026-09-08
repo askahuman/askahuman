@@ -10,7 +10,7 @@ describe('subscription delivery status', () => {
     const deliver = vi.fn(() => new Promise<boolean>((resolve) => { finish = resolve; }));
     const pending = subscribeAndDeliver('roomA', 'keyA', subscribe, deliver, () => true);
     await vi.waitFor(() => expect(deliver).toHaveBeenCalled());
-    expect(subscribe).toHaveBeenCalledWith('keyA', 'roomA', expect.any(Function), expect.any(Function));
+    expect(subscribe).toHaveBeenCalledWith('keyA', 'roomA', expect.any(Function), expect.any(Function), undefined);
     finish(false);
     expect(await pending).toBe(false);
     expect(await subscribeAndDeliver('roomA', 'keyA', subscribe, async () => true, () => true)).toBe(true);
