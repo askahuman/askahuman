@@ -937,21 +937,28 @@ export function ConfirmedScreen({
         <span style={{ fontSize: 32, color, lineHeight: 1 }}>{icon}</span>
       </div>
       <div style={{ fontWeight: 700, fontSize: 22, lineHeight: 1.25, flexShrink: 0, color }}>{label}</div>
-      {/* Only the complete answer scrolls. Receipt status and provenance cannot
-          be pushed outside the visible viewport by accepted long content. */}
+      {/* The complete answer and sender each scroll within bounded regions so
+          accepted long content cannot push the receipt status or Done away. */}
       <div role="region" aria-label="Received answer" tabIndex={0} style={{ fontFamily: SANS, fontSize: 15, color: c.muted, width: '100%', maxHeight: 'min(280px, 40%)', minHeight: 0, flexShrink: 1, overflowY: 'auto', overflowX: 'hidden', overscrollBehaviorY: 'contain', whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', textAlign: 'left', lineHeight: 1.55, padding: '10px 12px', boxSizing: 'border-box', border: `1px solid ${c.border}`, borderRadius: 12, background: c.surface }}>
         {detail}
       </div>
       <div
+        role="region"
+        aria-label="Receipt sender"
+        tabIndex={0}
         style={{
           flexShrink: 0,
           maxWidth: '100%',
+          maxHeight: 'clamp(48px, 15%, 96px)',
+          overflowY: 'auto',
+          overflowX: 'hidden',
+          overscrollBehaviorY: 'contain',
           boxSizing: 'border-box',
           display: 'flex',
-          alignItems: 'center',
+          alignItems: 'flex-start',
           gap: 8,
           padding: '7px 13px',
-          borderRadius: 999,
+          borderRadius: 12,
           background: c.surface,
           border: `1px solid ${c.border}`,
         }}
@@ -970,7 +977,7 @@ export function ConfirmedScreen({
         >
           E2E
         </span>
-        <span style={{ fontSize: 11, lineHeight: 1.4, color: c.muted, minWidth: 0, overflowWrap: 'anywhere' }}>receipt verified from {agent}</span>
+        <span style={{ fontSize: 11, lineHeight: 1.4, color: c.muted, minWidth: 0, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>receipt verified from {agent}</span>
       </div>
       <button type="button" onClick={onDone} style={{ flexShrink: 0, minHeight: 44, minWidth: 120, padding: '10px 24px', borderRadius: 12, border: `1px solid ${c.border}`, background: c.surface, color: c.text, fontFamily: MONO, fontSize: 15, cursor: 'pointer' }}>Done</button>
     </Frame>
