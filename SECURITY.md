@@ -19,6 +19,63 @@ Because the relay can't read anything, the **highest-value targets are the PWA a
 
 Reports touching these areas are especially valuable.
 
+## Web Push destination boundary
+
+Push subscriptions are supplied by the phone. The agent treats their endpoints
+as untrusted network destinations even when the subscription arrived in an
+encrypted session. It accepts HTTPS on port 443 (implicit or explicit), without
+credentials or fragments, for these provider-controlled DNS names only:
+
+| Provider | Accepted host |
+| --- | --- |
+| Apple / iPhone Home Screen web apps | Subdomains of `push.apple.com`, including `web.push.apple.com` |
+| Google FCM / Chrome | Exact `fcm.googleapis.com` |
+| Mozilla / Firefox | Exact `updates.push.services.mozilla.com` |
+| Microsoft WNS / Edge | Subdomains of `notify.windows.com` |
+
+The Apple and Microsoft suffixes require a complete DNS-label boundary; similar
+domains, literal IPs, trailing dots, Unicode hostnames, and nonstandard ports are
+rejected. DNS names compare without case sensitivity. Paths and queries remain
+opaque, unchanged capabilities. Provider policies are grounded in
+[WebKit's iOS Web Push guidance](https://webkit.org/blog/13878/web-push-for-web-apps-on-ios-and-ipados/),
+[Google's Web Push subscription examples](https://web.dev/articles/push-notifications-overview),
+[Mozilla's production endpoint documentation](https://mozilla-services.github.io/autopush-rs/),
+and [Microsoft's WNS domain validation guidance](https://learn.microsoft.com/en-us/windows/apps/develop/notifications/push-notifications/wns-overview).
+
+For every new connection, the agent resolves the provider hostname, rejects the
+entire result if any address is private or special-purpose, and dials a validated
+literal address. This prevents a second DNS lookup from changing the destination
+after validation. IPv4-mapped IPv6 addresses are checked as IPv4. The conservative
+exclusions cover the [IANA IPv4](https://www.iana.org/assignments/iana-ipv4-special-registry)
+and [IPv6 special-purpose registries](https://www.iana.org/assignments/iana-ipv6-special-registry),
+including loopback, private/link-local, shared-address, documentation, benchmark,
+translation, and transition ranges. IPv6 destinations must be ordinary global
+unicast addresses. TLS still authenticates the provider hostname with the system
+trust store; dialing an IP never disables certificate or hostname verification.
+
+**Redirects are never followed**, including same-provider redirects. The push
+client ignores HTTP(S)/ALL proxy environment settings and does not inherit the
+global default HTTP transport. Requests have a 10-second overall timeout and
+bounded connection, TLS, response-header and pool limits. Errors do not include
+subscription URLs, tokens, redirect locations, or response bodies. Invalid
+subscription updates do not replace a previously accepted subscription, and the
+send path revalidates the endpoint before producing a network request.
+
+This deliberately does **not** support arbitrary/self-hosted push providers,
+proxy-only outbound networks, or private/NAT64-only provider routes. The agent
+needs direct outbound HTTPS to a supported provider's public addresses. Hosting
+your own relay/PWA remains separate from the browser vendor's push service; it
+does not require adding your relay as a push destination. If a browser provider
+changes domains, add its documented ownership/endpoint policy with regression
+tests rather than disabling these checks. Foreground approvals continue to use
+the relay when push is unavailable.
+
+This boundary limits network access from a compromised phone/session key. It
+does not authenticate subscription updates with the device signing key, prove
+which person owns a permitted subscription, or solve multi-agent VAPID ownership.
+Those are separate protocol concerns. Tests use local TLS fixtures for delivery;
+physical iPhone wake-up and real provider delivery still require device testing.
+
 ## Supported versions
 
 We support the latest published `@askahuman/mcp` (npm) and the latest release. Please reproduce on the latest version before reporting.
