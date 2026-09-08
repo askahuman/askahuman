@@ -23,6 +23,27 @@ APIs, timeout, unknown readiness formats and malformed data fail the named check
 they do not cause a raw diagnostic dump. No additional roles, secrets or global
 resources are requested.
 
+Both cloud workflows run the pinned Google authentication and SDK action bundles
+through `scripts/private_cloud.py`, including setup failures and authentication
+cleanup. The wrapper downloads their public, immutable sources before federation,
+checks each SHA-256 before execution, and supplies the original WIF inputs and
+action file-command environment explicitly. Node 24 and the public toolchain are
+installed before credentials exist. Updating an action pin also requires updating
+its reviewed bundle hashes and passing the real entry-point smoke tests.
+
+Cloud SDK, kubeconfig, Docker authentication, and rendered manifests use private
+runner temporary paths that are exported to following steps and removed at the
+end. Build, registry, gateway, apply, rollout, and action stdout/stderr are captured
+with bounded memory. Public output contains fixed stage names, booleans, and the
+same closed failure categories. The only child runner commands replayed are
+bounded, control-free `add-mask` registrations from the pinned actions; ordinary
+CLI output cannot issue runner commands. Action environment/output/state/path
+files retain their normal semantics. No raw cloud output, rendered manifest, or
+credential file is uploaded as a diagnostic artifact. GitHub's exact-value secret
+masking remains an additional layer, not the boundary for derived private runtime
+identities. Investigate a failed stage in a private authorized environment instead
+of enabling raw public debug logs or adding exception text to these reports.
+
 Failed operations include a `failure` category such as `forbidden`, `not_found`,
 `unauthenticated`, `timeout`, `unavailable`, `rate_limited`, `invalid_request`,
 `api_error`, `network_error`, `tls_error`, `tool_unavailable`, `tool_error`,
@@ -162,6 +183,17 @@ and test a fresh notification and its tap-through. Record which steps were
 actually completed on the physical device; desktop emulation is separate evidence.
 
 ## Maintained local and CI checks
+
+`python3 -m unittest discover -s scripts -p test_private_cloud.py -v` exercises
+synthetic private-output failures, fragmented/malformed mask commands, process
+timeouts, isolated configuration exports, and cleanup. The separate
+`workflow-privacy` CI job also verifies the pinned bundles under Node 24 and runs
+their missing-OIDC, fake-SDK, and cleanup paths without cloud credentials or calls.
+A successful auth fixture intercepts HTTP in-process and disables socket opens,
+then checks real action mask registrations, credential file commands, and cleanup.
+It checks that Docker's buildx plugin remains available with the isolated config.
+These tests verify the output boundary and local action compatibility; the actual
+authorized preflight and deployment gates are still required before release.
 
 `python3 -m unittest discover -s scripts -p test_release_verification.py -v`
 tests healthy/broken topology, unsupported NEG readiness, CLI/API failure

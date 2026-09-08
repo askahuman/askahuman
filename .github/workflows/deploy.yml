@@ -48,67 +48,40 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
-      # Keyless auth — mints a short-lived (1h) token via federation.
-      - id: auth
-        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
+      # Public tool downloads run before federation. The same pinned Google
+      # action bundles execute under capture, including their error paths.
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          project_id: ${{ secrets.GCP_PROJECT_ID }}
-          workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
-          service_account: ${{ secrets.GCP_DEPLOYER_SA }}
-
-      - uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3
-        with:
-          install_components: gke-gcloud-auth-plugin
-
-      - name: Configure Docker for Artifact Registry
-        run: gcloud auth configure-docker "${GAR_REGISTRY%%/*}" --quiet
-
+          node-version: "24"
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version-file: backend/go.mod
           cache-dependency-path: backend/go.sum
-
-      # Relay → distroless static image via ko (no Dockerfile). --bare pushes to
-      # exactly $KO_DOCKER_REPO. ref. backend/.ko.yaml.
-      - name: Build + push relay image
-        working-directory: backend
+      - name: Prepare pinned cloud actions
+        run: python3 scripts/private_cloud.py prepare
+      - name: Install cloud SDK before authentication
+        run: python3 scripts/private_cloud.py install_sdk
+      - name: Authenticate through Workload Identity Federation
         env:
-          KO_DOCKER_REPO: ${{ secrets.GAR_REGISTRY }}/relay
-        run: |
-          go install github.com/google/ko@v0.18.1
-          export AAH_BUILD_VERSION="${TAG#v}" AAH_BUILD_COMMIT="$GITHUB_SHA"
-          "$(go env GOPATH)/bin/ko" build --bare --platform=linux/amd64 \
-            --tags "${TAG#v},latest" ./cmd/relay
+          GCP_WIF_PROVIDER: ${{ secrets.GCP_WIF_PROVIDER }}
+          GCP_DEPLOYER_SA: ${{ secrets.GCP_DEPLOYER_SA }}
+        run: python3 scripts/private_cloud.py authenticate
+      - name: Configure the authenticated SDK
+        run: python3 scripts/private_cloud.py configure_sdk
 
-      - name: Build + push web image
-        run: |
-          docker buildx build --push \
-            --build-arg PUBLIC_BUILD_VERSION="${TAG#v}" \
-            --build-arg PUBLIC_BUILD_COMMIT="$GITHUB_SHA" \
-            -t "${GAR_REGISTRY}/web:${TAG#v}" \
-            -t "${GAR_REGISTRY}/web:latest" \
-            frontend
+      - name: Configure Docker for Artifact Registry
+        run: python3 scripts/private_cloud.py configure_registry
 
-      # Private cluster reached through fleet Connect Gateway.
+      - name: Build and push relay image
+        run: python3 scripts/private_cloud.py build_relay
+      - name: Build and push web image
+        run: python3 scripts/private_cloud.py build_web
       - name: Get cluster credentials
-        run: |
-          gcloud container fleet memberships get-credentials "$GKE_CLUSTER" \
-            --project "$GCP_PROJECT"
-
-      # Inject the real (private) registry + released tag at apply time, then apply.
-      # kustomize is preinstalled on GitHub-hosted runners.
-      - name: Set images + apply
-        working-directory: infra/prod
-        run: |
-          kustomize edit set image \
-            ask-a-human-relay="${GAR_REGISTRY}/relay:${TAG#v}" \
-            ask-a-human-web="${GAR_REGISTRY}/web:${TAG#v}"
-          kubectl apply -k . -o name
-
+        run: python3 scripts/private_cloud.py cluster_credentials
+      - name: Set images and apply
+        run: python3 scripts/private_cloud.py apply
       - name: Wait for rollout
-        run: |
-          kubectl rollout status deploy/ask-a-human-relay -n ask-a-human --timeout=180s
-          kubectl rollout status deploy/ask-a-human-web   -n ask-a-human --timeout=180s
+        run: python3 scripts/private_cloud.py rollout
 
       - name: Verify production topology and released images
         run: |
@@ -119,3 +92,7 @@ jobs:
         run: |
           export EXPECTED_VERSION="${TAG#v}" EXPECTED_COMMIT="$GITHUB_SHA"
           python3 scripts/verify_public_release.py
+
+      - name: Remove cloud credentials and private temporary state
+        if: always()
+        run: python3 scripts/private_cloud.py cleanup
