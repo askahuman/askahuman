@@ -74,6 +74,10 @@ jobs:
         run: |
           RECOVERY_PORT=19280 node e2e/approval-protocol.mjs
           RECOVERY_BROWSER=webkit RECOVERY_PORT=19380 node e2e/approval-protocol.mjs
+      - name: Complete receipt content in Chromium and WebKit
+        run: |
+          RECOVERY_PORT=19680 node e2e/confirmation-layout.mjs
+          RECOVERY_BROWSER=webkit RECOVERY_PORT=19780 node e2e/confirmation-layout.mjs
 
   web-container:
     runs-on: ubuntu-24.04
