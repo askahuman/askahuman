@@ -122,6 +122,11 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - name: Topology, redaction, and public release probe regressions
         run: python3 -m unittest discover -s scripts -p test_release_verification.py -v
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "24"
+      - name: Npm recovery release checks, exact package contents, and private failures
+        run: python3 -m unittest discover -s scripts -p test_npm_recovery.py -v
 
   workflow-privacy:
     runs-on: ubuntu-24.04
