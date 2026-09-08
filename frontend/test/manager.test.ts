@@ -531,6 +531,24 @@ describe('SessionManager', () => {
 });
 
 describe('SessionManager persistence (ADR 0020)', () => {
+  it('persists each sealed VAPID key even when pairing is followed by no request', () => {
+    const persist = new FakePersist();
+    const m = newManager(persist);
+    for (const room of ['a', 'b']) {
+      m.add(payload(room));
+      const paired = pair(room);
+      paired.ws.recv({ box: boxSeal(paired.agentKey, encodeVapidKey(`key-${room}`)) });
+    }
+    expect(persist.stored.map(({ room, vapid }) => ({ room, vapid }))).toEqual([
+      { room: 'a', vapid: 'key-a' }, { room: 'b', vapid: 'key-b' },
+    ]);
+    m.closeAll();
+    const restored = newManager(persist);
+    restored.restoreAll();
+    expect(restored.vapidKeys()).toEqual([{ room: 'a', key: 'key-a' }, { room: 'b', key: 'key-b' }]);
+    restored.closeAll();
+  });
+
   it('persists a paired session and restores it: rejoin paired, requests deliverable', () => {
     const persist = new FakePersist();
     const m1 = newManager(persist);

@@ -250,10 +250,12 @@ export function ListeningScreen({
   c,
   agent,
   roomID,
+  children,
 }: {
   c: Palette;
   agent: string;
   roomID: string;
+  children?: React.ReactNode;
 }) {
   return (
     <Frame c={c} announcement="Connected. Listening for requests." style={{ padding: 'calc(66px + env(safe-area-inset-top)) 26px 40px', boxSizing: 'border-box', display: 'flex', flexDirection: 'column' }}>
@@ -310,6 +312,7 @@ export function ListeningScreen({
           </div>
         </div>
       </div>
+      {children}
       <div
         style={{
           borderTop: `1px solid ${c.borderSoft}`,
@@ -894,12 +897,13 @@ export function ConfirmedScreen({
 
 // --- offline ----------------------------------------------------------------
 
-export function OfflineScreen({ c, attempt, onRetry }: { c: Palette; attempt: number; onRetry: () => void }) {
+export function OfflineScreen({ c, attempt, onRetry, children }: { c: Palette; attempt: number; onRetry: () => void; children?: React.ReactNode }) {
   return (
-    <Frame c={c} announcement="Disconnected. Reconnecting to your agent." style={{ padding: 'calc(66px + env(safe-area-inset-top)) 26px 40px', boxSizing: 'border-box', display: 'flex', flexDirection: 'column' }}>
+    <Frame c={c} announcement="Disconnected. Reconnecting to your agent." style={{ padding: 'calc(66px + env(safe-area-inset-top)) 26px 40px', boxSizing: 'border-box', display: 'flex', flexDirection: 'column', overflowY: 'auto' }}>
       <div
         data-testid="offline-badge"
         style={{
+          flexShrink: 0,
           display: 'flex',
           alignItems: 'center',
           gap: 8,
@@ -914,7 +918,7 @@ export function OfflineScreen({ c, attempt, onRetry }: { c: Palette; attempt: nu
       </div>
       <div
         style={{
-          flex: 1,
+          flex: '1 0 auto',
           display: 'flex',
           flexDirection: 'column',
           alignItems: 'center',
@@ -940,8 +944,10 @@ export function OfflineScreen({ c, attempt, onRetry }: { c: Palette; attempt: nu
           </div>
         </div>
       </div>
+      {children}
       <div
         style={{
+          flexShrink: 0,
           background: c.surface,
           border: `1px solid ${c.border}`,
           borderRadius: 16,
@@ -960,6 +966,7 @@ export function OfflineScreen({ c, attempt, onRetry }: { c: Palette; attempt: nu
         data-testid="retry-button"
         onClick={onRetry}
         style={{
+          flexShrink: 0,
           marginTop: 12,
           height: 52,
           borderRadius: 16,
@@ -1038,6 +1045,7 @@ export function Roster({
         <div key={a.id} style={{ position: 'relative', flexShrink: 0, display: 'flex' }}>
           <button
             data-testid={`roster-chip-${a.id}`}
+            aria-pressed={a.active}
             onClick={() => onSelect(a.id)}
             style={{
               display: 'flex',

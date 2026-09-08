@@ -20,7 +20,7 @@ export async function until(fn, timeout = 15000) {
   throw new Error('condition timed out');
 }
 
-export async function setup() {
+export async function setup({ modules = {} } = {}) {
   const out = await mkdtemp(path.join(tmpdir(), 'aah-recovery-'));
   const basePort = Number(process.env.RECOVERY_PORT || 19080);
   const origin = `http://127.0.0.1:${basePort + 1}`;
@@ -48,10 +48,14 @@ export async function setup() {
     for (const [name, binary, supplied] of [['agent', agentBinary, process.env.AGENT_BINARY], ['relay', relayBinary, process.env.RELAY_BINARY]]) {
       if (!supplied) execFileSync('go', ['build', '-o', binary, `./cmd/${name}`], { cwd: path.join(ROOT, 'backend'), stdio: 'pipe' });
     }
-    const entry = path.join(out, 'devicekey-entry.ts');
-    await writeFile(entry, `export { loadOrCreateDeviceKey } from ${JSON.stringify(path.join(ROOT, 'frontend/src/lib/devicekey.ts'))};`);
-    execFileSync('bun', ['build', entry, '--target=browser', `--outfile=${path.join(out, 'devicekey.js')}`], { cwd: path.join(ROOT, 'frontend'), stdio: 'pipe' });
-    const fixture = await readFile(path.join(out, 'devicekey.js'));
+    const fixtures = new Map();
+    for (const [name, source] of Object.entries({ devicekey: 'src/lib/devicekey.ts', ...modules })) {
+      const entry = path.join(out, `${name}-entry.ts`);
+      const bundled = path.join(out, `${name}.js`);
+      await writeFile(entry, `export * from ${JSON.stringify(path.join(ROOT, 'frontend', source))};`);
+      execFileSync('bun', ['build', entry, '--target=browser', `--outfile=${bundled}`], { cwd: path.join(ROOT, 'frontend'), stdio: 'pipe' });
+      fixtures.set(`/__recovery/${name}.js`, await readFile(bundled));
+    }
     const relay = spawn(relayBinary, ['-addr', `127.0.0.1:${basePort}`], { stdio: ['ignore', 'ignore', 'ignore'] });
     children.add(relay);
     await until(async () => { try { return (await fetch(`http://127.0.0.1:${basePort}/healthz`)).ok; } catch { return false; } });
@@ -61,7 +65,7 @@ export async function setup() {
       if (url.pathname === '/app') { res.writeHead(301, { Location: '/app/' }); res.end(); return; }
       res.setHeader('Content-Security-Policy', csp);
       res.setHeader('Cache-Control', 'no-cache');
-      if (url.pathname === '/__recovery/devicekey.js') { res.setHeader('Content-Type', 'text/javascript'); res.end(fixture); return; }
+      if (fixtures.has(url.pathname)) { res.setHeader('Content-Type', 'text/javascript'); res.end(fixtures.get(url.pathname)); return; }
       const pathname = url.pathname.endsWith('/') ? `${url.pathname}index.html` : url.pathname;
       const file = path.resolve(ROOT, 'frontend/dist', `.${pathname}`);
       if (!file.startsWith(path.join(ROOT, 'frontend/dist') + path.sep)) { res.writeHead(403); res.end(); return; }
@@ -93,8 +97,9 @@ export async function setup() {
     await new Promise((resolve) => server.listen(basePort + 1, '127.0.0.1', resolve));
     await new Promise((resolve) => proxy.listen(basePort + 2, '127.0.0.1', resolve));
     browser = await chromium.launch(process.env.CHROME_EXECUTABLE ? { executablePath: process.env.CHROME_EXECUTABLE } : { channel: 'chromium' });
-    const vapid = createECDH('prime256v1'); vapid.generateKeys();
     async function mcp(name = 'recovery-test') {
+      // Model independent machines: each process signs pushes with its own key.
+      const vapid = createECDH('prime256v1'); vapid.generateKeys();
       const processAgent = spawn(agentBinary, ['serve', '--relay', `ws://127.0.0.1:${basePort + 2}/ws`, '--name', name], {
         env: { ...process.env, PATH: `${path.join(out, 'bin')}:${process.env.PATH}`, AAH_VAPID_PUBLIC_KEY: vapid.getPublicKey().toString('base64url'), AAH_VAPID_PRIVATE_KEY: vapid.getPrivateKey().toString('base64url'), AAH_REQUIRE_DEVICE_SIG: '1' },
         stdio: ['pipe', 'pipe', 'pipe'],
