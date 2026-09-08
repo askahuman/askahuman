@@ -182,7 +182,8 @@ export function PairScreen({ c, onSubmitCode, error }: PairScreenProps) {
           value={code}
           onChange={onCodeChange}
           onKeyDown={(e) => {
-            if (e.key === 'Enter') submit();
+            // Accepting an IME candidate does not submit the pairing code.
+            if (e.key === 'Enter' && !e.nativeEvent.isComposing && e.nativeEvent.keyCode !== 229) submit();
           }}
           placeholder="ABCDE-23456"
           // Mobile-friendly: text keyboard, force caps, no auto-mangle.
