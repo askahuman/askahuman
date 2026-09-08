@@ -766,7 +766,9 @@ export function TextScreen({
             value={value}
             onChange={(e) => { try { setValue(clampScalars(e.target.value, maxLen)); } catch { /* reject an incomplete surrogate */ } }}
             onKeyDown={(e) => {
-              if (e.key === 'Enter') send();
+              // Enter can accept an IME candidate without submitting the reply.
+              // Some composition-ending key events only expose legacy code 229.
+              if (e.key === 'Enter' && !e.nativeEvent.isComposing && e.nativeEvent.keyCode !== 229) send();
             }}
             enterKeyHint="send"
             placeholder={clip(req.response.placeholder ?? '', MAX_PLACEHOLDER)}

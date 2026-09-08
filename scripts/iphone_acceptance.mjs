@@ -131,9 +131,9 @@ try {
   await ask(a,'All 32 choices', {title:'Choose option 32',summary:'Scroll to the final option and select it. Confirm its entire label is readable.',response_kind:'choice',options},{choice:options[31]});
   await proceed('Verify Answer received by agent remains visible for at least five seconds and the complete chosen label is readable. Tap Done; listening should return.');
   await ask(a,'Unicode text and keyboard', {title:'Paste exactly: 😀é漢字🚀',summary:'Paste the five characters from the title, open the keyboard, and send. The counter should show 5/5.',response_kind:'text',max_len:5},{text:'😀é漢字🚀'});
-  const longReply='This synthetic reply must remain fully readable.\n'.repeat(24)+'END-REPLY-7391';
+  const longReply='This synthetic reply must remain fully readable. '.repeat(24)+'END-REPLY-7391';
   console.log('\nCopy the following synthetic text for the next reply:\n\n'+longReply+'\n');
-  await proceed('Copy this text to paste on the phone. The next question also contains the same text for selection.');
+  await proceed('Copy this single-line text to paste on the phone. The next question also contains the same text for selection; do not add line breaks.');
   await ask(a,'Long reply receipt', {title:'Paste the complete synthetic reply',summary:'Copy only the text below into the reply, including its final marker:\n\n'+longReply,response_kind:'text',max_len:4096},{text:longReply});
   await proceed('Verify the receipt label remains visible, scroll the full reply to END-REPLY-7391, wait at least five seconds, and tap Done. Listening should return.');
   await proceed('Next is a 15-second expiry test. Once the request appears, switch agents/screens or background the app for at least 20 seconds. Reopening must not restart the deadline or allow approval.');
