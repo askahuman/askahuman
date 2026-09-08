@@ -60,11 +60,12 @@ jobs:
         run: bun run interop
       - name: Install regression browser
         run: bunx playwright install --with-deps chromium
-      - name: Phone interaction, session recovery, and hosted pairing regressions
+      - name: Phone interaction, recovery, hosted pairing, and notification regressions
         run: |
           node e2e/phone-interactions.mjs
           node e2e/session-recovery.mjs
           node e2e/hosted-pairing.mjs
+          node e2e/multi-agent-push.mjs
 
   web-container:
     runs-on: ubuntu-24.04
