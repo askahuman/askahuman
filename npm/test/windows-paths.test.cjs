@@ -29,7 +29,7 @@ function fixture(t, segment, corrupt = false) {
     // System.IO creates a real ZIP without relying on tar (the missing program
     // which triggers this fallback) or PowerShell's path/wildcard handling.
     const create = spawnSync(powershell, ['-NoProfile', '-NonInteractive', '-Command',
-      "$ErrorActionPreference = 'Stop'; Add-Type -AssemblyName System.IO.Compression.FileSystem; " +
+      "$ErrorActionPreference = 'Stop'; Add-Type -AssemblyName System.IO.Compression, System.IO.Compression.FileSystem; " +
       '$zip = [System.IO.Compression.ZipFile]::Open($env:FIXTURE_ARCHIVE, [System.IO.Compression.ZipArchiveMode]::Create); ' +
       '$entry = $zip.CreateEntry("ask-a-human.exe"); $writer = New-Object System.IO.StreamWriter($entry.Open()); ' +
       '$writer.Write($env:FIXTURE_PAYLOAD); $writer.Dispose(); $zip.Dispose()',
