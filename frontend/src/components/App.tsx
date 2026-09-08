@@ -313,6 +313,12 @@ export default function App() {
     try {
       const payload: PairPayload = { r: relayURL, room: roomFromCode(canon), code: canon };
       setPairError(null);
+      // A fresh code replaces the failed attempt, not any successfully paired
+      // agent. Reusing a failed room is also supported by manager.add.
+      const previous = manager.activeState();
+      if (!previous.paired && previous.pairError && previous.roomID !== payload.room) {
+        manager.remove(previous.roomID);
+      }
       manager.add(payload);
       manager.setActive(payload.room);
       setPairing(false);
@@ -350,7 +356,9 @@ export default function App() {
       )}
       {renderScreen(c, state, expiresIn, {
         onSubmitCode,
-        pairError,
+        pairError: pairError ?? (!showPair && state.pairError
+          ? 'Pairing failed. Get a new code from your agent and try again.'
+          : null),
         onApprove: () => manager.approve(),
         onDecline: () => manager.decline(),
         onChoose: (l: string) => manager.choose(l),

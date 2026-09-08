@@ -453,6 +453,16 @@ export class Session {
       return; // not a request we render (e.g. an ack) — ignore
     }
     if (this.seenIDs.has(req.id)) {
+      // Seen also includes the unanswered card. A returning agent can join
+      // while the phone's own socket stays open, so no onConnState(open) will
+      // restore it. Require an authenticated re-announce, retain the original
+      // request object, and leave completed/expired IDs suppressed below.
+      if (this.state.request?.id === req.id) {
+        if (this.state.screen === 'offline') {
+          this.set({ screen: cardScreen(this.state.request), peerPresent: true });
+        }
+        return;
+      }
       // The agent re-announced an id we already handled. If we answered it,
       // the agent is still asking, so our decision was lost in flight —
       // re-send it (idempotent: the agent takes the first matching decision).
@@ -503,7 +513,10 @@ export class Session {
   }
 
   private onPairError(err: Error): void {
-    this.set({ pairError: err.message });
+    // Pairing is single-shot after failure. Stop transport retries instead of
+    // keeping the UI waiting on a handshake that can never finish.
+    this.relay.close();
+    this.set({ screen: 'pair', pairError: err.message, peerPresent: false });
   }
 
   private req(): Request {

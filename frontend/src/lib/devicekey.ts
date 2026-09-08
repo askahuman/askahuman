@@ -51,12 +51,22 @@ function readKey(db: IDBDatabase): Promise<StoredKey | undefined> {
   });
 }
 
-function writeKey(db: IDBDatabase, value: StoredKey): Promise<void> {
+function chooseStoredKey(db: IDBDatabase, candidate: StoredKey): Promise<StoredKey> {
   return new Promise((resolve, reject) => {
     const tx = db.transaction(STORE, 'readwrite');
-    tx.objectStore(STORE).put(value, KEY);
-    tx.oncomplete = () => resolve();
+    const store = tx.objectStore(STORE);
+    let winner: StoredKey;
+    // Read and conditional insertion share ONE readwrite transaction. IndexedDB
+    // serializes these across tabs/workers, so a later candidate adopts the
+    // committed winner instead of overwriting an already advertised signer.
+    const r = store.get(KEY);
+    r.onsuccess = () => {
+      winner = (r.result as StoredKey | undefined) ?? candidate;
+      if (!r.result) store.add(candidate, KEY);
+    };
+    tx.oncomplete = () => resolve(winner);
     tx.onerror = () => reject(tx.error);
+    tx.onabort = () => reject(tx.error ?? new Error('device key transaction aborted'));
   });
 }
 
@@ -71,6 +81,8 @@ export async function signMessage(priv: CryptoKey, msg: Uint8Array<ArrayBuffer>)
   return b64Encode(new Uint8Array(sig));
 }
 
+let initialization: Promise<DeviceKey | null> | null = null;
+
 /**
  * loadOrCreateDeviceKey returns this origin's device signer, creating and
  * persisting one on first use. Returns null (never throws) when WebCrypto or
@@ -79,12 +91,22 @@ export async function signMessage(priv: CryptoKey, msg: Uint8Array<ArrayBuffer>)
  * half is always exportable, so exportKey('spki', publicKey) works while the
  * private key can never be exported.
  */
-export async function loadOrCreateDeviceKey(): Promise<DeviceKey | null> {
+export function loadOrCreateDeviceKey(): Promise<DeviceKey | null> {
+  // Share in-flight work within this page. Storage remains authoritative on
+  // later calls, and a transient failure does not poison future attempts.
+  if (!initialization) {
+    initialization = loadDeviceKey().finally(() => { initialization = null; });
+  }
+  return initialization;
+}
+
+async function loadDeviceKey(): Promise<DeviceKey | null> {
+  let db: IDBDatabase | undefined;
   try {
     if (typeof indexedDB === 'undefined') return null;
     if (typeof crypto === 'undefined' || !crypto.subtle) return null;
 
-    const db = await openDB();
+    db = await openDB();
     const existing = await readKey(db);
     if (existing) return signerFrom(existing);
 
@@ -95,10 +117,11 @@ export async function loadOrCreateDeviceKey(): Promise<DeviceKey | null> {
     );
     const spkiBuf = await crypto.subtle.exportKey('spki', kp.publicKey);
     const stored: StoredKey = { priv: kp.privateKey, spki: b64Encode(new Uint8Array(spkiBuf)) };
-    await writeKey(db, stored);
-    return signerFrom(stored);
+    return signerFrom(await chooseStoredKey(db, stored));
   } catch {
     return null; // best-effort: never break decisions over a storage/crypto fault.
+  } finally {
+    db?.close();
   }
 }
 
