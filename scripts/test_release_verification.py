@@ -244,6 +244,204 @@ class ClusterTests(unittest.TestCase):
         self.assertEqual(json.loads(output.getvalue()), {"diagnostic": "relay_core_endpoints_read", "ok": False, "failure": "forbidden"})
 
 
+class DirectNegHealthTests(unittest.TestCase):
+    """The historical condition is never evidence without a fresh exact check."""
+    PROJECT = "synthetic-project"
+    NODE = "synthetic-node"
+
+    def data(self, zones=("test-zone-a",)):
+        data = fixtures()
+        for key in ("relay_deployment", "relay_service", "ingress", "relay_backendconfig"):
+            data[key].setdefault("metadata", {})["uid"] = key + "-uid"
+        data["relay_service"]["metadata"]["annotations"]["cloud.google.com/neg-status"] = json.dumps(
+            {"network_endpoint_groups": {"8080": NEG}, "zones": list(zones)})
+        pod = data["relay_pods"]["items"][0]
+        pod["spec"]["nodeName"] = self.NODE
+        pod["status"]["conditions"][1].update(
+            reason="LoadBalancerNegWithoutHealthCheck",
+            message=(f'Pod is in NEG {json.dumps(f"Key{{\"{NEG}\", zone: \"{zones[0]}\"}}")}. '
+                     'NEG is not attached to any BackendService with health checking. '
+                     f'Marking condition "{p.NEG_READY}" to True.'))
+        return data
+
+    def health(self, zones=("test-zone-a",)):
+        prefix = f"https://www.googleapis.com/compute/v1/projects/{self.PROJECT}/zones/"
+        return [{"backend": f"{prefix}{zone}/networkEndpointGroups/{NEG}",
+                 "status": {"kind": "compute#backendServiceGroupHealth", "healthStatus": [{
+                     "ipAddress": "10.0.0.9", "port": 8080, "healthState": "HEALTHY",
+                     "instance": f"{prefix}{zone}/instances/{self.NODE}"}] if index == 0 else []}}
+                for index, zone in enumerate(zones)]
+
+    def run_check(self, data=None, health=None, fence=None, first_slice_error=None, fence_slice_error=None,
+                  health_error=None, env=None, fence_error=None):
+        data = data if data is not None else self.data()
+        fence = fence if fence is not None else copy.deepcopy(data)
+        initial_keys = ("relay_deployment", "web_deployment", "relay_service", "ingress", "relay_backendconfig",
+                        "relay_pods", "web_pods", "relay_endpoints", "relay_core_endpoints")
+        fence_keys = ("relay_deployment", "relay_service", "ingress", "relay_backendconfig", "relay_pods", "relay_endpoints", "relay_core_endpoints")
+        responses = [json.dumps(data[k]) for k in initial_keys]
+        if first_slice_error:
+            responses[7] = p.CheckFailure(first_slice_error)
+        responses.append(health_error if health_error is not None else json.dumps(self.health() if health is None else health))
+        for key in fence_keys:
+            if key == "relay_endpoints" and fence_slice_error:
+                responses.append(p.CheckFailure(fence_slice_error))
+            elif key == fence_error:
+                responses.append(p.CheckFailure("forbidden"))
+            else:
+                responses.append(json.dumps(fence[key]))
+        output = io.StringIO()
+        report = p.Report()
+        env = env if env is not None else {"GCP_PROJECT": self.PROJECT, "GAR_REGISTRY": PRIVATE}
+        with patch.object(p, "command", side_effect=responses) as calls, contextlib.redirect_stdout(output):
+            p.check_cluster(report, env)
+        for private in (PRIVATE, NEG, self.PROJECT, self.NODE, "10.0.0.9", "test-zone-a"):
+            self.assertNotIn(private, output.getvalue())
+        records = {r.get("check", r.get("diagnostic")): r for r in map(json.loads, output.getvalue().splitlines())}
+        return report.ok, records, [call.args[0] for call in calls.call_args_list]
+
+    def test_historical_condition_needs_exact_current_health_and_fence(self):
+        for slice_error in (None, "forbidden", "not_found"):
+            with self.subTest(slice_error=slice_error):
+                ok, records, calls = self.run_check(first_slice_error=slice_error, fence_slice_error=slice_error)
+                self.assertTrue(ok)
+                self.assertTrue(records["relay_neg_observed_healthy"]["ok"])
+                self.assertTrue(records["relay_neg_direct_backend_health"]["ok"])
+                self.assertTrue(records["relay_neg_direct_health_current_identity"]["ok"])
+                self.assertTrue(records["relay_neg_reason_no_health_check"]["ok"])
+                self.assertFalse(records["relay_neg_pod_positive_reason"]["ok"])
+                self.assertEqual([c for c in calls if c[0] == "gcloud"], [[
+                    "gcloud", "compute", "backend-services", "get-health", NEG,
+                    "--project", self.PROJECT, "--global", "--format=json", "--quiet"]])
+                self.assertEqual(len(calls), 17)
+
+    def test_declared_empty_zones_are_not_evidence_or_unknown_groups(self):
+        zones = ("test-zone-a", "test-zone-b")
+        data, health = self.data(zones), self.health(zones)
+        self.assertTrue(self.run_check(data, health)[0])
+        for mutate in [lambda h: h.pop(), lambda h: h.append(copy.deepcopy(h[0])),
+                       lambda h: h[1].update(backend=h[0]["backend"]),
+                       lambda h: h[1]["status"].update(healthStatus=copy.deepcopy(h[0]["status"]["healthStatus"])),
+                       lambda h: h[0]["status"].update(healthStatus=[]),
+                       lambda h: h[1]["status"].update(healthStatus=None)]:
+            broken = copy.deepcopy(health)
+            mutate(broken)
+            self.assertFalse(self.run_check(data, broken)[0])
+
+    def test_wrong_endpoint_or_group_cannot_be_hidden_by_a_healthy_record(self):
+        mutations = [
+            lambda h: h[0].update(backend=h[0]["backend"].replace(self.PROJECT, "another-project")),
+            lambda h: h[0].update(backend=h[0]["backend"].replace("test-zone-a", "test-zone-b")),
+            lambda h: h[0].update(backend=h[0]["backend"].replace(NEG, "another-neg")),
+            lambda h: h[0].update(backend=h[0]["backend"].replace("https://", "http://")),
+            lambda h: h[0]["status"]["healthStatus"].append(copy.deepcopy(h[0]["status"]["healthStatus"][0])),
+            lambda h: h[0]["status"].update(healthStatus=[]),
+        ]
+        for field, value in [("ipAddress", "10.0.0.10"), ("port", 80), ("port", "8080"), ("port", True),
+                             ("healthState", "UNHEALTHY"), ("healthState", "UNKNOWN"),
+                             ("instance", "another-node"), ("ipv6Address", "2001:db8::1"), ("ipv6HealthState", "HEALTHY"),
+                             ("ipv6Address", None), ("ipv6HealthState", False), ("ipv6HealthState", "UNSPECIFIED")]:
+            mutations.append(lambda h, f=field, v=value: h[0]["status"]["healthStatus"][0].update({f: v}))
+        for token in (self.NODE, self.PROJECT, "test-zone-a"):
+            mutations.append(lambda h, token=token: h[0]["status"]["healthStatus"][0].update(
+                instance=h[0]["status"]["healthStatus"][0]["instance"].replace(token, "wrong")))
+        for mutate in mutations:
+            health = self.health()
+            mutate(health)
+            ok, _, calls = self.run_check(health=health)
+            self.assertFalse(ok)
+            self.assertEqual(len(calls), 10, "bad health must not proceed to the acceptance fence")
+
+    def test_malformed_missing_or_partial_health_fails_closed_and_redacted(self):
+        for health in ({}, False, [], [None], [{"backend": NEG}],
+                       [{"backend": self.health()[0]["backend"], "status": None}]):
+            self.assertFalse(self.run_check(health=health)[0])
+        for field, value in [("kind", "wrong"), ("healthStatus", None), ("healthStatus", {}), ("healthStatus", [None])]:
+            health = self.health()
+            health[0]["status"][field] = value
+            self.assertFalse(self.run_check(health=health)[0])
+        target = {"project": self.PROJECT, "neg": NEG, "zones": ["test-zone-a"], "zone": "test-zone-a",
+                  "ip": "10.0.0.9", "node": self.NODE}
+        with self.assertRaises(ValueError):
+            p.direct_health_matches(json.dumps(self.health()).replace('"port": 8080', '"port": 80, "port": 8080'), target)
+        with self.assertRaises(ValueError):
+            p.direct_health_matches(json.dumps(self.health()).replace('"port": 8080', '"port": NaN'), target)
+        self.assertFalse(p.direct_health_matches(" " * (1024 * 1024 + 1), target))
+        for error, category in [(p.CheckFailure("forbidden"), "forbidden"), (p.CheckFailure("not_found"), "not_found"),
+                                (p.CheckFailure("unavailable"), "unavailable"),
+                                (subprocess.TimeoutExpired(["gcloud", PRIVATE], 45, output=PRIVATE, stderr=PRIVATE), "timeout"),
+                                (RuntimeError(PRIVATE), "unknown_error"), ("{", "invalid_json")]:
+            ok, records, _ = self.run_check(health_error=error)
+            self.assertFalse(ok)
+            self.assertEqual(records["relay_neg_direct_backend_health"]["failure"], category)
+
+    def test_only_exact_historical_message_with_complete_membership_can_query_compute(self):
+        mutations = [
+            lambda d: d["relay_pods"]["items"][0]["status"]["conditions"][1].update(reason="LoadBalancerNegTimeout"),
+            lambda d: d["relay_pods"]["items"][0]["status"]["conditions"][1].update(reason="unknown"),
+            lambda d: d["relay_pods"]["items"][0]["status"]["conditions"][1].update(status="False"),
+            lambda d: d["relay_pods"]["items"][0]["status"]["conditions"][1].update(message=PRIVATE),
+            lambda d: d["relay_pods"]["items"][0]["spec"].update(nodeName="--help"),
+            lambda d: d["relay_pods"]["items"][0]["spec"].update(readinessGates=[]),
+            lambda d: d["relay_core_endpoints"]["subsets"][0]["addresses"][0]["targetRef"].update(uid="old-pod"),
+            lambda d: d["relay_endpoints"]["items"][0]["endpoints"][0].update(conditions={"ready": False}),
+        ]
+        for mutate in mutations:
+            data = self.data()
+            mutate(data)
+            ok, _, calls = self.run_check(data)
+            self.assertFalse(ok)
+            self.assertFalse(any(c[0] == "gcloud" for c in calls))
+        for project in (None, "", "--help", "other/project", "project\nprivate", "UPPERCASE", PRIVATE):
+            ok, _, calls = self.run_check(env={"GAR_REGISTRY": PRIVATE, "GCP_PROJECT": project})
+            self.assertFalse(ok)
+            self.assertFalse(any(c[0] == "gcloud" for c in calls))
+        for data in (fixtures(),):
+            ok, _, calls = self.run_check(data)
+            self.assertTrue(ok)
+            self.assertFalse(any(c[0] == "gcloud" for c in calls), "existing positive path remains unchanged")
+
+    def test_rollover_or_routing_change_during_health_read_is_rejected(self):
+        mutations = [
+            lambda d: d["relay_pods"]["items"][0]["metadata"].update(uid="replacement-same-ip"),
+            lambda d: d["relay_pods"]["items"][0]["spec"].update(nodeName="replacement-node"),
+            lambda d: d["relay_pods"]["items"][0]["status"]["podIPs"][0].update(ip="10.0.0.10"),
+            lambda d: d["relay_pods"]["items"][0]["status"]["conditions"][0].update(status="False"),
+            lambda d: d["relay_pods"]["items"][0]["status"]["conditions"][1].update(message=PRIVATE),
+            lambda d: d["relay_pods"]["items"][0]["spec"].update(readinessGates=[]),
+            lambda d: d["relay_service"]["metadata"].update(uid="replacement-service"),
+            lambda d: d["ingress"]["metadata"].update(uid="replacement-ingress"),
+            lambda d: d["relay_deployment"]["metadata"].update(uid="replacement-deployment"),
+            lambda d: d["relay_backendconfig"]["metadata"].update(uid="replacement-backendconfig"),
+            lambda d: d["relay_backendconfig"]["spec"].update(healthCheck={"port": 9999}),
+            lambda d: d["relay_backendconfig"]["spec"]["logging"].update(enable=True),
+            lambda d: d["ingress"]["spec"]["rules"][0]["http"]["paths"][0].update(path="/other"),
+            lambda d: d["relay_core_endpoints"]["subsets"][0]["addresses"].append(
+                copy.deepcopy(d["relay_core_endpoints"]["subsets"][0]["addresses"][0])),
+            lambda d: d["relay_endpoints"]["items"][0]["endpoints"][0].update(conditions={"ready": False}),
+        ]
+        for mutate in mutations:
+            fence = self.data()
+            mutate(fence)
+            ok, records, _ = self.run_check(fence=fence)
+            self.assertFalse(ok)
+            self.assertTrue(records["relay_neg_direct_backend_health"]["ok"])
+            self.assertFalse(records["relay_neg_direct_health_current_identity"]["ok"])
+        for key in ("relay_deployment", "relay_service", "ingress", "relay_backendconfig", "relay_pods", "relay_core_endpoints"):
+            self.assertFalse(self.run_check(fence_error=key)[0])
+        for error in ("timeout", "unauthenticated", "unavailable", "invalid_json"):
+            self.assertFalse(self.run_check(first_slice_error=error)[0])
+            self.assertFalse(self.run_check(first_slice_error="forbidden", fence_slice_error=error)[0])
+        self.assertTrue(self.run_check(first_slice_error="forbidden")[0], "new readable slices are independently checked")
+
+    def test_standard_compute_permission_error_is_closed_forbidden_category(self):
+        denied = subprocess.CompletedProcess([], 1, "", f"ERROR: Required 'compute.backendServices.get' permission for '{PRIVATE}'")
+        with patch.object(p.subprocess, "run", return_value=denied), self.assertRaises(p.CheckFailure) as result:
+            p.command(["gcloud", "compute", "backend-services", "get-health", PRIVATE], {})
+        self.assertEqual(result.exception.category, "forbidden")
+        self.assertNotIn(PRIVATE, str(result.exception))
+
+
 class EndpointMembershipTests(unittest.TestCase):
     def run_preflight(self, data, slice_error=None, core_error=None):
         keys = ("relay_deployment", "web_deployment", "relay_service", "ingress", "relay_backendconfig",

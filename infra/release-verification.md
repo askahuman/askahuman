@@ -11,7 +11,7 @@ Kubernetes resource, or enables request logging. Run the reviewed workflow on
 gh workflow run production-preflight.yml --ref main
 ```
 
-The job reads only the two application Deployments and their selected pods, the
+The job's Kubernetes reads cover the two application Deployments and their selected pods, the
 relay Service and EndpointSlices, the application Ingress, and the relay
 BackendConfig in namespace `ask-a-human`. An additional exact-name read of the
 relay's core Endpoints object checks which endpoint API the existing identity
@@ -20,8 +20,9 @@ forbidden or absent EndpointSlice API. Ready endpoint membership remains require
 responses and CLI errors remain in memory. Logs contain fixed check/diagnostic
 names, booleans, and allowlisted failure classes. Missing permission, unavailable
 APIs, timeout, unknown readiness formats and malformed data fail the named check;
-they do not cause a raw diagnostic dump. No additional roles, secrets or global
-resources are requested.
+they do not cause a raw diagnostic dump. The narrow historical-condition path
+below can also read health from one named global Compute backend using existing
+permissions. No additional roles or secrets are requested.
 
 Both cloud workflows run the pinned Google authentication and SDK action bundles
 through `scripts/private_cloud.py`, including setup failures and authentication
@@ -73,7 +74,8 @@ message format, and an exact current NEG/zone/global-backend identity match.
 Additional booleans identify the controller's timeout, no-health-check, not-ready,
 no-NEG, non-default-subnet, or unrecognized condition branches. This distinguishes
 an unhealthy backend from a controller-format/identity mismatch while retaining
-the same exact positive-health gate.
+the positive-health requirement. A direct health result is reported separately;
+it never relabels a historical Pod condition as a positive controller observation.
 
 If `relay_endpoints_read` reports `forbidden` or `not_found`, the required
 `relay_ready_endpoints_match_pods` check can use the exact named core Endpoints
@@ -99,7 +101,7 @@ permissions in aggregated view/edit roles, but an installed role or gateway can
 differ. See the
 [Kubernetes 1.33 default read rules](https://github.com/kubernetes/kubernetes/blob/v1.33.0/plugin/pkg/auth/authorizer/rbac/bootstrappolicy/policy.go).
 
-## Historical NEG conditions and a new rollout
+## Historical NEG conditions and current endpoint health
 
 The upstream readiness controller stops processing a Pod once its NEG condition
 is true, regardless of the reason. A `LoadBalancerNegWithoutHealthCheck` condition
@@ -109,17 +111,27 @@ does not prove that this is the cause or establish current per-Pod health. See
 [`needToProcess` / `evalNegReadinessGate`](https://github.com/kubernetes/ingress-gce/blob/master/pkg/neg/readiness/utils.go)
 and the [controller's early return and condition assignment](https://github.com/kubernetes/ingress-gce/blob/master/pkg/neg/readiness/reflector.go).
 
-The preflight continues to reject a no-health-check condition, including when
-core endpoint membership and the backend annotation pass. Read-only checks
-cannot refresh that historical Pod condition. A planned new release Pod must
-obtain fresh positive readiness evidence through the existing postrollout gate;
-neither a historical condition nor an automatic restart/exception is used to
-turn the current deployment's check green. The public version/proxy checks after
-rollout remain required as well.
+The condition itself remains insufficient. Only an exact recognized
+`LoadBalancerNegWithoutHealthCheck` message for the current NEG and zone can
+trigger a captured `gcloud compute backend-services get-health` read of the named
+global backend in the configured project. Its response must contain exactly the
+Service-declared zonal groups, one `HEALTHY` endpoint matching the sole current
+Pod's IPv4 address, port 8080 and node identity, and no other endpoints. A second
+read fences the relay Deployment, Service, Ingress, BackendConfig, Pod and ready
+endpoint membership against replacement or configuration changes. See
+[the exact evidence and scope](../docs/decisions/architecture/0028_current_neg_endpoint_health.md).
+
+The API requires existing `compute.backendServices.get` permission. A denied,
+missing, partial, malformed, unhealthy or mismatched result still fails closed;
+the workflow does not change IAM, restart a Pod or edit its condition. Other
+historical or unknown reasons cannot use this path. The original exact positive
+controller path and every other required topology, image and public check remain
+unchanged. A new read-only preflight on reviewed `main` can verify an already
+deployed release without rerunning deployment or replacing its release assets.
 
 The logging check confirms `BackendConfig.spec.logging.enable=false` and the
-Service's reference to that configuration. It does **not** query the Compute API
-or independently certify the live Cloud Logging setting. Likewise, Kubernetes
+Service's reference to that configuration. This logging check does **not** inspect
+or independently certify the live Compute/Cloud Logging setting. Likewise, Kubernetes
 controller status is evidence of the configured/observed path; the public probe
 below verifies the actual request path after rollout.
 
@@ -196,7 +208,8 @@ These tests verify the output boundary and local action compatibility; the actua
 authorized preflight and deployment gates are still required before release.
 
 `python3 -m unittest discover -s scripts -p test_release_verification.py -v`
-tests healthy/broken topology, unsupported NEG readiness, CLI/API failure
+tests healthy/broken topology, unsupported NEG readiness, exact direct endpoint
+health and replacement/configuration fences, CLI/API failure
 redaction, isolated kubeconfig use, stale/cacheable public versions, exact
 boolean-only responses, redirects and proxy environment handling without live
 services. The Go suite verifies the proxy endpoint against the accounting
