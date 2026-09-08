@@ -12,6 +12,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"strings"
 	"sync"
@@ -389,7 +390,7 @@ func TestAskTimeoutPresentAfterIdleAbsorb(t *testing.T) {
 	a.ensureReader(a.sess)
 	pushBox(t, conn, key, wire.PushSub{
 		Kind:         wire.KindPushSub,
-		Subscription: wire.PushSubscription{Endpoint: "https://push.example/present", Keys: wire.PushKeys{P256dh: "p", Auth: "x"}},
+		Subscription: wire.PushSubscription{Endpoint: "https://web.push.apple.com/present", Keys: wire.PushKeys{P256dh: "p", Auth: "x"}},
 	})
 	require.Eventually(t, func() bool {
 		a.mu.Lock()
@@ -420,7 +421,7 @@ func TestAbsorbPushSubscription(t *testing.T) {
 	// A push_sub arrives before the decision; it must be absorbed and stored.
 	pushBox(t, conn, key, wire.PushSub{
 		Kind:         wire.KindPushSub,
-		Subscription: wire.PushSubscription{Endpoint: "https://push.example/abc", Keys: wire.PushKeys{P256dh: "p", Auth: "x"}},
+		Subscription: wire.PushSubscription{Endpoint: "https://web.push.apple.com/abc", Keys: wire.PushKeys{P256dh: "p", Auth: "x"}},
 	})
 	approved := true
 	pushBox(t, conn, key, wire.Decision{Kind: wire.KindDecision, ID: "req_1", Result: wire.Result{Approved: &approved}})
@@ -434,7 +435,7 @@ func TestAbsorbPushSubscription(t *testing.T) {
 	sub := a.sub
 	a.mu.Unlock()
 	require.NotNil(t, sub)
-	assert.Equal(t, "https://push.example/abc", sub.Endpoint)
+	assert.Equal(t, "https://web.push.apple.com/abc", sub.Endpoint)
 }
 
 // TestReaderAbsorbsPushSubWhileIdle is the regression test for the idle
@@ -455,13 +456,13 @@ func TestReaderAbsorbsPushSubWhileIdle(t *testing.T) {
 	// The phone delivers its subscription while the agent is idle.
 	pushBox(t, conn, key, wire.PushSub{
 		Kind:         wire.KindPushSub,
-		Subscription: wire.PushSubscription{Endpoint: "https://push.example/idle", Keys: wire.PushKeys{P256dh: "p", Auth: "x"}},
+		Subscription: wire.PushSubscription{Endpoint: "https://web.push.apple.com/idle", Keys: wire.PushKeys{P256dh: "p", Auth: "x"}},
 	})
 
 	require.Eventually(t, func() bool {
 		a.mu.Lock()
 		defer a.mu.Unlock()
-		return a.sub != nil && a.sub.Endpoint == "https://push.example/idle"
+		return a.sub != nil && a.sub.Endpoint == "https://web.push.apple.com/idle"
 	}, 2*time.Second, 5*time.Millisecond, "push subscription must be absorbed with no Ask in flight")
 }
 
@@ -875,12 +876,7 @@ func TestSendVAPIDKeyMatchesSigner(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	a.mu.Lock()
-	a.sub = &webpush.Subscription{
-		Endpoint: srv.URL,
-		Keys:     webpush.Keys{P256dh: testP256dh, Auth: testAuth},
-	}
-	a.mu.Unlock()
+	stubSub(t, a, srv.URL)
 
 	require.NoError(t, a.Notify(context.Background()))
 	assert.Contains(t, gotAuth, "k="+a.vapidPub,
@@ -940,14 +936,31 @@ const (
 	testAuth   = "tu2pewRVkyFW06hUToHs8g"
 )
 
-// stubSub points an agent's subscription at srv so Notify performs a real signed
-// POST against the test server (with well-formed client keys so encryption works).
+// stubSub preserves real Web Push signing/encryption and HTTP handling in the
+// existing behavior tests while routing their synthetic provider URL to a local
+// fixture. Production endpoint/DNS/TLS/redirect enforcement is exercised
+// separately in push_security_test.go, without this test-only transport adapter.
 func stubSub(t *testing.T, a *Agent, endpoint string) {
 	t.Helper()
+	target, err := url.Parse(endpoint)
+	require.NoError(t, err)
+	transport := &http.Transport{Proxy: nil}
+	t.Cleanup(transport.CloseIdleConnections)
+	a.pushHTTP = &http.Client{Transport: pushRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		clone := req.Clone(req.Context())
+		clone.URL.Scheme = target.Scheme
+		clone.URL.Host = target.Host
+		clone.Host = target.Host
+		return transport.RoundTrip(clone)
+	})}
 	a.mu.Lock()
-	a.sub = &webpush.Subscription{Endpoint: endpoint, Keys: webpush.Keys{P256dh: testP256dh, Auth: testAuth}}
+	a.sub = &webpush.Subscription{Endpoint: "https://web.push.apple.com/test-token", Keys: webpush.Keys{P256dh: testP256dh, Auth: testAuth}}
 	a.mu.Unlock()
 }
+
+type pushRoundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f pushRoundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) { return f(req) }
 
 // vapidSubClaim decodes the "sub" claim from a webpush VAPID Authorization
 // header ("vapid t=<jwt>, k=<pubkey>") so a test can assert the signed subject.

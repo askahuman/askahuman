@@ -166,6 +166,9 @@ type Agent struct {
 	// vapidSub is the routable "sub" contact placed in the wake-up VAPID JWT,
 	// resolved once at New from AAH_VAPID_SUBJECT or defaultVAPIDSubject.
 	vapidSub string
+	// pushHTTP is internal so tests can supply an isolated transport. The nil
+	// value uses the provider-restricted client; callers cannot opt out via Config.
+	pushHTTP webpush.HTTPClient
 
 	// mu guards sess and sub, which Pair sets and Ask reads.
 	mu   sync.Mutex
@@ -843,8 +846,13 @@ func (a *Agent) absorbPush(plain []byte) bool {
 	if err := json.Unmarshal(plain, &ps); err != nil {
 		return false
 	}
-	if ps.Kind != wire.KindPushSub || ps.Subscription.Endpoint == "" {
+	if ps.Kind != wire.KindPushSub {
 		return false
+	}
+	if err := validatePushEndpoint(ps.Subscription.Endpoint); err != nil {
+		// Consume and discard invalid updates without replacing a working
+		// subscription or logging its opaque capability URL.
+		return true
 	}
 	a.mu.Lock()
 	a.sub = &webpush.Subscription{
@@ -1057,7 +1065,17 @@ func (a *Agent) Notify(ctx context.Context) error {
 	if sub == nil {
 		return errNoPushSub
 	}
+	// Recheck at the send boundary as well as admission: no stale or directly
+	// seeded subscription may turn the local agent into an HTTP client proxy.
+	if err := validatePushEndpoint(sub.Endpoint); err != nil {
+		return fmt.Errorf("agent: push: %w", err)
+	}
+	client := a.pushHTTP
+	if client == nil {
+		client = defaultPushHTTPClient
+	}
 	resp, err := webpush.SendNotificationWithContext(ctx, []byte(wakeBody), sub, &webpush.Options{
+		HTTPClient:      client,
 		Subscriber:      a.vapidSub,
 		VAPIDPublicKey:  a.vapidPub,
 		VAPIDPrivateKey: a.vapidPriv,

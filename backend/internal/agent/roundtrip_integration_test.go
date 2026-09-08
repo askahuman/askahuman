@@ -351,7 +351,7 @@ func TestIntegrationPushSubAbsorbedWithoutAsk(t *testing.T) {
 			return
 		}
 		sub := wire.PushSub{Kind: wire.KindPushSub, Subscription: wire.PushSubscription{
-			Endpoint: "https://push.example/e2e-idle", Keys: wire.PushKeys{P256dh: testP256dh, Auth: testAuth},
+			Endpoint: "https://web.push.apple.com/e2e-idle", Keys: wire.PushKeys{P256dh: testP256dh, Auth: testAuth},
 		}}
 		out, e := json.Marshal(sub)
 		if e != nil {
@@ -377,7 +377,7 @@ func TestIntegrationPushSubAbsorbedWithoutAsk(t *testing.T) {
 	require.Eventually(t, func() bool {
 		ag.mu.Lock()
 		defer ag.mu.Unlock()
-		return ag.sub != nil && ag.sub.Endpoint == "https://push.example/e2e-idle"
+		return ag.sub != nil && ag.sub.Endpoint == "https://web.push.apple.com/e2e-idle"
 	}, 6*time.Second, 25*time.Millisecond, "push sub must be absorbed with no Ask in flight")
 }
 
