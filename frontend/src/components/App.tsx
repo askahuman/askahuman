@@ -2,7 +2,8 @@
 // it to the nine screens. Pairing is code-only: the agent prints a 10-char code,
 // the user opens /app and TYPES it. The phone canonicalizes the code, derives the
 // relay room from it (Argon2id, codegen.roomFromCode), and runs SPAKE2 as role B.
-// NOTHING secret is ever placed in a URL/hash — there is no deep link.
+// Pairing secrets never appear in a URL/hash. Notification navigation carries
+// only an opaque room identifier that must already exist in the saved roster.
 
 import { useEffect, useRef, useState } from 'react';
 
@@ -10,11 +11,12 @@ import { syncBadge } from '../lib/badge.ts';
 import { canonicalizeCode, roomFromCode } from '../lib/codegen.ts';
 import { SessionManager, type AgentSummary } from '../lib/manager.ts';
 import { type PairPayload } from '../lib/payload.ts';
-import { subscribeForPush } from '../lib/push.ts';
+import { roomFromPushHash, roomFromPushMessage } from '../lib/push-routing.ts';
 import { localStorePersistence } from '../lib/store.ts';
 import { type SessionState } from '../lib/session.ts';
-import { type PushSubscription } from '../lib/wire.ts';
 import { PairScreen } from './PairScreen.tsx';
+import { PushNotifications } from './PushNotifications.tsx';
+import { usePushNotifications } from './usePushNotifications.ts';
 import {
   ConfirmedScreen,
   ChoiceScreen,
@@ -45,35 +47,6 @@ export const KEYFRAMES = `
 /** PUBLIC_VAPID_KEY is a build-time placeholder; the agent may also send one. */
 const VAPID_KEY =
   (import.meta as unknown as { env?: Record<string, string> }).env?.PUBLIC_VAPID_KEY ?? '';
-
-// BUILD_VAPID_ROOM keys the single build-time-key subscription in the push-done
-// set: it fans out to every agent that never sent its own key, so it has no
-// owning room. The NUL prefix can never collide with a 16-hex relay room id.
-const BUILD_VAPID_ROOM = '\0build';
-
-/**
- * subscribeOnce subscribes for `key`, delivers the resulting subscription via
- * `deliver`, and records `room` in `done` ONLY on success (a subscription was
- * obtained AND delivered) — a single early failure never latches push off for
- * the page, and each agent is tracked independently so one denied agent never
- * blocks the others. A delivery that fails only because the room's socket is
- * not open yet is NOT retried here: the manager retains the sub per room
- * (sendPushSubscriptionTo) and re-delivers it when that connection (re)opens.
- * The undone mark matters for forget-then-re-pair (onRemove clears the room) and
- * keeps a permission-denied room retryable if a future trigger fires. Exported
- * for test.
- */
-export async function subscribeOnce(
-  done: Set<string>,
-  room: string,
-  key: string,
-  subscribe: (k: string) => Promise<PushSubscription | null>,
-  deliver: (sub: PushSubscription) => boolean,
-): Promise<void> {
-  if (done.has(room)) return;
-  const sub = await subscribe(key);
-  if (sub && deliver(sub)) done.add(room);
-}
 
 /**
  * effectiveViewportHeight converts a visual viewport (height, scale) into the
@@ -185,13 +158,6 @@ export default function App() {
   const [pairing, setPairing] = useState(true);
   // pairError surfaces a bad typed code inline; never opens a socket.
   const [pairError, setPairError] = useState<string | null>(null);
-  // pushDoneRef holds the rooms that already have a delivered push subscription;
-  // a room is added ONLY after subscribeOnce succeeds. Per-room + mark-on-success
-  // so a denied/failed first attempt never permanently disables push, and every
-  // agent subscribes under its own VAPID key (not just the first). The
-  // BUILD_VAPID_ROOM sentinel stands in for the single build-time-key fanout sub.
-  const pushDoneRef = useRef<Set<string>>(new Set());
-
   // Subscribe to the manager once; tear every session down on unmount.
   useEffect(() => {
     const unsub = manager.onChange(() => setTick((t) => t + 1));
@@ -200,17 +166,6 @@ export default function App() {
     // pending request within seconds. Storage stays put on unmount.
     if (manager.restoreAll() > 0) {
       setPairing(false);
-      // Re-subscribe each restored agent under ITS OWN persisted VAPID key: the
-      // agent sends its key only once (right after pairing), so a restored session
-      // never re-receives it and onVapidKey won't fire. Permission was granted at
-      // original pairing, so this resolves silently; each sub routes back to its
-      // own room. subscribeOnce marks per-room on success, so one agent's denial
-      // never blocks another's, and a build-time-only agent falls to anyPaired.
-      for (const { room, key } of manager.vapidKeys()) {
-        void subscribeOnce(pushDoneRef.current, room, key, subscribeForPush, (sub) =>
-          manager.sendPushSubscriptionTo(room, sub),
-        );
-      }
     }
     return () => {
       unsub();
@@ -218,6 +173,32 @@ export default function App() {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // A wake selects only an already-paired local room; it never imports a key,
+  // code, request, or decision. A cold launch carries only that opaque room in
+  // the fragment, which is cleared before any interaction with the session.
+  useEffect(() => {
+    const select = (room: string | null) => {
+      if (!room || !manager.list().some((a) => a.id === room)) return;
+      setPairing(false);
+      manager.setActive(room);
+      manager.retry();
+    };
+    const fromHash = () => {
+      if (!window.location.hash.startsWith('#wake=')) return;
+      const room = roomFromPushHash(window.location.hash);
+      history.replaceState(history.state, '', window.location.pathname + window.location.search);
+      select(room);
+    };
+    const fromMessage = (event: MessageEvent) => select(roomFromPushMessage(event, window.location.origin));
+    fromHash();
+    window.addEventListener('hashchange', fromHash);
+    navigator.serviceWorker?.addEventListener('message', fromMessage);
+    return () => {
+      window.removeEventListener('hashchange', fromHash);
+      navigator.serviceWorker?.removeEventListener('message', fromMessage);
+    };
+  }, [manager]);
 
   // Bug 2 recovery: iOS silently kills the WebSocket when the PWA is
   // backgrounded and the frozen reconnect timer never fires, leaving a dead
@@ -247,6 +228,7 @@ export default function App() {
 
   const activeState = manager.activeState();
   const roster: AgentSummary[] = manager.list();
+  const push = usePushNotifications(manager, roster, VAPID_KEY);
 
   // Mirror the count of unanswered requests onto the OS app-icon badge (the red
   // number on the home-screen icon): two agents each waiting on a request show a
@@ -258,37 +240,12 @@ export default function App() {
     syncBadge(pending);
   }, [pending]);
 
-  // The agent delivers its OWN VAPID public key sealed during pairing; the phone
-  // MUST subscribe with exactly that key so the push signer == subscribe key
-  // (one prebuilt PWA, many laptop agents — a build-time key can't match). When
-  // an agent's key arrives, subscribe with it and route the subscription back to
-  // THAT room (room A's key produces room A's subscription). subscribeOnce tracks
-  // per-room done so each agent subscribes once, across this path, restore, and
-  // the build-time fallback — and a denied attempt stays retryable.
-  useEffect(() => {
-    manager.onVapidKey((publicKey, room) => {
-      void subscribeOnce(pushDoneRef.current, room, publicKey, subscribeForPush, (sub) =>
-        manager.sendPushSubscriptionTo(room, sub),
-      );
-    });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  // On first pairing success, dismiss the code-entry screen + best-effort
-  // subscribe to push. The agent's OWN VAPID key (handled by the onVapidKey
-  // path above, routed back to its own room) is the preferred source. Here we
-  // only fall back to the build-time VAPID_KEY for an agent that never sends a
-  // key (older agent); if there is no build key either, we wait for onVapidKey.
-  // subscribeOnce keeps the build-time fanout to a single SUCCESSFUL fire.
+  // On first pairing success, dismiss the code-entry screen. Notification
+  // permission is requested only from the explicit control on ListeningScreen.
   const anyPaired = roster.some((a) => a.status === 'paired' || a.status === 'offline');
   useEffect(() => {
     if (!anyPaired) return;
     setPairing(false);
-    if (manager.firstVapidKey()) return; // an agent key arrived — onVapidKey/restore owns it
-    if (!VAPID_KEY) return; // no build-time key: wait for the agent's sealed key
-    void subscribeOnce(pushDoneRef.current, BUILD_VAPID_ROOM, VAPID_KEY, subscribeForPush, (sub) =>
-      manager.sendPushSubscription(sub),
-    );
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [anyPaired]);
 
@@ -346,10 +303,7 @@ export default function App() {
             setPairing(true);
           }}
           onRemove={(id) => {
-            // Forget-this-agent must also forget its push-done mark: room ids
-            // are deterministic from the pairing code, so re-pairing the same
-            // code reuses the SAME id and must be able to subscribe again.
-            pushDoneRef.current.delete(id);
+            push.forget(id);
             manager.remove(id);
           }}
         />
@@ -364,7 +318,7 @@ export default function App() {
         onChoose: (l: string) => manager.choose(l),
         onSend: (t: string) => manager.reply(t),
         onRetry: () => manager.retry(),
-      })}
+      }, <PushNotifications c={c} push={push} />)}
     </>
   );
 }
@@ -379,7 +333,7 @@ interface Handlers {
   onRetry: () => void;
 }
 
-function renderScreen(c: Palette, state: SessionState, expiresIn: number | null, h: Handlers) {
+function renderScreen(c: Palette, state: SessionState, expiresIn: number | null, h: Handlers, pushControl: React.ReactNode) {
   switch (state.screen) {
     case 'pair':
       return <PairScreen c={c} onSubmitCode={h.onSubmitCode} error={h.pairError} />;
@@ -388,7 +342,7 @@ function renderScreen(c: Palette, state: SessionState, expiresIn: number | null,
     case 'home':
       return <HomeScreen c={c} unread={state.request ? 1 : 0} onOpen={() => {}} />;
     case 'listening':
-      return <ListeningScreen c={c} agent={state.agent} roomID={state.roomID} />;
+      return <ListeningScreen c={c} agent={state.agent} roomID={state.roomID}>{pushControl}</ListeningScreen>;
     // key={request.id}: a new request or an agent switch must mount a FRESH
     // card, not reuse the prior instance's swipe/commit state. Without it, a
     // deferred swipe commit could seal a decision against whatever request is

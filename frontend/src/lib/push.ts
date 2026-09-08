@@ -9,6 +9,7 @@
 // effort and never blocks pairing or decisions.
 
 import type { PushSubscription as WirePushSubscription } from './wire.ts';
+import { PUSH_WORKER_URL, pushScope } from './push-routing.ts';
 
 /** urlBase64ToUint8Array decodes a VAPID public key (base64url) to bytes
  *  backed by a plain ArrayBuffer (so it satisfies BufferSource for the
@@ -51,45 +52,90 @@ function sameServerKey(stored: ArrayBuffer | null, want: Uint8Array): boolean {
   return true;
 }
 
-/**
- * subscribeForPush registers/uses the active service worker, requests
- * Notification permission, and subscribes for Web Push with the VAPID key.
- * Returns the wire-shaped subscription, or null if unavailable/denied.
- * Never throws to the caller; push is strictly best-effort.
- */
-export async function subscribeForPush(vapidPublicKey: string): Promise<WirePushSubscription | null> {
+export type PushPermission = NotificationPermission | 'unsupported';
+
+export function pushPermission(): PushPermission {
+  if (typeof navigator === 'undefined' || !('serviceWorker' in navigator)) return 'unsupported';
+  if (typeof Notification === 'undefined' || typeof window === 'undefined' || !('PushManager' in window)) return 'unsupported';
+  return Notification.permission;
+}
+
+/** Call directly from an explicit user gesture. No asynchronous work may
+ * precede the native prompt; iOS rejects prompts from a handshake callback. */
+export function requestPushPermission(): Promise<PushPermission> {
+  const current = pushPermission();
+  if (current !== 'default') return Promise.resolve(current);
+  try { return Notification.requestPermission().catch(() => pushPermission()); }
+  catch { return Promise.resolve(pushPermission()); }
+}
+
+const operations = new Map<string, Promise<unknown>>();
+function withRoom<T>(room: string, action: () => Promise<T>): Promise<T> {
+  const previous = operations.get(room) ?? Promise.resolve();
+  const current = previous.catch(() => {}).then(action);
+  operations.set(room, current);
+  void current.finally(() => { if (operations.get(room) === current) operations.delete(room); }).catch(() => {});
+  return current;
+}
+
+async function activated(reg: ServiceWorkerRegistration): Promise<void> {
+  if (reg.active?.state === 'activated') return;
+  const worker = reg.installing ?? reg.waiting ?? reg.active;
+  if (!worker) throw new Error('push worker unavailable');
+  await new Promise<void>((resolve, reject) => {
+    const finish = () => {
+      if (worker.state !== 'activated' && worker.state !== 'redundant') return;
+      clearTimeout(timer); worker.removeEventListener('statechange', finish);
+      if (worker.state === 'activated') resolve(); else reject(new Error('push worker failed'));
+    };
+    const timer = setTimeout(() => {
+      worker.removeEventListener('statechange', finish);
+      reject(new Error('push worker activation timed out'));
+    }, 10000);
+    worker.addEventListener('statechange', finish);
+    finish();
+  });
+}
+
+/** One registration/subscription per room. Never prompts automatically and
+ * never changes another room's subscription or the shell worker. */
+export async function subscribeForPush(vapidPublicKey: string, room: string): Promise<WirePushSubscription | null> {
   try {
-    if (typeof navigator === 'undefined' || !('serviceWorker' in navigator)) return null;
-    if (typeof Notification === 'undefined' || !('PushManager' in window)) return null;
-    if (!vapidPublicKey) return null;
-
-    const permission = await Notification.requestPermission();
-    if (permission !== 'granted') return null;
-
-    const reg = await navigator.serviceWorker.ready;
     const wantKey = urlBase64ToUint8Array(vapidPublicKey);
-    let sub = await reg.pushManager.getSubscription();
-    // A stored subscription is bound to the exact VAPID key it was created under.
-    // If that differs from the agent's current key (re-paired agent, multiple
-    // agents, a regenerated agent key), every push the agent signs is rejected
-    // (403) forever — so drop the stale sub and resubscribe under the right key.
-    // A null applicationServerKey (unknown binding) is treated as a mismatch.
-    if (sub && !sameServerKey(sub.options.applicationServerKey, wantKey)) {
-      try {
+    if (wantKey.length !== 65 || wantKey[0] !== 4) return null;
+    const scope = pushScope(room);
+    return await withRoom(room, async () => {
+      if (pushPermission() !== 'granted') return null;
+      const reg = await navigator.serviceWorker.register(PUSH_WORKER_URL, { scope });
+      await activated(reg);
+      let sub = await reg.pushManager.getSubscription();
+      if (sub && !sameServerKey(sub.options.applicationServerKey, wantKey)) {
         await sub.unsubscribe();
-      } catch {
-        /* best-effort: fall through and subscribe fresh anyway */
+        // If removal failed or is not yet reflected, do not claim that a new
+        // key was subscribed. A future explicit retry can safely try again.
+        if (await reg.pushManager.getSubscription()) return null;
+        sub = null;
       }
-      sub = null;
-    }
-    if (!sub) {
-      sub = await reg.pushManager.subscribe({
-        userVisibleOnly: true,
-        applicationServerKey: wantKey,
-      });
-    }
-    return toWireSubscription(sub.toJSON());
+      sub ??= await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: wantKey });
+      return sameServerKey(sub.options.applicationServerKey, wantKey) ? toWireSubscription(sub.toJSON()) : null;
+    });
   } catch {
     return null; // best-effort: a missing push service must not break the app
   }
+}
+
+/** Forget only the exact room registration created by this application.
+ * The queue also cleans up a subscribe that was in flight when Forget was tapped. */
+export async function removePushForRoom(room: string): Promise<void> {
+  try {
+    const scope = new URL(pushScope(room), window.location.origin).href;
+    await withRoom(room, async () => {
+      const reg = (await navigator.serviceWorker.getRegistrations()).find((r) => r.scope === scope);
+      if (!reg) return;
+      const worker = reg.active ?? reg.waiting ?? reg.installing;
+      if (worker?.scriptURL !== new URL(PUSH_WORKER_URL, window.location.origin).href) return;
+      try { await (await reg.pushManager.getSubscription())?.unsubscribe(); }
+      finally { await reg.unregister(); }
+    });
+  } catch { /* best-effort; never remove broader/sibling registrations */ }
 }

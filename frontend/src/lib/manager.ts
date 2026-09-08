@@ -144,7 +144,12 @@ export class SessionManager {
   private sessionOpts(room: string): SessionOptions {
     return {
       ...this.opts,
-      onVapidKey: (publicKey) => this.vapidKeyHandler?.(publicKey, room),
+      onVapidKey: (publicKey) => {
+        // The key can arrive after the last pairing state change, even when
+        // no request follows. Persist it now so a reload can resubscribe.
+        this.persistAll();
+        this.vapidKeyHandler?.(publicKey, room);
+      },
     };
   }
 

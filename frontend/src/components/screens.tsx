@@ -250,10 +250,12 @@ export function ListeningScreen({
   c,
   agent,
   roomID,
+  children,
 }: {
   c: Palette;
   agent: string;
   roomID: string;
+  children?: React.ReactNode;
 }) {
   return (
     <Frame c={c} announcement="Connected. Listening for requests." style={{ padding: 'calc(66px + env(safe-area-inset-top)) 26px 40px', boxSizing: 'border-box', display: 'flex', flexDirection: 'column' }}>
@@ -310,6 +312,7 @@ export function ListeningScreen({
           </div>
         </div>
       </div>
+      {children}
       <div
         style={{
           borderTop: `1px solid ${c.borderSoft}`,
@@ -1038,6 +1041,7 @@ export function Roster({
         <div key={a.id} style={{ position: 'relative', flexShrink: 0, display: 'flex' }}>
           <button
             data-testid={`roster-chip-${a.id}`}
+            aria-pressed={a.active}
             onClick={() => onSelect(a.id)}
             style={{
               display: 'flex',
