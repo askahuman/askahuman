@@ -56,3 +56,24 @@ jobs:
         run: bun run build
       - name: Go<->JS SPAKE2 + secretbox interop
         run: bun run interop
+
+  web-container:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - name: Build production Linux image
+        run: docker build --tag askahuman-web:ci frontend
+      - name: Serve the PWA with production runtime restrictions
+        run: |
+          test "$(docker image inspect --format '{{.Config.User}}' askahuman-web:ci)" = 101
+          docker run --detach --name web-smoke --read-only --cap-drop ALL \
+            --security-opt no-new-privileges --tmpfs /tmp --tmpfs /var/cache/nginx \
+            --tmpfs /var/run --publish 127.0.0.1:18081:8080 askahuman-web:ci
+          curl --fail --silent --show-error --retry 10 --retry-connrefused --retry-delay 1 \
+            http://127.0.0.1:18081/app/ --output /tmp/app.html
+          python3 scripts/check-web-container.py
+      - name: Container diagnostics and cleanup
+        if: always()
+        run: |
+          docker logs web-smoke || true
+          docker rm --force web-smoke || true

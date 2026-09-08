@@ -1,6 +1,5 @@
 import { spawnSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
-import path from 'node:path';
+import { readFileSync, realpathSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
 const severities = new Set(['info', 'low', 'moderate', 'high', 'critical']);
@@ -75,4 +74,6 @@ function main() {
   }
 }
 
-if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) main();
+// Node canonicalizes module URLs, including parent-directory symlinks (/tmp on
+// macOS). Compare canonical paths so a CLI invocation can never skip the scan.
+if (process.argv[1] && realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url))) main();

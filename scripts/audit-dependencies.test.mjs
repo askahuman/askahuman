@@ -1,5 +1,10 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { spawnSync } from 'node:child_process';
+import { mkdtempSync, rmSync, symlinkSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { evaluateAudit } from './audit-dependencies.mjs';
 
 const id = 'GHSA-2pvr-wf23-7pc7';
@@ -17,7 +22,7 @@ test('empty, truncated, and unexpected reports fail closed', () => {
   }
 });
 test('abnormal exit and inconsistent status/report fail closed', () => {
-  for (const status of [null, 2, 127, undefined]) assert.throws(() => evaluate({}, status));
+  for (const status of [null, 2, 127, undefined]) assert.throws(() => evaluateAudit('{}', status));
   assert.throws(() => evaluate({}, 1));
   assert.throws(() => evaluate({ pkg: [high] }, 0));
 });
@@ -51,4 +56,21 @@ test('expired, malformed, duplicate, and unexplained exceptions fail closed', ()
     [{ ...exception, reason: '' }],
     [{ ...exception, id: '*' }], [exception, exception], {},
   ]) assert.throws(() => evaluate({ pkg: [high] }, 1, entries));
+});
+
+test('CLI fails closed without a scanner through direct and symlink paths', t => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'audit-cli-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const script = fileURLToPath(new URL('./audit-dependencies.mjs', import.meta.url));
+  const fileAlias = path.join(dir, 'audit.mjs');
+  const directoryAlias = path.join(dir, 'scripts');
+  symlinkSync(script, fileAlias);
+  symlinkSync(path.dirname(script), directoryAlias, 'dir');
+  for (const entry of [script, fileAlias, path.join(directoryAlias, 'audit-dependencies.mjs')]) {
+    const result = spawnSync(process.execPath, [entry], {
+      env: { ...process.env, PATH: dir }, encoding: 'utf8', timeout: 5_000,
+    });
+    assert.equal(result.status, 1, entry + ': ' + result.stderr);
+    assert.match(result.stderr, /dependency audit failed: scanner failed:/);
+  }
 });
