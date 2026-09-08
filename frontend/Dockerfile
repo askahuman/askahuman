@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 
 # Reproducible inputs: pin the bun toolchain version explicitly.
-ARG BUN_VERSION=1.2.15
+ARG BUN_VERSION=1.3.8
 
 # Pinned bun toolchain from the official image — the correct musl/arch binary.
 # npm's `bun` shim resolves @oven/bun-linux-aarch64 (glibc) and fails on alpine/arm64
