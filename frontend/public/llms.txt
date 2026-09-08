@@ -39,9 +39,13 @@ pass `--relay <wss-url>` and `--web <https-origin>`.
   - `placeholder` (string, optional) — input hint, when `response_kind` is `text`.
   - `max_len` (integer, optional) — max input length, when `response_kind` is `text`.
   - `expires_in_s` (integer, optional) — countdown in seconds before the request times out.
-- `pair_status` — Report whether the agent is paired, waiting to pair, or idle. Read-only; returns only
+- `pair_status` — Report whether a pairing session exists, the phone's relay presence, or waiting/idle status. Read-only; returns only
   non-secret status (the pairing code is shown out-of-band in the terminal, never in the result). It
-  does not start pairing — until the first `request_approval`, it reports idle.
+  does not start pairing.
+- `start_pairing` — Begin pairing in the background and show the code in the agent terminal.
+  An ordinary call preserves existing sessions. If the phone forgot its pairing, explicitly pass
+  `{"reset":true}` to disconnect the old session and show a fresh code. Reset refuses pending approvals;
+  answer or cancel them first. Concurrent calls join the same attempt, and failures release all waiters.
 
 ## When to use it
 

@@ -53,11 +53,21 @@ type MCPServer struct {
 	// it is ever used, so tests stay headless without touching this field.
 	surface func(displayCode string) (*pairPage, error)
 
-	mu       sync.Mutex
-	pairedCh chan struct{}
+	mu      sync.Mutex
+	attempt *pairingAttempt
+	// pendingRequests includes approvals waiting for pairing and the short gap
+	// before Agent.Ask takes its own guard. Explicit resets refuse them all.
+	pendingRequests int
 	// pairing is the current pairing once pairOnce has minted it. mu guards it.
 	pairing     Pairing
 	havePairing bool
+}
+
+// A result belongs to one attempt, including failures. Closing done publishes
+// err to every caller already waiting on that attempt, even if a retry starts.
+type pairingAttempt struct {
+	done chan struct{}
+	err  error
 }
 
 // NewMCPServer returns an MCPServer with request_approval, pair_status, and
@@ -81,7 +91,7 @@ func NewMCPServer(ag *Agent, status io.Writer) *MCPServer {
 	}, h.pairStatus)
 	mcp.AddTool(h.srv, &mcp.Tool{
 		Name:        "start_pairing",
-		Description: "Begin pairing with the human's phone. Prints a short code in the agent terminal that the human types into the app; the handshake runs in the background. Returns only non-secret status — the code never appears here.",
+		Description: "Begin pairing with the human's phone. Prints a short code in the agent terminal; the handshake runs in the background. Existing pairing is preserved unless reset:true explicitly requests replacement after the phone forgot it. Reset refuses pending approvals. Returns only non-secret status — the code never appears here.",
 	}, h.startPairing)
 	return h
 }
@@ -150,32 +160,42 @@ func (h *MCPServer) pairOnce(ctx context.Context) error {
 
 // ensurePaired pairs on first call; concurrent/later calls wait for it.
 func (h *MCPServer) ensurePaired(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	h.mu.Lock()
-	if h.ag.Paired() {
-		h.mu.Unlock()
-		return nil
-	}
-	if h.pairedCh == nil {
-		h.pairedCh = make(chan struct{})
-		ch := h.pairedCh
-		h.mu.Unlock()
-		if err := h.pairOnce(ctx); err != nil {
-			h.mu.Lock()
-			h.pairedCh = nil // allow a retry on the next call.
+	if h.attempt == nil {
+		if h.ag.Paired() {
 			h.mu.Unlock()
-			return err
+			return nil
 		}
-		close(ch)
-		return nil
+		attempt := &pairingAttempt{done: make(chan struct{})}
+		h.attempt = attempt
+		h.mu.Unlock()
+		return h.runPairing(ctx, attempt)
 	}
-	ch := h.pairedCh
+	attempt := h.attempt
 	h.mu.Unlock()
 	select {
-	case <-ch:
-		return nil
+	case <-attempt.done:
+		return attempt.err
 	case <-ctx.Done():
 		return ctx.Err()
 	}
+}
+
+func (h *MCPServer) runPairing(ctx context.Context, attempt *pairingAttempt) error {
+	err := h.pairOnce(ctx)
+	h.mu.Lock()
+	attempt.err = err
+	if h.attempt == attempt {
+		h.attempt = nil // a failed attempt can be retried by a subsequent call.
+		h.havePairing = false
+		h.pairing = Pairing{} // an old code is never reused or exposed as current.
+	}
+	close(attempt.done)
+	h.mu.Unlock()
+	return err
 }
 
 // PairStatusInput is the pair_status tool's (empty) input schema.
@@ -189,14 +209,14 @@ type PairStatusInput struct{}
 // start_pairing for that.
 func (h *MCPServer) pairStatus(_ context.Context, _ *mcp.CallToolRequest, _ PairStatusInput) (*mcp.CallToolResult, any, error) {
 	h.mu.Lock()
-	have := h.havePairing
+	have := h.havePairing || h.attempt != nil
 	paired := h.ag.Paired()
 	h.mu.Unlock()
 
 	var text string
 	switch {
 	case paired:
-		text = "paired — the phone is connected; no code needed."
+		text = h.pairedStatusText()
 	case have:
 		// SECURITY: never return secret material (code/room) in an MCP result; a
 		// prompt-injected model/client could read it and pair first. The code
@@ -208,8 +228,11 @@ func (h *MCPServer) pairStatus(_ context.Context, _ *mcp.CallToolRequest, _ Pair
 	return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: text}}}, nil, nil
 }
 
-// StartPairingInput is the start_pairing tool's (empty) input schema.
-type StartPairingInput struct{}
+// StartPairingInput keeps the original empty call compatible. Only an explicit
+// reset request may discard an established session after the phone forgets it.
+type StartPairingInput struct {
+	Reset bool `json:"reset,omitempty" jsonschema:"explicitly replace a forgotten pairing; refuses while an approval is pending; omit to preserve the existing session"`
+}
 
 // startPairing begins pairing eagerly: it mints+canonicalizes+derives a code,
 // PrintCode's it to stderr (out-of-band), and runs the A-side handshake in the
@@ -221,22 +244,49 @@ type StartPairingInput struct{}
 // here — a prompt-injected model/client must not be able to read the pairing
 // secret from the MCP transcript and pair first. The code travels only via
 // PrintCode (stderr/log).
-func (h *MCPServer) startPairing(ctx context.Context, _ *mcp.CallToolRequest, _ StartPairingInput) (*mcp.CallToolResult, any, error) {
+func (h *MCPServer) startPairing(ctx context.Context, _ *mcp.CallToolRequest, in StartPairingInput) (*mcp.CallToolResult, any, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, nil, err
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if in.Reset && h.pendingRequests > 0 {
+		return nil, nil, fmt.Errorf("%w: cannot reset pairing while an approval is pending; wait for it or cancel it first", ErrBusy)
+	}
+	if h.attempt != nil {
+		return textResult(PairingStatusText()), nil, nil
+	}
 	if h.ag.Paired() {
-		return textResult("already paired — the phone is connected; no code needed."), nil, nil
+		if !in.Reset {
+			return textResult(h.pairedStatusText()), nil, nil
+		}
+		// mu prevents a new handshake from starting during teardown. The agent
+		// guard also refuses an active Ask invoked outside the MCP wrapper.
+		if err := h.ag.resetPairing(); err != nil {
+			return nil, nil, err
+		}
+		h.havePairing = false
+		h.pairing = Pairing{}
 	}
 
-	// Kick off the handshake in the background on a context detached from this
-	// tool call (the call returns at once; the handshake outlives it, bounded by
-	// pairTTL inside Agent.Pair). A concurrent/later request_approval calls
-	// ensurePaired and joins this same in-flight attempt.
+	// Reserve the attempt synchronously before returning or launching work.
+	// Concurrent start_pairing/reset calls and approvals join this exact attempt.
+	attempt := &pairingAttempt{done: make(chan struct{})}
+	h.attempt = attempt
 	go func() {
-		if err := h.ensurePaired(context.WithoutCancel(ctx)); err != nil {
+		if err := h.runPairing(context.WithoutCancel(ctx), attempt); err != nil {
 			_, _ = fmt.Fprintf(h.status, "pairing error: %v\n", err)
 		}
 	}()
 
 	return textResult("pairing started — type the code shown in the agent terminal into the app."), nil, nil
+}
+
+func (h *MCPServer) pairedStatusText() string {
+	if h.ag.peerPresent.Load() {
+		return "paired — session established; the relay reports the phone present. No new code needed."
+	}
+	return "paired — phone currently offline. Reopen the app to reconnect. If the phone forgot this pairing, call start_pairing with reset:true for a fresh code."
 }
 
 // textResult wraps a plain string as a non-error tool result.
@@ -250,6 +300,14 @@ func (h *MCPServer) requestApproval(ctx context.Context, _ *mcp.CallToolRequest,
 	if !wire.ValidResponseKind(rk) {
 		return nil, ApprovalOutput{}, fmt.Errorf("invalid response_kind %q (want yesno|choice|text)", in.ResponseKind)
 	}
+	h.mu.Lock()
+	h.pendingRequests++
+	h.mu.Unlock()
+	defer func() {
+		h.mu.Lock()
+		h.pendingRequests--
+		h.mu.Unlock()
+	}()
 	if err := h.ensurePaired(ctx); err != nil {
 		return nil, ApprovalOutput{}, fmt.Errorf("pairing: %w", err)
 	}

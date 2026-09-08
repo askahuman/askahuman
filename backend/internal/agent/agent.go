@@ -486,6 +486,24 @@ func (a *Agent) Close() {
 	}
 }
 
+// resetPairing discards an abandoned session only after stopping its reader.
+// The MCP pairing mutex must be held, with no handshake in progress. Routine
+// reconnects never call this: the session key, device pin, and subscription stay
+// intact until an explicit reset. The Ask guard protects non-MCP callers too.
+func (a *Agent) resetPairing() error {
+	if !a.asking.CompareAndSwap(false, true) {
+		return ErrBusy
+	}
+	defer a.asking.Store(false)
+	a.Close() // joins the old reader before any fresh pairing can start.
+	a.mu.Lock()
+	a.sess = nil // drops the old session key and pinned device public key.
+	a.sub = nil
+	a.mu.Unlock()
+	a.setPeerPresent(false)
+	return nil
+}
+
 // Ask implements Asker. It announces req to the paired phone and waits for the
 // persistent reader to deliver an authenticated (sealedbox.Open-verified)
 // decision for req.ID, re-announcing on undeliverable / peer-left / reconnect.
@@ -647,7 +665,7 @@ func (a *Agent) timeoutErr() error {
 	if a.peerPresent.Load() {
 		return fmt.Errorf("%w: the phone was reachable but nobody answered — retry, or raise expires_in_s", ErrTimeout)
 	}
-	return fmt.Errorf("%w: the phone never connected while this request was pending — it has likely lost its pairing; call start_pairing and have the human enter the new code", ErrTimeout)
+	return fmt.Errorf("%w: the phone never connected while this request was pending — reopen the app to reconnect; if it forgot this pairing, call start_pairing with reset:true and have the human enter the new code", ErrTimeout)
 }
 
 // writeTimeout bounds a single frame write. It is derived from context.Background
