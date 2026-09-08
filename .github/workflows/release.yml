@@ -13,6 +13,12 @@ permissions:
   id-token: write # keyless cosign signing + SLSA provenance (sigstore OIDC)
   attestations: write # actions/attest-build-provenance writes attestations
 
+# Serialize with the npm-only recovery workflow so its latest-version check
+# cannot race this workflow's publication. Do not cancel a release in progress.
+concurrency:
+  group: npm-release-publication
+  cancel-in-progress: false
+
 jobs:
   release:
     runs-on: ubuntu-latest

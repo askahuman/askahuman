@@ -1,0 +1,56 @@
+# Retry only npm after a stable GitHub release already exists. This never invokes
+# the release/deploy workflows or rebuilds/replaces signed release assets.
+name: npm-recovery
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing stable release tag (vMAJOR.MINOR.PATCH)"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: npm-release-publication
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: github.repository == 'askahuman/askahuman' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          path: recovery-tools
+          persist-credentials: false
+
+      - name: Resolve published stable release and exact tag commit
+        id: release
+        run: python3 recovery-tools/scripts/npm_recovery.py resolve
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+          GH_TOKEN: ${{ github.token }}
+
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ steps.release.outputs.commit }}
+          path: release-source
+          persist-credentials: false
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "24"
+
+      - name: Package exact released source and publish npm with private output
+        run: python3 recovery-tools/scripts/npm_recovery.py publish
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+          RELEASE_COMMIT: ${{ steps.release.outputs.commit }}
+          RELEASE_ID: ${{ steps.release.outputs.release_id }}
+          RELEASE_SOURCE: ${{ github.workspace }}/release-source
+          GH_TOKEN: ${{ github.token }}
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
