@@ -2,7 +2,8 @@
 """Read-only GKE release checks. Never print command output or runtime identity.
 
 The CLI requires an Actions runner and uses an isolated Connect Gateway config.
-No Compute API or cluster-wide read; missing namespace permissions fail closed.
+One named Compute backend health read can verify a historical no-health-check
+condition. Missing existing permissions fail closed; no IAM or cluster mutation.
 """
 import ipaddress
 import json
@@ -94,6 +95,7 @@ def command_failure(stdout, stderr):
     text = stderr.lower()
     for fragments, category in [
         (("permission_denied",), "forbidden"),
+        (("required 'compute.backendservices.get' permission",), "forbidden"),
         (("the server doesn't have a resource type", "the server could not find the requested resource"), "not_found"),
         (("you must be logged in to the server", "invalid_grant", "unauthenticated"), "unauthenticated"),
         (("i/o timeout", "context deadline exceeded", "timed out"), "timeout"),
@@ -260,6 +262,145 @@ def healthy_neg_messages(neg_status):
     return messages
 
 
+def direct_health_target(report, objects, core_endpoints, env, expected_version,
+                         slice_read="relay_endpoints_read"):
+    """Qualify only the known historical branch and bind a complete snapshot."""
+    service, ingress, pods = (objects[k] for k in ("relay_service", "ingress", "relay_pods"))
+    deployment = objects["relay_deployment"]
+    backendconfig = objects["relay_backendconfig"]
+    if not (service_neg(service) and ingress_routes(ingress)
+            and rollout_ready(deployment, pods, "relay", expected_version, env.get("GAR_REGISTRY"))
+            and core_endpoints_match(service, pods, core_endpoints)
+            and ready_endpoint_membership(report, service, pods, objects["relay_endpoints"],
+                                          core_endpoints, slice_read=slice_read)
+            and annotation(service, "cloud.google.com/backend-config") == {"default": BACKEND}
+            and backendconfig["spec"]["logging"]["enable"] is False):
+        return None
+    project = env.get("GCP_PROJECT", "")
+    name_pattern = r"[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?"
+    if not isinstance(project, str) or not re.fullmatch(r"[a-z][a-z0-9-]{4,28}[a-z0-9]", project):
+        return None
+    status = annotation(service, "cloud.google.com/neg-status")
+    neg, zones = status["network_endpoint_groups"]["8080"], status["zones"]
+    if (not re.fullmatch(name_pattern, neg) or len(zones) != len(set(zones))
+            or not all(re.fullmatch(name_pattern, z) for z in zones)
+            or annotation(ingress, "ingress.kubernetes.io/backends").get(neg) != "HEALTHY"):
+        return None
+    pod = active_pods(pods)[0]  # Strict core membership already requires one pod/address.
+    node = pod["spec"]["nodeName"]
+    if not isinstance(node, str) or not re.fullmatch(name_pattern, node):
+        return None
+    ip = pod["status"]["podIPs"][0]["ip"]
+    if str(ipaddress.IPv4Address(ip)) != ip:
+        return None  # This alternative certifies the current IPv4-only topology.
+    if pod["spec"]["readinessGates"].count({"conditionType": NEG_READY}) != 1:
+        return None
+    conditions = [c for c in pod["status"]["conditions"] if c["type"] == NEG_READY]
+    if (len(conditions) != 1 or conditions[0].get("status") != "True"
+            or conditions[0].get("reason") != "LoadBalancerNegWithoutHealthCheck"):
+        return None
+    matching_zones = []
+    for zone in zones:
+        key = json.dumps(f'Key{{"{neg}", zone: "{zone}"}}')
+        for spacing in ("", " "):
+            message = (f'Pod is in NEG {key}. NEG is not attached to any BackendService with health checking.'
+                       f'{spacing}Marking condition "{NEG_READY}" to True.')
+            if conditions[0].get("message") == message:
+                matching_zones.append(zone)
+    if len(matching_zones) != 1:
+        return None
+    # Fence object replacements and all routing/spec changes, not timestamps.
+    resources = []
+    for obj in (deployment, service, ingress, backendconfig):
+        uid = obj["metadata"]["uid"]
+        if not isinstance(uid, str) or not uid:
+            return None
+        resources.append((uid, obj["metadata"].get("generation"), obj["spec"],
+                          obj["metadata"].get("annotations", {})))
+    return {"project": project, "neg": neg, "zones": sorted(zones), "zone": matching_zones[0],
+            "ip": ip, "node": node, "resources": resources,
+            "pod": (pod["metadata"]["uid"], pod["metadata"]["name"], pod["spec"],
+                    pod["status"]["containerStatuses"][0]["imageID"],
+                    conditions[0]["status"], conditions[0]["reason"], conditions[0]["message"])}
+
+
+def direct_health_matches(raw, target):
+    """Validate the SDK's per-group get-health JSON; no aggregate is evidence."""
+    def unique_object(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("duplicate field")
+            result[key] = value
+        return result
+
+    def invalid_constant(_):
+        raise ValueError("non-JSON number")
+
+    if len(raw) > 1024 * 1024:
+        return False
+    groups = json.loads(raw, object_pairs_hook=unique_object, parse_constant=invalid_constant)
+    prefix = f'https://www.googleapis.com/compute/v1/projects/{target["project"]}/zones/'
+    expected = {f'{prefix}{zone}/networkEndpointGroups/{target["neg"]}': zone for zone in target["zones"]}
+    if not isinstance(groups, list) or len(groups) != len(expected):
+        return False
+    seen = set()
+    for group in groups:
+        if not isinstance(group, dict) or set(group) != {"backend", "status"}:
+            return False
+        uri = group["backend"]
+        if not isinstance(uri, str) or uri not in expected or uri in seen:
+            return False
+        seen.add(uri)
+        status = group["status"]
+        if not isinstance(status, dict) or status.get("kind") != "compute#backendServiceGroupHealth":
+            return False
+        endpoints = status.get("healthStatus", [])
+        if not isinstance(endpoints, list):
+            return False
+        if expected[uri] != target["zone"]:
+            if endpoints:
+                return False
+            continue
+        if len(endpoints) != 1 or not isinstance(endpoints[0], dict):
+            return False
+        endpoint = endpoints[0]
+        if (endpoint.get("ipAddress") != target["ip"] or type(endpoint.get("port")) is not int
+                or endpoint["port"] != 8080 or endpoint.get("healthState") != "HEALTHY"
+                or endpoint.get("instance") != f'{prefix}{target["zone"]}/instances/{target["node"]}'
+                or any(key in endpoint and endpoint[key] != "" for key in ("ipv6Address", "ipv6HealthState"))):
+            return False
+    return seen == set(expected)
+
+
+def observed_neg_health(report, objects, core_endpoints, env, expected_version):
+    if healthy_neg(objects["relay_service"], objects["ingress"], objects["relay_pods"]):
+        return True
+    target = direct_health_target(report, objects, core_endpoints, env, expected_version)
+    if target is None:
+        return False
+    # This CLI gets only the named backend, then health for its groups. It fails
+    # on partial API errors. command() captures output and applies a timeout.
+    if not report.diagnostic("relay_neg_direct_backend_health", lambda: direct_health_matches(command([
+            "gcloud", "compute", "backend-services", "get-health", target["neg"],
+            "--project", target["project"], "--global", "--format=json", "--quiet"], env), target)):
+        return False
+    reads = {
+        "relay_deployment": ["deployment", RELAY],
+        "relay_service": ["service", RELAY],
+        "ingress": ["ingress", INGRESS],
+        "relay_backendconfig": ["backendconfig.cloud.google.com", BACKEND],
+        "relay_pods": ["pods", "--selector=app=" + RELAY],
+        "relay_endpoints": ["endpointslices.discovery.k8s.io", "--selector=kubernetes.io/service-name=" + RELAY],
+        "relay_core_endpoints": ["endpoints", RELAY],
+    }
+    current = {key: read_object(report, "relay_health_fence_" + key, args, env, diagnostic=True)
+               for key, args in reads.items()}
+    return report.diagnostic("relay_neg_direct_health_current_identity", lambda:
+        direct_health_target(report, current, current["relay_core_endpoints"], env, expected_version,
+                             slice_read="relay_health_fence_relay_endpoints_read") == target)
+
+
 def positive_neg_message(message):
     # Diagnostic parsing only: this does not relax healthy_neg's exact identity
     # gate. JSON strings cover Go's %q escaping of the resource-key strings.
@@ -397,11 +538,12 @@ def core_endpoints_match(service, pods, endpoints):
             and isinstance(name, str) and bool(name) and ref.get("name") == name)
 
 
-def ready_endpoint_membership(report, service, pods, slices, core_endpoints):
+def ready_endpoint_membership(report, service, pods, slices, core_endpoints,
+                              slice_read="relay_endpoints_read"):
     # A denied/absent Slice API can use equivalent complete core membership.
     # Timeouts, transport/auth errors, malformed data and readable mismatches
     # remain failures; never hide those by looking for a more favorable source.
-    if report.failures.get("relay_endpoints_read") in {"forbidden", "not_found"}:
+    if report.failures.get(slice_read) in {"forbidden", "not_found"}:
         return core_endpoints_match(service, pods, core_endpoints)
     return endpoints_match(pods, slices)
 
@@ -442,7 +584,8 @@ def check_cluster(report, env, expected_version=""):
     report.check("web_rollout_and_image", lambda: rollout_ready(web, objects["web_pods"], "web", expected_version, env.get("GAR_REGISTRY")))
     report.check("ingress_gce_relay_routes", lambda: ingress_routes(ingress))
     report.check("relay_service_ingress_neg", lambda: service_neg(service))
-    report.check("relay_neg_observed_healthy", lambda: healthy_neg(service, ingress, pods))
+    report.check("relay_neg_observed_healthy", lambda:
+                 observed_neg_health(report, objects, core_endpoints, env, expected_version))
     neg_diagnostics(report, service, ingress, pods)
     report.check("relay_ready_endpoints_match_pods", lambda:
                  ready_endpoint_membership(report, service, pods, objects["relay_endpoints"], core_endpoints))
