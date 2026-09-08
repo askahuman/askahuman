@@ -37,16 +37,29 @@ jobs:
       USE_GKE_GCLOUD_AUTH_PLUGIN: "True"
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-      - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
+      # Public tool downloads run before federation. The same pinned Google
+      # action bundles execute under capture, including their error paths.
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          project_id: ${{ secrets.GCP_PROJECT_ID }}
-          workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
-          service_account: ${{ secrets.GCP_DEPLOYER_SA }}
-      - uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3
-        with:
-          install_components: gke-gcloud-auth-plugin
+          node-version: "24"
+      - name: Prepare pinned cloud actions
+        run: python3 scripts/private_cloud.py prepare
+      - name: Install cloud SDK before authentication
+        run: python3 scripts/private_cloud.py install_sdk
+      - name: Authenticate through Workload Identity Federation
+        env:
+          GCP_WIF_PROVIDER: ${{ secrets.GCP_WIF_PROVIDER }}
+          GCP_DEPLOYER_SA: ${{ secrets.GCP_DEPLOYER_SA }}
+        run: python3 scripts/private_cloud.py authenticate
+      - name: Configure the authenticated SDK
+        run: python3 scripts/private_cloud.py configure_sdk
+
       - name: Read-only production topology and rollout checks
         run: python3 scripts/production_preflight.py
       - name: Verify the public release and actual GFE proxy path
         if: inputs.expected_version != '' || inputs.expected_commit != ''
         run: python3 scripts/verify_public_release.py
+
+      - name: Remove cloud credentials and private temporary state
+        if: always()
+        run: python3 scripts/private_cloud.py cleanup

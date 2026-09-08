@@ -123,6 +123,24 @@ jobs:
       - name: Topology, redaction, and public release probe regressions
         run: python3 -m unittest discover -s scripts -p test_release_verification.py -v
 
+  workflow-privacy:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "24"
+      - name: Fetch and verify public pinned action bundles without credentials
+        run: python3 scripts/private_cloud.py prepare
+      - name: Synthetic output, isolation, cleanup, and actual Node entry-point regressions
+        run: |
+          AAH_ACTION_BUNDLE_DIR="$RUNNER_TEMP/aah-cloud-workflow" \
+            python3 -m unittest discover -s scripts -p test_private_cloud.py -v
+          docker buildx version
+      - name: Remove temporary public bundles
+        if: always()
+        run: python3 scripts/private_cloud.py cleanup
+
   npm-installer:
     runs-on: ubuntu-24.04
     steps:
