@@ -1,6 +1,6 @@
 module github.com/askahuman/askahuman/backend
 
-go 1.26
+go 1.26.6
 
 require (
 	github.com/SherClockHolmes/webpush-go v1.4.0

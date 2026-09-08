@@ -64,6 +64,11 @@ jobs:
       - name: Configure Docker for Artifact Registry
         run: gcloud auth configure-docker "${GAR_REGISTRY%%/*}" --quiet
 
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: backend/go.mod
+          cache-dependency-path: backend/go.sum
+
       # Relay → distroless static image via ko (no Dockerfile). --bare pushes to
       # exactly $KO_DOCKER_REPO. ref. backend/.ko.yaml.
       - name: Build + push relay image

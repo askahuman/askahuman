@@ -47,7 +47,7 @@ jobs:
       # (e.g. x/crypto's SSH advisories — nothing here reaches x/crypto/ssh).
       - name: govulncheck (fails on reachable vulns; lists all advisories)
         run: |
-          go install golang.org/x/vuln/cmd/govulncheck@v1.1.4
+          go install golang.org/x/vuln/cmd/govulncheck@v1.6.0
           "$(go env GOPATH)/bin/govulncheck" -show verbose ./...
 
   frontend:
@@ -59,64 +59,13 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
-          bun-version: "1.2.15"
-      # `bun audit` (in 1.2.15) checks bun.lock against the GitHub Advisory DB. It has
-      # no --audit-level flag until 1.2.21, so we gate severity ourselves: print the
-      # full human report (every advisory is visible in the log), then parse the JSON
-      # and fail ONLY when a high/critical advisory is present. Low/moderate => warn.
-      - name: bun audit (fail on high/critical; allowlist analyzed non-exploitable)
-        run: |
-          bun install --frozen-lockfile
-          echo "::group::bun audit (full report)"
-          bun audit || true
-          echo "::endgroup::"
-          bun audit --json > /tmp/audit.json 2>/dev/null || true
-          # Allowlist: high/critical advisories analyzed as NON-EXPLOITABLE for THIS
-          # deployment. The PWA is output:'static' served by nginx — no Astro server
-          # runtime runs in prod, and both highs require it (SSR / on-demand rendering).
-          # Every OTHER high/critical (including any NEW astro one) still fails the build.
-          # The remaining moderate/low advisories (astro spread-prop + define:vars XSS,
-          # astro server-island replay, esbuild Windows dev-server read) only WARN — all
-          # SSR/build/dev-only, also unreachable in a static nginx deploy. The yaml
-          # advisory is already cleared via the "yaml" override in package.json; esbuild
-          # is left at 0.27.x because forcing >=0.28.1 breaks `astro build` and the bug is
-          # Windows-dev-server-only (we build static in Linux CI).
-          #
-          # The clean fix for the two highs is astro >=6.4.6, but it is BLOCKED: the
-          # latest @vite-pwa/astro (1.2.0) peer-caps at astro ^5 and builds our service
-          # worker + manifest (injectManifest), so we can't force the bump. Re-evaluate
-          # when @vite-pwa/astro ships Astro 6 support, then drop this allowlist + the
-          # REVIEW_BY nag. (Astro 6 also moves experimental.csp -> security.csp.)
-          #   tracking:  https://github.com/vite-pwa/astro/pull/73 (open) + issue #72
-          #   review-by: 2026-12-01  (CI nags, non-blocking, once this date passes)
-          #   GHSA-2pvr-wf23-7pc7  Astro SSRF in prerendered error-page fetch (SSR-only)
-          #   GHSA-8hv8-536x-4wqp  Astro reflected XSS via unescaped slot name (SSR-only)
-          ALLOW="GHSA-2pvr-wf23-7pc7 GHSA-8hv8-536x-4wqp" REVIEW_BY="2026-12-01" node -e '
-            const { readFileSync } = require("fs");
-            const allow = new Set((process.env.ALLOW || "").split(/\s+/).filter(Boolean));
-            let data = {};
-            try { data = JSON.parse(readFileSync("/tmp/audit.json", "utf8")); } catch {}
-            const blocking = [], suppressed = [];
-            for (const advs of Object.values(data)) {
-              if (!Array.isArray(advs)) continue;
-              for (const a of advs) {
-                const sev = (a.severity || "").toLowerCase();
-                if (sev !== "high" && sev !== "critical") continue;
-                if ([...allow].some((g) => (a.url || "").includes(g))) { suppressed.push(a.url); continue; }
-                blocking.push(sev + ": " + a.title + " (" + a.url + ")");
-              }
-            }
-            if (blocking.length) {
-              console.error("::error::bun audit: " + blocking.length + " blocking high/critical advisory(ies):\n" + blocking.join("\n"));
-              process.exit(1);
-            }
-            // Self-expiry: nag (never fail) once the allowlist has outlived its review date.
-            const reviewBy = process.env.REVIEW_BY || "";
-            if (reviewBy && suppressed.length && new Date() > new Date(reviewBy)) {
-              console.error("::warning::vuln allowlist is past its review-by date (" + reviewBy + "). Re-check whether astro can finally upgrade (@vite-pwa/astro Astro 6 support, vite-pwa/astro#73) and drop the allowlist.");
-            }
-            console.log("No blocking high/critical advisories (allowlisted: " + [...allow].join(", ") + ").");
-          '
+          bun-version: "1.3.8"
+      - name: Validate dependency-audit failure handling
+        run: node --test ../scripts/audit-dependencies.test.mjs
+      - name: Install locked dependencies
+        run: bun install --frozen-lockfile
+      - name: Audit dependencies (validated report and expiring exceptions)
+        run: node ../scripts/audit-dependencies.mjs
 
   infra:
     runs-on: ubuntu-24.04

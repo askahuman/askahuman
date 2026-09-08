@@ -1,0 +1,12 @@
+[
+  {
+    "id": "GHSA-2pvr-wf23-7pc7",
+    "reason": "Requires an Astro server handling prerendered error-page fetches. Production serves Astro static output with nginx and has no Astro server runtime. @vite-pwa/astro 1.2.0 currently supports Astro through v5; reassess that integration before the expiry.",
+    "expires": "2026-12-01"
+  },
+  {
+    "id": "GHSA-8hv8-536x-4wqp",
+    "reason": "Requires Astro server-side reflected slot-name rendering. Production serves static HTML with nginx and request text is rendered by React. Reassess the Astro/PWA integration and remove this exception when upgrading.",
+    "expires": "2026-12-01"
+  }
+]

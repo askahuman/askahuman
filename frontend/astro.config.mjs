@@ -6,6 +6,11 @@ import AstroPWA from "@vite-pwa/astro";
 // Dark palette anchor from the design mockup (renderVals().page).
 const THEME_COLOR = "#08090c";
 
+// esbuild 0.28 correctly rejects destructuring on Safari 14.0 (engine bug).
+// Keep the other Vite 6 targets and require Safari 14.1 for the app shell;
+// installed iPhone Web Push already requires iOS 16.4 or later.
+const BROWSER_TARGETS = ["chrome87", "edge88", "es2020", "firefox78", "safari14.1"];
+
 // ref. https://vite-pwa-org.netlify.app/frameworks/astro
 // output 'static' => pure static dist/, no Node server at runtime (architecture/0004).
 export default defineConfig({
@@ -93,5 +98,7 @@ export default defineConfig({
   ],
   vite: {
     plugins: [tailwindcss()],
+    build: { target: BROWSER_TARGETS },
+    optimizeDeps: { esbuildOptions: { target: BROWSER_TARGETS } },
   },
 });
