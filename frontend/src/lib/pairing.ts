@@ -212,7 +212,11 @@ export class Pairing {
 
   private fail(err: Error): void {
     this.setPhase('failed');
-    this.events.onError?.(err);
+    let message = err.message;
+    if (!message.startsWith('Pairing failed.'))
+      message = `Pairing failed. ${message}`;
+    if (!message.includes(UPGRADE_MESSAGE)) message += ` ${UPGRADE_MESSAGE}`;
+    this.events.onError?.(new Error(message));
   }
 
   private setPhase(p: PairingPhase): void {

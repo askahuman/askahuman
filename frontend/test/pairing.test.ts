@@ -111,6 +111,8 @@ describe('v2 password-authenticated signing identities', () => {
     await p.pairing.onPeerPake(p.hello());
     p.pairing.onPeerConfirm(b64Encode(a.confirm));
     expect(p.pairing.currentPhase()).toBe('failed');
+    expect(p.error()?.message).toContain('Pairing failed.');
+    expect(p.error()?.message).toContain('start_pairing with reset:true');
     expect(p.key()).toBeUndefined();
   });
   it('rejects agent-identity substitution even though both messages contain valid P-256 keys', async () => {
@@ -121,6 +123,8 @@ describe('v2 password-authenticated signing identities', () => {
     await p.pairing.onPeerPake(p.hello(thief.spkiB64));
     p.pairing.onPeerConfirm(b64Encode(a.confirm));
     expect(p.pairing.currentPhase()).toBe('failed');
+    expect(p.error()?.message).toContain('Pairing failed.');
+    expect(p.error()?.message).toContain('start_pairing with reset:true');
     expect(p.key()).toBeUndefined();
   });
   it('rejects phone-identity substitution through the transcript confirmation', async () => {
