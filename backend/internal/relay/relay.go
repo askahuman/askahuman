@@ -301,9 +301,11 @@ func (r *Relay) pump(ctx context.Context, roomID string, p *peer) {
 		// _relay signals. A peer setting _relay could spoof peer_joined /
 		// peer_left / undeliverable to the other side. We inspect ONLY the
 		// _relay field and never the opaque box, so we stay content-blind.
+		// If envelope classification fails, reject it instead of assuming
+		// clients share Go's parser limits.
 		if relaySet(data) {
-			logf("relay: client sent _relay, closing room=%s", roomID)
-			_ = p.conn.Close(StatusPolicyViolation, "relay: clients must not set _relay")
+			logf("relay: invalid client envelope, closing room=%s", roomID)
+			_ = p.conn.Close(StatusPolicyViolation, "relay: invalid client envelope")
 			return
 		}
 

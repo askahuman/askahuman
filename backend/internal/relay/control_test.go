@@ -2,6 +2,7 @@ package relay
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -13,24 +14,37 @@ import (
 )
 
 func TestReservedControlKeyCannotHideBehindApplicationFields(t *testing.T) {
+	// About 20 KiB fits the WebSocket frame limit, but 10,001 nested arrays
+	// exceed Go's JSON limit while JavaScript JSON.parse accepts the object.
+	deep := strings.Repeat("[", 10001) + "0" + strings.Repeat("]", 10001)
 	frames := map[string]string{
-		"normal signal":          `{"_relay":"peer_joined"}`,
-		"wrong type box":         `{"_relay":"peer_joined","box":123}`,
-		"mixed case box":         `{"_relay":"peer_joined","Box":123}`,
-		"wrong type pake":        `{"pake":true,"_relay":"peer_joined"}`,
-		"duplicate box":          `{"Box":123,"box":"opaque","_relay":"peer_joined"}`,
-		"duplicate control":      `{"_relay":"peer_joined","_relay":""}`,
-		"duplicate null control": `{"_relay":"peer_joined","_relay":null}`,
-		"null then control":      `{"_relay":null,"_relay":"peer_joined"}`,
-		"empty control":          `{"_relay":""}`,
-		"null control":           `{"_relay":null}`,
-		"numeric control":        `{"_relay":3}`,
-		"object control":         `{"_relay":{"value":"peer_joined"}}`,
-		"mixed case control":     `{"_ReLaY":"peer_joined"}`,
-		"escaped control key":    `{"\u005frelay":"peer_joined"}`,
+		"normal signal":            `{"_relay":"peer_joined"}`,
+		"wrong type box":           `{"_relay":"peer_joined","box":123}`,
+		"mixed case box":           `{"_relay":"peer_joined","Box":123}`,
+		"wrong type pake":          `{"pake":true,"_relay":"peer_joined"}`,
+		"duplicate box":            `{"Box":123,"box":"opaque","_relay":"peer_joined"}`,
+		"duplicate control":        `{"_relay":"peer_joined","_relay":""}`,
+		"duplicate null control":   `{"_relay":"peer_joined","_relay":null}`,
+		"null then control":        `{"_relay":null,"_relay":"peer_joined"}`,
+		"empty control":            `{"_relay":""}`,
+		"null control":             `{"_relay":null}`,
+		"numeric control":          `{"_relay":3}`,
+		"object control":           `{"_relay":{"value":"peer_joined"}}`,
+		"mixed case control":       `{"_ReLaY":"peer_joined"}`,
+		"escaped control key":      `{"\u005frelay":"peer_joined"}`,
+		"too deep before control":  `{"extra":` + deep + `,"_relay":"peer_joined"}`,
+		"too deep after control":   `{"_relay":"peer_joined","extra":` + deep + `}`,
+		"too deep without control": `{"extra":` + deep + `}`,
+		"malformed JSON":           `{"_relay":"peer_joined",`,
+		"two JSON values":          `{"box":"opaque"}{"_relay":"peer_joined"}`,
+		"non-object array":         `["_relay"]`,
+		"non-object null":          `null`,
+		"non-object string":        `"_relay"`,
+		"non-JSON text":            `not json`,
 	}
 	for name, payload := range frames {
 		t.Run(name, func(t *testing.T) {
+			require.Less(t, len(payload), maxFrameBytes)
 			require.True(t, relaySet([]byte(payload)))
 			base := newServer(t)
 			a := dialRoom(t, base, roomA)
@@ -58,9 +72,6 @@ func TestApplicationFramesRemainOpaque(t *testing.T) {
 		`{"nested":{"_relay":"peer_left"}}`,
 		`{"box":"a string containing _relay"}`,
 		`{"box":"one","box":"two"}`,
-		`["_relay"]`,
-		`null`,
-		`not json`,
 	}
 	base := newServer(t)
 	a := dialRoom(t, base, roomA)

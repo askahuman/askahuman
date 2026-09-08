@@ -17,6 +17,13 @@ The two images:
 - `ask-a-human-relay` — Go WebSocket rendezvous, built by **ko** (distroless static nonroot). Listens `:8080`, serves `/healthz` + `/ws`.
 - `ask-a-human-web` — static Astro PWA served by **nginx-unprivileged**. Listens `:8080` (non-root).
 
+Client relay text frames must be JSON objects within the relay parser's bounds
+(including Go's nesting limit). The relay reserves the top-level `_relay` key in
+every case/value form and rejects envelopes it cannot classify; it never assumes
+a Go parse failure also prevents JavaScript from reading a control signal.
+Admitted objects are forwarded byte-for-byte without interpreting application
+fields or ciphertext. Malformed/non-object text is closed with code `4003`.
+
 ## Hardening (base)
 
 Both Deployments run locked down (`base/{relay,web}-deployment.yaml`):
