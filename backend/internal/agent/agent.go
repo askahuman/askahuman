@@ -515,6 +515,9 @@ func (a *Agent) Ask(ctx context.Context, req wire.Request) (wire.Decision, error
 		ctx, cancel = context.WithTimeout(ctx, time.Duration(req.ExpiresInS)*time.Second)
 		defer cancel()
 	}
+	if requestExpired(ctx) {
+		return wire.Decision{}, a.timeoutErr()
+	}
 
 	req.Kind = wire.KindRequest
 	// EncodeRequest pads to a fixed block so the request body length does not
@@ -572,11 +575,14 @@ func (a *Agent) Ask(ctx context.Context, req wire.Request) (wire.Decision, error
 	// or timeout always wins immediately (the wait is interruptible).
 	backoff := baseBackoff
 	for {
+		if requestExpired(ctx) {
+			return wire.Decision{}, a.timeoutErr()
+		}
 		select {
 		case <-ctx.Done():
 			return wire.Decision{}, a.timeoutErr()
 		case dec := <-w.decCh:
-			return dec, nil
+			return a.acceptDecision(ctx, dec)
 		case ev := <-w.evCh:
 			switch ev {
 			case evPeerAbsent:
@@ -593,7 +599,7 @@ func (a *Agent) Ask(ctx context.Context, req wire.Request) (wire.Decision, error
 				case <-ctx.Done():
 					return wire.Decision{}, a.timeoutErr()
 				case dec := <-w.decCh:
-					return dec, nil
+					return a.acceptDecision(ctx, dec)
 				case <-time.After(backoff):
 				}
 				_ = a.sendRequest(sess, plain)
@@ -607,6 +613,26 @@ func (a *Agent) Ask(ctx context.Context, req wire.Request) (wire.Decision, error
 			}
 		}
 	}
+}
+
+// acceptDecision is the final acceptance boundary for every decision path.
+// A ready decision channel does not take priority over cancellation: select
+// chooses randomly when both are ready, including after a stalled write/push.
+func (a *Agent) acceptDecision(ctx context.Context, dec wire.Decision) (wire.Decision, error) {
+	if requestExpired(ctx) {
+		return wire.Decision{}, a.timeoutErr()
+	}
+	return dec, nil
+}
+
+// requestExpired checks the absolute deadline as well as cancellation, so timer
+// notification delays cannot extend the approval window under scheduler load.
+func requestExpired(ctx context.Context) bool {
+	if ctx.Err() != nil {
+		return true
+	}
+	deadline, ok := ctx.Deadline()
+	return ok && !time.Now().Before(deadline)
 }
 
 // setPeerPresent records whether the phone is currently in the room.
@@ -897,13 +923,44 @@ func decodeDecision(plain []byte, req wire.Request, sess *Session) (dec wire.Dec
 	if dec.Kind != wire.KindDecision || dec.ID != req.ID {
 		return wire.Decision{}, false
 	}
-	if !resultMatchesKind(dec.Result, req.Response) {
+	if !resultMatchesKind(dec.Result, req.Response) || !resultFieldsMatch(plain, req.Response.Kind) {
 		return wire.Decision{}, false
 	}
 	if !verifyDecisionSig(sess, dec) {
 		return wire.Decision{}, false
 	}
 	return dec, true
+}
+
+// resultFieldsMatch checks the raw JSON keys in addition to resultMatchesKind's
+// value checks. Go's decoder otherwise ignores unknown fields, matches keys
+// case-insensitively, and turns null/absent strings into the same zero value.
+// Only the requested answer field may be present, even if an extra is empty.
+func resultFieldsMatch(plain []byte, kind wire.ResponseKind) bool {
+	var raw struct {
+		Result map[string]json.RawMessage `json:"result"`
+	}
+	if err := json.Unmarshal(plain, &raw); err != nil || raw.Result == nil {
+		return false
+	}
+	var field string
+	switch kind {
+	case wire.ResponseYesNo:
+		field = "approved"
+	case wire.ResponseChoice:
+		field = "choice"
+	case wire.ResponseText:
+		field = "text"
+		// The Go wire codec uses omitempty for Text: {} is its existing
+		// representation of a valid empty text answer. It carries no extras.
+		if len(raw.Result) == 0 {
+			return true
+		}
+	default:
+		return false
+	}
+	value, ok := raw.Result[field]
+	return len(raw.Result) == 1 && ok && string(value) != "null"
 }
 
 // verifyDecisionSig enforces the per-device signature. Once the phone has
@@ -939,9 +996,9 @@ func verifyDecisionSig(sess *Session, dec wire.Decision) bool {
 func resultMatchesKind(res wire.Result, resp wire.Response) bool {
 	switch resp.Kind {
 	case wire.ResponseYesNo:
-		return res.Approved != nil
+		return res.Approved != nil && res.Choice == "" && res.Text == ""
 	case wire.ResponseChoice:
-		if res.Choice == "" {
+		if res.Choice == "" || res.Approved != nil || res.Text != "" {
 			return false
 		}
 		for _, opt := range resp.Options {
@@ -951,6 +1008,9 @@ func resultMatchesKind(res wire.Result, resp wire.Response) bool {
 		}
 		return false
 	case wire.ResponseText:
+		if res.Approved != nil || res.Choice != "" {
+			return false
+		}
 		if resp.MaxLen > 0 && len(res.Text) > resp.MaxLen {
 			return false
 		}
