@@ -1,40 +1,39 @@
-// Integration test for the Session orchestrator: a scripted role-A agent on the
-// other end of a fake relay pairs with the phone, then sends a sealed
-// wire.Request; the Session opens it, renders the right screen, and on a
-// decision seals a wire.Decision the agent can open. Exercises the full
-// contract (relay frames + SPAKE2 + secretbox + wire) with the real crypto.
-
-import { describe, expect, it } from 'vitest';
-
-import { Handshake, open as boxOpen, seal as boxSeal } from '../src/lib/crypto.ts';
-import { Session, type SessionState } from '../src/lib/session.ts';
-import { type WSLike } from '../src/lib/relay.ts';
-import { type PairPayload } from '../src/lib/payload.ts';
+import { afterEach, describe, expect, it } from 'vitest';
+import { Session, type SessionOptions } from '../src/lib/session.ts';
+import type { WSLike } from '../src/lib/relay.ts';
+import { seal, open } from '../src/lib/crypto.ts';
 import {
-  type Decision,
   type Request,
-  KindRequest,
-  encodeVapidKey,
+  type Decision,
+  type PushSubscription,
 } from '../src/lib/wire.ts';
+import {
+  PROTOCOL,
+  requestHash,
+  decisionHash,
+  ackSigningMessage,
+  pushSigningMessage,
+  verify,
+  type Ack,
+} from '../src/lib/protocol.ts';
+import {
+  deviceKeyLoader,
+  makeSigner,
+  pairAgent,
+  signRequest,
+  sendReq,
+  sealReq,
+  acknowledge,
+  decisions,
+  sendVapid,
+  until,
+  settle,
+  type TestPeer,
+} from './protocol-fixture.ts';
 
-const b64 = {
-  encode(bytes: Uint8Array): string {
-    let s = '';
-    for (const b of bytes) s += String.fromCharCode(b);
-    return btoa(s);
-  },
-  decode(s: string): Uint8Array {
-    const bin = atob(s);
-    const out = new Uint8Array(bin.length);
-    for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
-    return out;
-  },
-};
-
-/** FakeWS captures sent frames and lets the test play the agent + relay. */
 class FakeWS implements WSLike {
   static last: FakeWS | null = null;
-  sent: Array<Record<string, unknown>> = [];
+  sent: Record<string, unknown>[] = [];
   onopen: ((ev: unknown) => void) | null = null;
   onclose: ((ev: { code?: number }) => void) | null = null;
   onerror: ((ev: unknown) => void) | null = null;
@@ -54,387 +53,495 @@ class FakeWS implements WSLike {
   recv(frame: Record<string, unknown>): void {
     this.onmessage?.({ data: JSON.stringify(frame) });
   }
-  lastSent(): Record<string, unknown> {
-    return this.sent[this.sent.length - 1]!;
-  }
 }
-
-const PAYLOAD: PairPayload = { r: 'wss://relay.example/ws', room: 'deadbeefdeadbeef', code: 'PAIR-1' };
-
-/** pairSession runs the full handshake; returns the agent's session key + ws. */
-function pairSession(session: Session): { ws: FakeWS; agentKey: Uint8Array } {
-  const ws = FakeWS.last!;
-  ws.open();
-  // Relay tells the phone its peer (agent) is present -> phone sends pake.
-  ws.recv({ _relay: 'peer_joined' });
-  const phonePake = ws.lastSent().pake as string;
-  expect(phonePake).toBeTypeOf('string');
-
-  // Scripted agent (role A) finishes against the phone pake.
-  const agent = Handshake.newA(PAYLOAD.code);
-  const agentPake = agent.start();
-  const agentRes = agent.finish(b64.decode(phonePake));
-
-  // Deliver agent pake -> phone finishes + sends its confirm.
-  ws.recv({ pake: b64.encode(agentPake) });
-  const phoneConfirm = ws.sent.find((f) => typeof f.confirm === 'string')!.confirm as string;
-  expect(agent.confirmPeer(b64.decode(phoneConfirm))).toBe(true);
-
-  // Deliver agent confirm -> phone pairs.
-  ws.recv({ confirm: b64.encode(agentRes.confirm) });
-  return { ws, agentKey: agentRes.sessionKey };
-}
-
-function newSession(): {
-  session: Session;
-  states: SessionState[];
-  timers: Array<{ fn: () => void; ms: number }>;
-} {
+const payload = {
+  r: 'wss://relay.example/ws',
+  room: 'deadbeefdeadbeef',
+  code: 'PAIR-1',
+};
+const live: Session[] = [];
+afterEach(() => {
+  for (const s of live.splice(0)) s.close();
+});
+function newSession(
+  extra: SessionOptions = {},
+  restored?: ConstructorParameters<typeof Session>[2],
+) {
   FakeWS.last = null;
-  const states: SessionState[] = [];
-  // Capture backoff timers so reconnect tests fire the timer (which opens a FRESH
-  // socket) rather than reopening the dropped one — a stale socket's onopen is
-  // (correctly) ignored by RelayClient. heartbeat off so backoff is the only timer.
   const timers: Array<{ fn: () => void; ms: number }> = [];
-  const session = new Session(PAYLOAD, {
-    relayOptions: {
-      wsFactory: (url) => new FakeWS(url),
-      setTimer: (fn, ms) => {
-        timers.push({ fn, ms });
-        return timers.length - 1;
-      },
-      clearTimer: () => {},
-      heartbeatMs: 0,
-    },
-  });
-  session.onChange((s) => states.push(s));
-  session.start();
-  return { session, states, timers };
-}
-
-describe('Session full round trip', () => {
-  it('pairs, opens a sealed yesno request, then seals a decision the agent opens', () => {
-    const { session } = newSession();
-    const { ws, agentKey } = pairSession(session);
-
-    expect(session.getState().paired).toBe(true);
-    expect(session.getState().screen).toBe('listening');
-
-    // Agent seals a wire.Request and sends it as a box.
-    const req: Request = {
-      kind: KindRequest,
-      id: 'req_8f3a',
-      title: 'Production deploy',
-      category: 'deploy',
-      summary: 'Deploy v2.3.1 to prod?',
-      agent: 'cursor @ workstation',
-      response: { kind: 'yesno' },
-      expires_in_s: 300,
-    };
-    ws.recv({ box: boxSeal(agentKey, new TextEncoder().encode(JSON.stringify(req))) });
-
-    expect(session.getState().screen).toBe('yesno');
-    expect(session.getState().request?.id).toBe('req_8f3a');
-    expect(session.getState().agent).toBe('cursor @ workstation');
-
-    // Phone approves -> Session seals a wire.Decision the agent can open.
-    session.approve();
-    const boxOut = ws.sent.find((f) => typeof f.box === 'string')!.box as string;
-    const decision = JSON.parse(new TextDecoder().decode(boxOpen(agentKey, boxOut))) as Decision;
-    expect(decision).toEqual({ kind: 'decision', id: 'req_8f3a', result: { approved: true } });
-    expect(session.getState().screen).toBe('confirmed');
-    expect(session.getState().result?.label).toBe('Approved');
-  });
-
-  it('routes choice + text requests and seals matching decisions', () => {
-    // choice
+  const session = new Session(
+    payload,
     {
-      const { session } = newSession();
-      const { ws, agentKey } = pairSession(session);
-      const req: Request = {
-        kind: KindRequest,
-        id: 'req_c',
-        title: 'Schema drift',
-        summary: 'How to resolve?',
-        response: { kind: 'choice', options: ['Roll back', 'Merge & retry'] },
-      };
-      ws.recv({ box: boxSeal(agentKey, new TextEncoder().encode(JSON.stringify(req))) });
-      expect(session.getState().screen).toBe('choice');
-      session.choose('Merge & retry');
-      const boxOut = ws.sent.find((f) => typeof f.box === 'string')!.box as string;
-      const d = JSON.parse(new TextDecoder().decode(boxOpen(agentKey, boxOut))) as Decision;
-      expect(d.result).toEqual({ choice: 'Merge & retry' });
-    }
-    // text
-    {
-      const { session } = newSession();
-      const { ws, agentKey } = pairSession(session);
-      const req: Request = {
-        kind: KindRequest,
-        id: 'req_t',
-        title: 'Spend approval',
-        summary: 'How much?',
-        response: { kind: 'text', placeholder: 'amount', max_len: 120 },
-      };
-      ws.recv({ box: boxSeal(agentKey, new TextEncoder().encode(JSON.stringify(req))) });
-      expect(session.getState().screen).toBe('text');
-      session.reply('  up to $500  ');
-      const boxOut = ws.sent.find((f) => typeof f.box === 'string')!.box as string;
-      const d = JSON.parse(new TextDecoder().decode(boxOpen(agentKey, boxOut))) as Decision;
-      expect(d.result).toEqual({ text: 'up to $500' }); // trimmed
-    }
-  });
-
-  it('de-dupes a re-announced request by id', () => {
-    const { session } = newSession();
-    const { ws, agentKey } = pairSession(session);
-    const req: Request = {
-      kind: KindRequest,
-      id: 'req_dup',
-      title: 'T',
-      summary: 'S',
-      response: { kind: 'yesno' },
-    };
-    const sealed = boxSeal(agentKey, new TextEncoder().encode(JSON.stringify(req)));
-    ws.recv({ box: sealed });
-    session.approve(); // answered -> confirmed, id remembered
-    expect(session.getState().screen).toBe('confirmed');
-
-    // Agent re-announces the SAME id (resilience §8). It must NOT reopen.
-    const reSealed = boxSeal(agentKey, new TextEncoder().encode(JSON.stringify(req)));
-    ws.recv({ box: reSealed });
-    expect(session.getState().screen).toBe('confirmed');
-    expect(session.getState().request).toBeNull();
-  });
-
-  it('drops a box that fails authentication', () => {
-    const { session } = newSession();
-    const { ws } = pairSession(session);
-    const wrongKey = new Uint8Array(32).fill(7);
-    const req: Request = { kind: KindRequest, id: 'x', title: 'T', summary: 'S', response: { kind: 'yesno' } };
-    ws.recv({ box: boxSeal(wrongKey, new TextEncoder().encode(JSON.stringify(req))) });
-    expect(session.getState().screen).toBe('listening'); // never trusted
-  });
-
-  it('surfaces offline on an unexpected drop after pairing, then recovers', () => {
-    const { session, timers } = newSession();
-    const { ws } = pairSession(session);
-    expect(session.getState().screen).toBe('listening');
-    // Unexpected transport drop.
-    ws.close();
-    expect(session.getState().screen).toBe('offline');
-    // Reconnect: fire the backoff timer -> a FRESH socket opens -> listening.
-    timers.at(-1)!.fn();
-    FakeWS.last!.open();
-    expect(session.getState().screen).toBe('listening');
-  });
-
-  it('restores the open card after a transient reconnect (not listening)', () => {
-    const { session, timers } = newSession();
-    const { ws, agentKey } = pairSession(session);
-    const req: Request = {
-      kind: KindRequest,
-      id: 'req_open',
-      title: 'Production deploy',
-      summary: 'Deploy v2.3.1 to prod?',
-      response: { kind: 'yesno' },
-    };
-    ws.recv({ box: boxSeal(agentKey, new TextEncoder().encode(JSON.stringify(req))) });
-    expect(session.getState().screen).toBe('yesno');
-
-    // Transient drop while the card is open -> offline (key kept in RAM).
-    ws.close();
-    expect(session.getState().screen).toBe('offline');
-    expect(session.getState().request?.id).toBe('req_open');
-
-    // Reconnect: fire the backoff timer -> FRESH socket -> the pending card is
-    // restored, still answerable (not 'listening').
-    timers.at(-1)!.fn();
-    FakeWS.last!.open();
-    expect(session.getState().screen).toBe('yesno');
-    expect(session.getState().request?.id).toBe('req_open');
-  });
-
-  it('expire(id) drives an open card out of the actionable state', () => {
-    const { session } = newSession();
-    const { ws, agentKey } = pairSession(session);
-    const req: Request = {
-      kind: KindRequest,
-      id: 'req_exp',
-      title: 'T',
-      summary: 'S',
-      response: { kind: 'yesno' },
-    };
-    const sealed = boxSeal(agentKey, new TextEncoder().encode(JSON.stringify(req)));
-    ws.recv({ box: sealed });
-    expect(session.getState().screen).toBe('yesno');
-
-    session.expire('req_exp');
-    expect(session.getState().screen).toBe('listening');
-    expect(session.getState().request).toBeNull();
-
-    // A stale tick for the wrong id is a no-op.
-    session.expire('nope');
-    expect(session.getState().screen).toBe('listening');
-
-    // Re-announce of an expired id must NOT reopen the card (deduped).
-    ws.recv({ box: boxSeal(agentKey, new TextEncoder().encode(JSON.stringify(req))) });
-    expect(session.getState().screen).toBe('listening');
-    expect(session.getState().request).toBeNull();
-  });
-
-  it('approve/decline/choose/reply are no-ops once the request has cleared (deferred-swipe wrong-target guard)', () => {
-    const { session } = newSession();
-    const { ws, agentKey } = pairSession(session);
-    const req: Request = {
-      kind: KindRequest,
-      id: 'req_gone',
-      title: 'T',
-      summary: 'S',
-      response: { kind: 'yesno' },
-    };
-    ws.recv({ box: boxSeal(agentKey, new TextEncoder().encode(JSON.stringify(req))) });
-    expect(session.getState().screen).toBe('yesno');
-
-    // The request clears (expiry, or the user switched agent) BEFORE the 330ms
-    // swipe-commit timer fires. The late approve() must NOT seal anything — a
-    // decision sealed here would carry a stale/foreign id or throw.
-    session.expire('req_gone');
-    expect(session.getState().request).toBeNull();
-    const sentBefore = ws.sent.filter((f) => typeof f.box === 'string').length;
-
-    expect(() => session.approve()).not.toThrow();
-    expect(() => session.decline()).not.toThrow();
-    expect(() => session.choose('x')).not.toThrow();
-    expect(() => session.reply('y')).not.toThrow();
-    expect(ws.sent.filter((f) => typeof f.box === 'string')).toHaveLength(sentBefore);
-    expect(session.getState().screen).toBe('listening');
-  });
-
-  it('goes offline when the agent leaves while a card is open', () => {
-    const { session } = newSession();
-    const { ws, agentKey } = pairSession(session);
-    const req: Request = {
-      kind: KindRequest,
-      id: 'req_left',
-      title: 'T',
-      summary: 'S',
-      response: { kind: 'yesno' },
-    };
-    ws.recv({ box: boxSeal(agentKey, new TextEncoder().encode(JSON.stringify(req))) });
-    expect(session.getState().screen).toBe('yesno');
-
-    ws.recv({ _relay: 'peer_left' });
-    expect(session.getState().peerPresent).toBe(false);
-    expect(session.getState().screen).toBe('offline'); // card no longer actionable
-  });
-
-  it('restores an unanswered card when only the agent reconnects and authenticates its re-announce', () => {
-    const { session } = newSession();
-    const { ws, agentKey } = pairSession(session);
-    const req: Request = { kind: KindRequest, id: 'agent_returns', title: 'T', summary: 'S', response: { kind: 'text' } };
-    const sealed = boxSeal(agentKey, new TextEncoder().encode(JSON.stringify(req)));
-    ws.recv({ box: sealed });
-    const original = session.getState().request;
-    ws.recv({ _relay: 'peer_left' });
-    ws.recv({ _relay: 'peer_joined' });
-    expect(session.getState().screen).toBe('offline'); // relay presence alone is not authentication
-    ws.recv({ box: sealed });
-    expect(session.getState().screen).toBe('text');
-    expect(session.getState().request).toBe(original); // preserve the exact active request
-    session.close();
-  });
-
-  it('does not restore an expired request when its agent returns', () => {
-    const { session } = newSession();
-    const { ws, agentKey } = pairSession(session);
-    const req: Request = { kind: KindRequest, id: 'expired_returns', title: 'T', summary: 'S', response: { kind: 'yesno' } };
-    const sealed = boxSeal(agentKey, new TextEncoder().encode(JSON.stringify(req)));
-    ws.recv({ box: sealed });
-    ws.recv({ _relay: 'peer_left' });
-    session.expire(req.id);
-    ws.recv({ _relay: 'peer_joined' });
-    ws.recv({ box: sealed });
-    expect(session.getState().request).toBeNull();
-    expect(session.getState().screen).toBe('listening');
-    session.close();
-  });
-
-  it('stops a failed handshake and retains a visible failure for a fresh attempt', () => {
-    const { session, timers } = newSession();
-    const ws = FakeWS.last!;
-    ws.open();
-    ws.recv({ _relay: 'peer_joined' });
-    ws.recv({ pake: 'invalid-pake' });
-    expect(session.getState().paired).toBe(false);
-    expect(session.getSessionKey()).toBeUndefined();
-    expect(session.getState().pairError).toBeTruthy();
-    expect(session.getState().screen).toBe('pair');
-    expect(session.getState().conn).toBe('closed');
-    expect(timers).toHaveLength(0); // a failed single-shot handshake cannot reconnect itself
-    session.close();
-  });
-
-  it('does NOT show confirmed when the decision send drops; keeps card answerable + resend accepted', () => {
-    const { session, timers } = newSession();
-    const { ws, agentKey } = pairSession(session);
-    const req: Request = {
-      kind: KindRequest,
-      id: 'req_drop',
-      title: 'T',
-      summary: 'S',
-      response: { kind: 'yesno' },
-    };
-    ws.recv({ box: boxSeal(agentKey, new TextEncoder().encode(JSON.stringify(req))) });
-    expect(session.getState().screen).toBe('yesno');
-
-    // Socket drops between rendering the card and the user approving -> offline,
-    // request kept in RAM (so the card stays answerable on reconnect).
-    ws.close();
-    expect(session.getState().screen).toBe('offline');
-    expect(session.getState().request?.id).toBe('req_drop');
-
-    // User approves on the dropped socket: relay.state !== 'open' so sendBox
-    // returns false. We must NOT claim 'sent' and must NOT remember the id.
-    session.approve();
-    expect(session.getState().screen).not.toBe('confirmed');
-    expect(session.getState().result).toBeNull();
-
-    // Resend must still be accepted: reconnect, then the agent re-announces the
-    // SAME id -> the card reopens (id was NOT added to seenIDs).
-    timers.at(-1)!.fn();
-    FakeWS.last!.open();
-    FakeWS.last!.recv({ box: boxSeal(agentKey, new TextEncoder().encode(JSON.stringify(req))) });
-    expect(session.getState().screen).toBe('yesno');
-    expect(session.getState().request?.id).toBe('req_drop');
-  });
-
-  it('stores + reports the agent VAPID key on a sealed vapid_key frame', () => {
-    FakeWS.last = null;
-    const keys: string[] = [];
-    const session = new Session(PAYLOAD, {
+      deviceKeyLoader,
       relayOptions: {
-        wsFactory: (url) => new FakeWS(url),
-        setTimer: () => 0,
+        wsFactory: (u) => new FakeWS(u),
+        setTimer: (fn, ms) => {
+          timers.push({ fn, ms });
+          return timers.length - 1;
+        },
         clearTimer: () => {},
         heartbeatMs: 0,
       },
-      onVapidKey: (pub) => keys.push(pub),
-    });
-    session.start();
-    const { ws, agentKey } = pairSession(session);
+      ...extra,
+    },
+    restored,
+  );
+  live.push(session);
+  session.start();
+  return { session, timers };
+}
+async function paired(extra: SessionOptions = {}) {
+  const { session, timers } = newSession(extra);
+  const peer = await pairAgent(() => FakeWS.last, payload.code, payload.room);
+  expect(session.getState().paired).toBe(true);
+  return { session, timers, ...peer };
+}
+const req = (
+  id = 'r1',
+  response: Request['response'] = { kind: 'yesno' },
+): Request => ({
+  kind: 'request',
+  id,
+  title: 'Deploy?',
+  summary: 'Deploy the reviewed build to production.',
+  agent: 'my agent',
+  response,
+});
+async function rawAck(
+  ws: FakeWS,
+  peer: TestPeer,
+  d: Decision,
+  status: Ack['status'] = 'accepted',
+  signer = peer.signer,
+  patch: Partial<Ack> = {},
+) {
+  const a: Ack = {
+    kind: 'ack',
+    protocol: PROTOCOL,
+    room: peer.room,
+    id: d.id,
+    request_hash: d.request_hash!,
+    decision_hash: decisionHash(d),
+    status,
+    sig: '',
+    ...patch,
+  };
+  a.sig = await signer.sign(ackSigningMessage(a));
+  ws.recv({ box: seal(peer.key, new TextEncoder().encode(JSON.stringify(a))) });
+  await settle();
+  return a;
+}
 
-    expect(session.getVapidKey()).toBeUndefined(); // none until the agent sends one
-
-    // Agent seals its VAPID PUBLIC key; the phone stores it + fires onVapidKey so
-    // the App subscribes for Web Push with EXACTLY this key (signer == subscribe).
-    const pub = 'BPublicVapidKeyAgentDeliveredBase64Url';
-    ws.recv({ box: boxSeal(agentKey, encodeVapidKey(pub)) });
-
-    expect(session.getVapidKey()).toBe(pub);
-    expect(keys).toEqual([pub]);
-    // A vapid_key frame is not a request: the UI stays on listening, no card.
-    expect(session.getState().screen).toBe('listening');
+describe('authenticated Session protocol', () => {
+  it('waits for a verified matching receipt before reporting acceptance', async () => {
+    const { session, ws, agentKey } = await paired();
+    const r = req();
+    await sendReq(ws, agentKey, r);
+    expect(session.getState().screen).toBe('yesno');
+    session.approve();
+    await until(() => decisions(ws, agentKey).length);
+    expect(session.getState().screen).toBe('pending');
+    expect(session.getState().result).toBeNull();
+    const d = await acknowledge(ws, agentKey);
+    expect(d.result).toEqual({ approved: true });
+    expect(d.request_hash).toBe(requestHash(r));
+    expect(session.getState().screen).toBe('confirmed');
+    expect(session.getState().result?.label).toBe('Answer received by agent');
     expect(session.getState().request).toBeNull();
+  });
+  it('preserves signed false, empty text, Unicode, and whitespace exactly', async () => {
+    for (const [response, answer, result] of [
+      [{ kind: 'yesno' }, (s: Session) => s.decline(), { approved: false }],
+      [
+        { kind: 'choice', options: ['Stop', 'Go 🧭'] },
+        (s: Session) => s.choose('Go 🧭'),
+        { choice: 'Go 🧭' },
+      ],
+      [
+        { kind: 'text', max_len: 3 },
+        (s: Session) => s.reply('😀😀😀'),
+        { text: '😀😀😀' },
+      ],
+      [{ kind: 'text' }, (s: Session) => s.reply(''), {}],
+      [
+        { kind: 'text' },
+        (s: Session) => s.reply('  yes\n '),
+        { text: '  yes\n ' },
+      ],
+    ] as const) {
+      const { session, ws, agentKey } = await paired();
+      await sendReq(ws, agentKey, req('r1', response as Request['response']));
+      answer(session);
+      const d = await acknowledge(ws, agentKey);
+      if ('text' in result) expect(d.result.text).toBe(result.text);
+      else if (Object.keys(result).length === 0)
+        expect(d.result.text ?? '').toBe('');
+      else expect(d.result).toEqual(result);
+      expect(session.getState().screen).toBe('confirmed');
+      session.close();
+    }
+  });
+  it('rejects a copied-session-key attacker changing every displayed request field', async () => {
+    const { session, ws, agentKey } = await paired();
+    const original = await signRequest(agentKey, {
+      ...req(),
+      category: 'deploy',
+      expires_in_s: 300,
+    });
+    const changes: Array<(r: Request) => void> = [
+      (r) => {
+        r.title += ' yes';
+      },
+      (r) => {
+        r.summary = 'Transfer money';
+      },
+      (r) => {
+        r.agent = 'trusted';
+      },
+      (r) => {
+        r.category = 'cash';
+      },
+      (r) => {
+        r.id = 'another';
+      },
+      (r) => {
+        r.room = '0123456789abcdef';
+      },
+      (r) => {
+        r.protocol = 1;
+      },
+      (r) => {
+        r.deadline_ms! += 1;
+      },
+      (r) => {
+        r.expires_in_s = 86400;
+      },
+      (r) => {
+        r.response = { kind: 'text', placeholder: 'type yes', max_len: 1 };
+      },
+    ];
+    for (const change of changes) {
+      const changed = structuredClone(original);
+      change(changed);
+      ws.recv({
+        box: seal(agentKey, new TextEncoder().encode(JSON.stringify(changed))),
+      });
+      await settle();
+      expect(session.getState().request).toBeNull();
+    }
+    ws.recv(await sealReq(agentKey, original));
+    await until(() => session.getState().request);
+    expect(session.getState().request?.summary).toBe(original.summary);
+  });
+  it('binds all choice and text schema fields before showing them', async () => {
+    for (const response of [
+      { kind: 'choice', options: ['Stop', 'Go'] },
+      { kind: 'text', placeholder: 'Reason', max_len: 10 },
+    ] as Request['response'][]) {
+      const { session, ws, agentKey } = await paired();
+      const original = await signRequest(agentKey, req('schema', response));
+      for (const altered of [
+        { kind: 'yesno' },
+        { kind: 'choice', options: ['Go', 'Stop'] },
+        { kind: 'text', placeholder: 'Approve now', max_len: 4096 },
+      ] as Request['response'][]) {
+        ws.recv({
+          box: seal(
+            agentKey,
+            new TextEncoder().encode(
+              JSON.stringify({ ...original, response: altered }),
+            ),
+          ),
+        });
+        await settle();
+        expect(session.getState().request).toBeNull();
+      }
+      session.close();
+    }
+  });
+  it('rejects forged, cross-room, cross-result and cross-request acceptance receipts', async () => {
+    const { session, ws, agentKey, peer } = await paired();
+    await sendReq(ws, agentKey, req());
+    session.approve();
+    await until(() => decisions(ws, agentKey).length);
+    const d = decisions(ws, agentKey)[0]!,
+      attacker = await makeSigner();
+    await rawAck(ws, peer, d, 'accepted', attacker);
+    expect(session.getState().screen).toBe('pending');
+    for (const patch of [
+      { room: '0123456789abcdef' },
+      { id: 'other' },
+      { request_hash: decisionHash(d) },
+      { decision_hash: d.request_hash! },
+      { protocol: 1 },
+    ]) {
+      await rawAck(ws, peer, d, 'accepted', peer.signer, patch);
+      expect(session.getState().screen).toBe('pending');
+    }
+    await acknowledge(ws, agentKey);
+    expect(session.getState().screen).toBe('confirmed');
+  });
+  it('retries the exact pending signature without authorizing a second answer', async () => {
+    const { session, ws, agentKey } = await paired();
+    const r = req();
+    await sendReq(ws, agentKey, r);
+    session.approve();
+    session.decline();
+    await until(() => decisions(ws, agentKey).length);
+    const first = decisions(ws, agentKey)[0]!;
+    expect(decisions(ws, agentKey)).toHaveLength(1);
+    await sendReq(ws, agentKey, r);
+    await sendReq(ws, agentKey, r);
+    await until(() => decisions(ws, agentKey).length >= 3);
+    expect(
+      decisions(ws, agentKey).every(
+        (d) => JSON.stringify(d) === JSON.stringify(first),
+      ),
+    ).toBe(true);
+    expect(session.getState().screen).toBe('pending');
+    await acknowledge(ws, agentKey);
+    expect(session.getState().screen).toBe('confirmed');
+  });
+  it('keeps expired or unacknowledged answers distinct from success', async () => {
+    for (const status of ['expired', 'unknown'] as const) {
+      const { session, ws, agentKey } = await paired();
+      await sendReq(ws, agentKey, req());
+      session.approve();
+      await acknowledge(ws, agentKey, status);
+      expect(session.getState().screen).toBe('pending');
+      expect(session.getState().result).toBeNull();
+      expect(session.getState().delivery).toBe(
+        status === 'expired' ? 'expired' : 'uncertain',
+      );
+      session.close();
+    }
+  });
+  it('preserves pending answer and fixed deadline across page reload', async () => {
+    const first = await paired();
+    const r = { ...req(), deadline_ms: Date.now() + 30000 };
+    await sendReq(first.ws, first.agentKey, r);
+    first.session.decline();
+    await until(() => decisions(first.ws, first.agentKey).length);
+    const saved = { key: first.agentKey, ...first.session.persistState() };
+    const pending = decisions(first.ws, first.agentKey)[0]!;
+    first.session.close();
+    const { session } = newSession({}, saved);
+    await until(() => FakeWS.last);
+    const ws = FakeWS.last!;
+    ws.open();
+    await until(() => decisions(ws, first.agentKey).length);
+    expect(session.getState().screen).toBe('pending');
+    expect(session.getState().request?.deadline_ms).toBe(r.deadline_ms);
+    expect(decisions(ws, first.agentKey)[0]).toEqual(pending);
+    await acknowledge(ws, first.agentKey);
+    expect(session.getState().result?.approved).toBe(false);
+  });
+  it('preserves an unanswered card across reconnect and reload without resetting its deadline', async () => {
+    let now = Date.now();
+    const first = await paired({ now: () => now });
+    const r = { ...req(), deadline_ms: now + 2000 };
+    await sendReq(first.ws, first.agentKey, r);
+    first.ws.recv({ _relay: 'peer_left' });
+    expect(first.session.getState().screen).toBe('offline');
+    now += 1000;
+    first.ws.recv({ _relay: 'peer_joined' });
+    expect(first.session.getState().screen).toBe('offline');
+    await sendReq(first.ws, first.agentKey, r);
+    expect(first.session.getState().screen).toBe('yesno');
+    expect(first.session.getState().request?.deadline_ms).toBe(r.deadline_ms);
+    const saved = { key: first.agentKey, ...first.session.persistState() };
+    first.session.close();
+    const { session } = newSession({ now: () => now }, saved);
+    await until(() => FakeWS.last);
+    FakeWS.last!.open();
+    expect(session.getState().request?.deadline_ms).toBe(r.deadline_ms);
+    now += 2000;
+    session.approve();
+    expect(session.getState().request).toBeNull();
+    expect(decisions(FakeWS.last!, first.agentKey)).toHaveLength(0);
+    now -= 60000;
+    await sendReq(FakeWS.last!, first.agentKey, r);
+    expect(session.getState().request).toBeNull();
+  });
+  it('keeps a too-large encoded Unicode answer editable and unsent', async () => {
+    const { session, ws, agentKey } = await paired();
+    await sendReq(ws, agentKey, req('huge', { kind: 'text', max_len: 4096 }));
+    session.reply('😀'.repeat(4096));
+    await settle();
+    expect(session.getState().screen).toBe('text');
+    expect(session.getState().answerError).toContain('too large');
+    expect(decisions(ws, agentKey)).toHaveLength(0);
+    expect(Object.keys(session.persistState().decisions ?? {})).toHaveLength(0);
+  });
+  it('checks expiry again after asynchronous device signing', async () => {
+    let now = Date.now(),
+      release: () => void = () => {};
+    const device = await deviceKeyLoader();
+    const gate = new Promise<void>((r) => {
+      release = r;
+    });
+    const wrapped = {
+      ...device,
+      sign: async (msg: Uint8Array<ArrayBuffer>) => {
+        if (new TextDecoder().decode(msg).includes('aah:decision:v2'))
+          await gate;
+        return device.sign(msg);
+      },
+    };
+    const { session, ws, agentKey } = await paired({
+      now: () => now,
+      deviceKeyLoader: async () => wrapped,
+    });
+    await sendReq(ws, agentKey, { ...req(), deadline_ms: now + 10 });
+    session.approve();
+    expect(session.getState().delivery).toBe('signing');
+    now += 20;
+    release();
+    await settle();
+    expect(decisions(ws, agentKey)).toHaveLength(0);
+    expect(session.getState().request).toBeNull();
+  });
+  it('never submits a deferred answer after the request cleared or session closed', async () => {
+    const { session, ws, agentKey } = await paired();
+    await sendReq(ws, agentKey, req());
+    session.expire('r1');
+    session.approve();
+    session.decline();
+    session.choose('x');
+    session.reply('y');
+    await settle();
+    expect(decisions(ws, agentKey)).toHaveLength(0);
+    session.close();
+    await settle();
+    expect(decisions(ws, agentKey)).toHaveLength(0);
+  });
+  it('does not let an expired re-announcement reopen a card', async () => {
+    const { session, ws, agentKey } = await paired();
+    const r = req();
+    await sendReq(ws, agentKey, r);
+    session.expire(r.id);
+    ws.recv({ _relay: 'peer_left' });
+    ws.recv({ _relay: 'peer_joined' });
+    await sendReq(ws, agentKey, r);
+    expect(session.getState().request).toBeNull();
+  });
+  it('keeps a dropped decision write uncertain and retries the same answer on reconnect', async () => {
+    const { session, ws, agentKey, timers } = await paired();
+    await sendReq(ws, agentKey, req());
+    ws.close();
+    session.approve();
+    await settle();
+    expect(session.getState().screen).toBe('pending');
+    expect(session.getState().delivery).toBe('uncertain');
+    expect(session.getState().result).toBeNull();
+    timers[0]!.fn();
+    const fresh = FakeWS.last!;
+    fresh.open();
+    await until(() => decisions(fresh, agentKey).length);
+    await acknowledge(fresh, agentKey);
+    expect(session.getState().screen).toBe('confirmed');
+  });
+  it('drops unauthenticated, duplicate-key and malformed Unicode requests', async () => {
+    const { session, ws, agentKey } = await paired();
+    const r = await signRequest(agentKey, req());
+    const raw = JSON.stringify(r);
+    for (const text of [
+      raw.replace('"title":', '"title":"different","title":'),
+      raw.replace('"title":"Deploy?"', '"title":"\\ud800"'),
+      raw.replace('"protocol":2', '"protocol":2e0'),
+    ]) {
+      ws.recv({ box: seal(agentKey, new TextEncoder().encode(text)) });
+      await settle();
+      expect(session.getState().request).toBeNull();
+    }
+    ws.recv({ box: seal(new Uint8Array(32), new TextEncoder().encode(raw)) });
+    await settle();
+    expect(session.getState().request).toBeNull();
+  });
+  it('requires the paired agent identity for VAPID updates', async () => {
+    const keys: string[] = [];
+    const { session, ws, agentKey } = await paired({
+      onVapidKey: (v) => keys.push(v),
+    });
+    ws.recv({
+      box: seal(
+        agentKey,
+        new TextEncoder().encode(
+          JSON.stringify({
+            kind: 'vapid_key',
+            protocol: 2,
+            room: payload.room,
+            public_key: 'attacker',
+            sig: '',
+          }),
+        ),
+      ),
+    });
+    await settle();
+    expect(keys).toEqual([]);
+    await sendVapid(ws, agentKey, 'real-public-key');
+    expect(keys).toEqual(['real-public-key']);
+    expect(session.getVapidKey()).toBe('real-public-key');
+  });
+  it('device-signs subscriptions and reports asynchronous delivery failure', async () => {
+    const { session, ws, agentKey, peer } = await paired();
+    const sub: PushSubscription = {
+      endpoint: 'https://web.push.apple.com/sub',
+      keys: { p256dh: 'a', auth: 'b' },
+    };
+    expect(await session.sendPushSubscription(sub)).toBe(true);
+    const ps = JSON.parse(
+      new TextDecoder().decode(
+        open(
+          agentKey,
+          ws.sent.find((f) => typeof f.box === 'string')!.box as string,
+        ),
+      ),
+    );
+    expect(await verify(peer.phone, pushSigningMessage(ps), ps.sig)).toBe(true);
+    expect(ps.subscription).toEqual(sub);
+    session.close();
+    expect(await session.sendPushSubscription(sub)).toBe(false);
+  });
+  it('fails closed when secure signing is unavailable', async () => {
+    const { session } = newSession({ deviceKeyLoader: async () => null });
+    await until(() => session.getState().pairError);
+    expect(FakeWS.last).toBeNull();
+    expect(session.getState().paired).toBe(false);
+    expect(session.getState().pairError).toContain(
+      'start_pairing with reset:true',
+    );
+  });
+  it('preserves legacy saved entries with actionable upgrade guidance', async () => {
+    const key = new Uint8Array(32);
+    const { session } = newSession({}, { key, agent: 'old agent' });
+    await until(() => session.getState().pairError);
+    expect(FakeWS.last).toBeNull();
+    expect(session.getSessionKey()).toEqual(key);
+    expect(session.getState().agent).toBe('old agent');
+    expect(session.getState().pairError).toContain('upgrade');
+  });
+  it('requires repair if a restored pairing lost its pinned device signer', async () => {
+    const p = await paired();
+    const saved = { key: p.agentKey, ...p.session.persistState() };
+    p.session.close();
+    const other = await makeSigner();
+    const { session } = newSession(
+      { deviceKeyLoader: async () => other },
+      saved,
+    );
+    await until(() => session.getState().pairError);
+    expect(FakeWS.last).toBeNull();
+    expect(session.getState().pairError).toContain('signing key');
+  });
+  it('stops transport retries after a legacy or malformed pairing hello', async () => {
+    const { session } = newSession();
+    await until(() => FakeWS.last);
+    FakeWS.last!.open();
+    FakeWS.last!.recv({ _relay: 'peer_joined' });
+    FakeWS.last!.recv({ pake: 'invalid-pake' });
+    await until(() => session.getState().pairError);
+    expect(session.getState().paired).toBe(false);
+    expect(session.getState().pairError).toContain('Update the agent');
   });
 });

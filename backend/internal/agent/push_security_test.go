@@ -41,9 +41,13 @@ func TestPushRejectsLoopbackEndpoint(t *testing.T) {
 	priv, pub, err := webpush.GenerateVAPIDKeys()
 	require.NoError(t, err)
 	sub := wire.PushSubscription{Endpoint: srv.URL + "/internal-admin", Keys: wire.PushKeys{P256dh: testP256dh, Auth: testAuth}}
-	raw, err := json.Marshal(wire.PushSub{Kind: wire.KindPushSub, Subscription: sub})
+	phone := newDeviceSigner(t)
+	ps := wire.PushSub{Kind: wire.KindPushSub, Protocol: wire.Protocol, Room: testRoom, Subscription: sub}
+	ps.Sig, err = wire.Sign(phone.priv, wire.PushSigningMessage(ps))
 	require.NoError(t, err)
-	a := &Agent{vapidPriv: priv, vapidPub: pub, vapidSub: defaultVAPIDSubject}
+	raw, err := json.Marshal(ps)
+	require.NoError(t, err)
+	a := &Agent{vapidPriv: priv, vapidPub: pub, vapidSub: defaultVAPIDSubject, sess: &Session{protocol: wire.Protocol, roomID: testRoom, devicePub: &phone.priv.PublicKey}}
 	a.absorbPush(raw)
 	err = a.Notify(context.Background())
 	require.Zero(t, posts.Load(), "an authenticated subscription must not cause a POST to loopback; Notify: %v", err)
@@ -96,10 +100,15 @@ func TestPushEndpointProviderPolicy(t *testing.T) {
 }
 
 func TestPushInvalidUpdatePreservesWorkingSubscription(t *testing.T) {
-	a := &Agent{}
+	phone := newDeviceSigner(t)
+	a := &Agent{sess: &Session{protocol: wire.Protocol, roomID: testRoom, devicePub: &phone.priv.PublicKey}}
 	accept := func(endpoint string) {
 		t.Helper()
-		raw, err := json.Marshal(wire.PushSub{Kind: wire.KindPushSub, Subscription: wire.PushSubscription{Endpoint: endpoint}})
+		ps := wire.PushSub{Kind: wire.KindPushSub, Protocol: wire.Protocol, Room: testRoom, Subscription: wire.PushSubscription{Endpoint: endpoint}}
+		var err error
+		ps.Sig, err = wire.Sign(phone.priv, wire.PushSigningMessage(ps))
+		require.NoError(t, err)
+		raw, err := json.Marshal(ps)
 		require.NoError(t, err)
 		require.True(t, a.absorbPush(raw))
 	}

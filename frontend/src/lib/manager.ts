@@ -11,15 +11,20 @@
 // Sessions stay single-room and sibling-unaware (minimum divergence per
 // ADR 0007); all multi-agent logic lives here. No relay/crypto/wire change.
 
-import { b64Decode, b64Encode } from './b64.ts';
-import type { ConnState } from './relay.ts';
-import type { PairPayload } from './payload.ts';
-import type { Persistence, StoredSession } from './store.ts';
-import type { PushSubscription } from './wire.ts';
-import { Session, type SessionOptions, type SessionState, initialState } from './session.ts';
+import { b64Decode, b64Encode } from "./b64.ts";
+import type { ConnState } from "./relay.ts";
+import type { PairPayload } from "./payload.ts";
+import type { Persistence, StoredSession } from "./store.ts";
+import type { PushSubscription } from "./wire.ts";
+import {
+  Session,
+  type SessionOptions,
+  type SessionState,
+  initialState,
+} from "./session.ts";
 
 /** AgentStatus is the roster dot color source. */
-export type AgentStatus = 'paired' | 'connecting' | 'offline' | 'waiting';
+export type AgentStatus = "paired" | "connecting" | "offline" | "waiting";
 
 /** AgentSummary is one roster chip's data (insertion order). */
 export interface AgentSummary {
@@ -31,7 +36,7 @@ export interface AgentSummary {
   active: boolean;
 }
 
-const CARD_SCREENS: ReadonlySet<string> = new Set(['yesno', 'choice', 'text']);
+const CARD_SCREENS: ReadonlySet<string> = new Set(["yesno", "choice", "text"]);
 
 interface Entry {
   session: Session;
@@ -43,6 +48,8 @@ interface Entry {
   lastReqID: string | null;
   /** whether the retained push subscription has been delivered to this session. */
   pushSent: boolean;
+  pushEpoch: number;
+  pushInFlight: Promise<boolean> | null;
   /** sub is this room's OWN subscription, produced under its agent's VAPID key
    *  (sendPushSubscriptionTo). Retained even when the write fails — the next
    *  open transition delivers it — and it always wins over the fanout lastSub
@@ -61,7 +68,7 @@ interface Entry {
 export class SessionManager {
   private readonly entries = new Map<string, Entry>();
   private readonly order: string[] = []; // insertion order for list()
-  private active = '';
+  private active = "";
   private readonly listeners = new Set<(m: SessionManager) => void>();
   // lastSub is the phone's most recent Web Push subscription, retained so an
   // agent added AFTER the phone subscribed still receives it (fanout on add).
@@ -70,7 +77,8 @@ export class SessionManager {
   // agent delivers its VAPID public key, the App subscribes with exactly that
   // key and delivers the resulting subscription back to THAT room (room A's key
   // must produce the subscription sent to room A — never cross-wired).
-  private vapidKeyHandler: ((publicKey: string, room: string) => void) | null = null;
+  private vapidKeyHandler: ((publicKey: string, room: string) => void) | null =
+    null;
 
   /**
    * persist, when given, stores every paired session's restorable state (relay
@@ -124,13 +132,18 @@ export class SessionManager {
     let n = 0;
     for (const s of this.persist.load()) {
       if (this.entries.has(s.room)) continue;
-      const payload: PairPayload = { r: s.r, room: s.room, code: '' };
+      const payload: PairPayload = { r: s.r, room: s.room, code: "" };
       const session = new Session(payload, this.sessionOpts(s.room), {
         key: b64Decode(s.key),
         agent: s.agent,
         vapid: s.vapid,
         seen: s.seen,
         decisions: s.decisions,
+        protocol: s.protocol,
+        agentSigner: s.agentSigner,
+        deviceSigner: s.deviceSigner,
+        request: s.request,
+        receipts: s.receipts,
       });
       this.attach(s.room, s.r, session);
       n += 1;
@@ -162,8 +175,10 @@ export class SessionManager {
       unread: 0,
       lastReqID: null,
       pushSent: false,
+      pushEpoch: 0,
+      pushInFlight: null,
       sub: null,
-      conn: 'closed',
+      conn: "closed",
     };
     entry.unsub = session.onChange(() => this.onSessionChange(room));
     this.entries.set(room, entry);
@@ -184,7 +199,7 @@ export class SessionManager {
     this.entries.delete(room);
     const i = this.order.indexOf(room);
     if (i >= 0) this.order.splice(i, 1);
-    if (this.active === room) this.active = this.order[0] ?? '';
+    if (this.active === room) this.active = this.order[0] ?? "";
     this.persistAll(); // removal is the user's "forget this agent": wipe its key
     this.emit();
   }
@@ -199,14 +214,16 @@ export class SessionManager {
       const s = entry.session.getState();
       return {
         id: room,
-        label: s.agent && s.agent !== 'your agent' ? s.agent : room.slice(0, 4),
+        label: s.agent && s.agent !== "your agent" ? s.agent : room.slice(0, 4),
         status: statusOf(s),
         unread: entry.unread,
         hasRequest: s.request != null,
         active: room === this.active,
       };
     });
-    return summaries.sort((a, b) => Number(b.hasRequest) - Number(a.hasRequest));
+    return summaries.sort(
+      (a, b) => Number(b.hasRequest) - Number(a.hasRequest),
+    );
   }
 
   /** pendingCount returns how many paired agents currently have an unanswered
@@ -265,7 +282,7 @@ export class SessionManager {
   /** activeState returns the active session's snapshot, or the pre-pair state. */
   activeState(): SessionState {
     const entry = this.active ? this.entries.get(this.active) : undefined;
-    if (!entry) return { ...initialState(), screen: 'pair' };
+    if (!entry) return { ...initialState(), screen: "pair" };
     return entry.session.getState();
   }
 
@@ -314,17 +331,18 @@ export class SessionManager {
    *  add). A room that already holds its OWN agent-keyed sub is skipped: that
    *  sub always wins (the fanout sub was produced under a different key and the
    *  agent's pushes against it would be rejected 403). */
-  sendPushSubscription(sub: PushSubscription): boolean {
+  async sendPushSubscription(sub: PushSubscription): Promise<boolean> {
     this.lastSub = sub;
-    let any = false;
-    for (const entry of this.entries.values()) {
-      if (entry.sub) continue; // the room's own agent-keyed sub always wins
-      if (entry.session.sendPushSubscription(sub)) {
-        entry.pushSent = true;
-        any = true;
-      }
-    }
-    return any;
+    const results = await Promise.all(
+      Array.from(this.entries.values())
+        .filter((entry) => !entry.sub)
+        .map((entry) => {
+          entry.pushSent = false;
+          entry.pushEpoch++;
+          return this.deliverPush(entry, sub);
+        }),
+    );
+    return results.some(Boolean);
   }
 
   /**
@@ -336,13 +354,43 @@ export class SessionManager {
    * rejected. Retained even when the write fails (page restore races the socket
    * open): the open transition in onSessionChange is the retry that delivers it.
    */
-  sendPushSubscriptionTo(room: string, sub: PushSubscription): boolean {
+  async sendPushSubscriptionTo(
+    room: string,
+    sub: PushSubscription,
+  ): Promise<boolean> {
     const entry = this.entries.get(room);
     if (!entry) return false;
-    entry.sub = sub;
-    const sent = entry.session.sendPushSubscription(sub);
-    entry.pushSent = sent;
-    return sent;
+    if (entry.sub !== sub) {
+      entry.sub = sub;
+      entry.pushSent = false;
+      entry.pushEpoch++;
+    }
+    return this.deliverPush(entry, sub);
+  }
+
+  private deliverPush(entry: Entry, sub: PushSubscription): Promise<boolean> {
+    if (entry.pushSent) return Promise.resolve(true);
+    if (entry.pushInFlight)
+      return entry.pushInFlight.then(() => {
+        if (entry.sub && entry.sub !== sub) return false;
+        return entry.pushSent || this.deliverPush(entry, sub);
+      });
+    const epoch = entry.pushEpoch;
+    const pending = entry.session
+      .sendPushSubscription(sub)
+      .then((sent) => {
+        const room = entry.session.getState().roomID;
+        if (this.entries.get(room) !== entry || entry.pushEpoch !== epoch)
+          return false;
+        entry.pushSent = sent;
+        return sent;
+      })
+      .catch(() => false)
+      .finally(() => {
+        if (entry.pushInFlight === pending) entry.pushInFlight = null;
+      });
+    entry.pushInFlight = pending;
+    return pending;
   }
 
   /** closeAll tears down every session (unmount). */
@@ -353,7 +401,7 @@ export class SessionManager {
     }
     this.entries.clear();
     this.order.length = 0;
-    this.active = '';
+    this.active = "";
   }
 
   // --- internals -----------------------------------------------------------
@@ -384,7 +432,10 @@ export class SessionManager {
       // re-delivered below. Idempotent on the agent (it just overwrites a.sub, see
       // ADR 0022), so a redundant re-send is harmless.
       const conn = entry.session.getState().conn;
-      if (conn === 'open' && entry.conn !== 'open') entry.pushSent = false;
+      if (conn === "open" && entry.conn !== "open") {
+        entry.pushSent = false;
+        entry.pushEpoch++;
+      }
       entry.conn = conn;
       // Deliver the room's retained subscription once this agent is paired (and
       // again after each re-arm) — an agent added after the phone subscribed has
@@ -392,9 +443,8 @@ export class SessionManager {
       // always wins; the build-key fanout sub (lastSub) covers only rooms whose
       // agent never sent a key.
       const sub = entry.sub ?? this.lastSub;
-      if (sub && !entry.pushSent && entry.session.sendPushSubscription(sub)) {
-        entry.pushSent = true;
-      }
+      if (sub && !entry.pushSent && !entry.pushInFlight)
+        void this.deliverPush(entry, sub);
       const s = entry.session.getState();
       const reqID = s.request?.id ?? null;
       const isCard = s.request != null && CARD_SCREENS.has(s.screen);
@@ -427,15 +477,14 @@ export class SessionManager {
       if (!entry) continue;
       const key = entry.session.getSessionKey();
       if (!key) continue; // not paired yet: nothing restorable
-      const { seen, decisions } = entry.session.persistState();
+      const protocolState = entry.session.persistState();
       list.push({
         r: entry.r,
         room,
         key: b64Encode(key),
         agent: entry.session.getState().agent,
         vapid: entry.session.getVapidKey(),
-        seen,
-        decisions,
+        ...protocolState,
       });
     }
     this.persist.save(list);
@@ -454,7 +503,7 @@ export class SessionManager {
 
 /** statusOf maps a SessionState to a roster status (reuses conn/paired truth). */
 function statusOf(s: SessionState): AgentStatus {
-  if (s.paired) return s.conn === 'open' ? 'paired' : 'offline';
-  if (s.conn === 'connecting' || s.conn === 'open') return 'connecting';
-  return 'waiting';
+  if (s.paired) return s.conn === "open" ? "paired" : "offline";
+  if (s.conn === "connecting" || s.conn === "open") return "connecting";
+  return "waiting";
 }

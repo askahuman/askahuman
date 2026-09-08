@@ -14,14 +14,9 @@ package agent
 import (
 	"context"
 	"crypto/ecdsa"
-	"crypto/elliptic"
-	"crypto/sha256"
-	"crypto/x509"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"math/big"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -29,6 +24,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	webpush "github.com/SherClockHolmes/webpush-go"
 
@@ -36,14 +32,6 @@ import (
 	"github.com/askahuman/askahuman/backend/pkg/sealedbox"
 	"github.com/askahuman/askahuman/backend/pkg/wire"
 )
-
-// requireDeviceSig, when AAH_REQUIRE_DEVICE_SIG=1, forces strict signature
-// enforcement: a decision is accepted only if it carries a signature that
-// verifies against the phone's device key. Before the phone has delivered a
-// device key there is nothing to verify against, so strict mode rejects every
-// decision until the key arrives (fail closed). With it off, decisions are
-// accepted unsigned until a device key is seen (compat), then signed-only.
-var requireDeviceSig = os.Getenv("AAH_REQUIRE_DEVICE_SIG") == "1"
 
 // Default relay endpoint for local dev.
 const defaultRelayURL = "ws://127.0.0.1:8080/ws"
@@ -437,7 +425,13 @@ func (a *Agent) Pair(ctx context.Context, p Pairing) error {
 // never included. The plaintext is padded to a fixed block by EncodeVAPIDKey so
 // its length does not leak to the relay (mirrors EncodeRequest).
 func (a *Agent) sendVAPIDKey(ctx context.Context, sess *Session) error {
-	plain, err := wire.EncodeVAPIDKey(a.vapidPub)
+	vk := wire.VAPIDKey{Kind: wire.KindVAPIDKey, Protocol: wire.Protocol, Room: sess.roomID, PublicKey: a.vapidPub}
+	sig, err := wire.Sign(sess.agentSigner, wire.VAPIDSigningMessage(vk))
+	if err != nil {
+		return err
+	}
+	vk.Sig = sig
+	plain, err := wire.EncodeMessage(vk)
 	if err != nil {
 		return fmt.Errorf("agent: encode vapid key: %w", err)
 	}
@@ -515,6 +509,9 @@ func (a *Agent) resetPairing() error {
 // writes the request and consumes its mailbox, so the connection keeps being
 // serviced (and the phone's post-pairing subscription absorbed) between Asks.
 func (a *Agent) Ask(ctx context.Context, req wire.Request) (wire.Decision, error) {
+	if err := wire.ValidateRequestInput(req); err != nil {
+		return wire.Decision{}, err
+	}
 	// Single-flight: one phone, one shared connection, one question at a time.
 	// Reject (never approve) a concurrent Ask instead of racing on the reader.
 	if !a.asking.CompareAndSwap(false, true) {
@@ -540,7 +537,11 @@ func (a *Agent) Ask(ctx context.Context, req wire.Request) (wire.Decision, error
 		return wire.Decision{}, a.timeoutErr()
 	}
 
-	req.Kind = wire.KindRequest
+	var err error
+	req, err = prepareRequest(ctx, req, sess)
+	if err != nil {
+		return wire.Decision{}, err
+	}
 	// EncodeRequest pads to a fixed block so the request body length does not
 	// leak to the relay via ciphertext-length analysis (mirrors the phone).
 	plain, err := wire.EncodeRequest(req)
@@ -603,7 +604,7 @@ func (a *Agent) Ask(ctx context.Context, req wire.Request) (wire.Decision, error
 		case <-ctx.Done():
 			return wire.Decision{}, a.timeoutErr()
 		case dec := <-w.decCh:
-			return a.acceptDecision(ctx, dec)
+			return a.commitDecision(ctx, sess, dec)
 		case ev := <-w.evCh:
 			switch ev {
 			case evPeerAbsent:
@@ -620,7 +621,7 @@ func (a *Agent) Ask(ctx context.Context, req wire.Request) (wire.Decision, error
 				case <-ctx.Done():
 					return wire.Decision{}, a.timeoutErr()
 				case dec := <-w.decCh:
-					return a.acceptDecision(ctx, dec)
+					return a.commitDecision(ctx, sess, dec)
 				case <-time.After(backoff):
 				}
 				_ = a.sendRequest(sess, plain)
@@ -634,16 +635,6 @@ func (a *Agent) Ask(ctx context.Context, req wire.Request) (wire.Decision, error
 			}
 		}
 	}
-}
-
-// acceptDecision is the final acceptance boundary for every decision path.
-// A ready decision channel does not take priority over cancellation: select
-// chooses randomly when both are ready, including after a stalled write/push.
-func (a *Agent) acceptDecision(ctx context.Context, dec wire.Decision) (wire.Decision, error) {
-	if requestExpired(ctx) {
-		return wire.Decision{}, a.timeoutErr()
-	}
-	return dec, nil
 }
 
 // requestExpired checks the absolute deadline as well as cancellation, so timer
@@ -709,7 +700,11 @@ func (a *Agent) ensureReader(sess *Session) {
 	a.readerSess = sess
 	a.readerCancel = cancel
 	a.readerDone = done
-	go a.readLoop(ctx, sess, done)
+	sess.ackQueue = make(chan []byte, maxReceipts)
+	readDone, ackDone := make(chan struct{}), make(chan struct{})
+	go a.readLoop(ctx, sess, readDone)
+	go func() { defer close(ackDone); a.ackLoop(ctx, sess) }()
+	go func() { <-readDone; cancel(); <-ackDone; close(done) }()
 }
 
 // readLoop is the single owner of sess.conn for the session's lifetime. It reads
@@ -795,9 +790,6 @@ func (a *Agent) handleFrame(sess *Session, env envelope) {
 	if a.absorbPush(plain) {
 		return
 	}
-	if a.absorbDeviceKey(sess, plain) {
-		return
-	}
 	a.routeDecision(sess, plain)
 }
 
@@ -807,20 +799,7 @@ func (a *Agent) handleFrame(sess *Session, env envelope) {
 // wrong id, a mismatched shape, or a bad/missing signature is dropped — never
 // approved (decodeDecision enforces the trust boundary; see verifyDecisionSig).
 func (a *Agent) routeDecision(sess *Session, plain []byte) {
-	a.waiterMu.Lock()
-	w := a.waiter
-	a.waiterMu.Unlock()
-	if w == nil {
-		return
-	}
-	dec, ok := decodeDecision(plain, w.req, sess)
-	if !ok {
-		return
-	}
-	select {
-	case w.decCh <- dec:
-	default: // already delivered: drop the duplicate.
-	}
+	a.routeBoundDecision(sess, plain)
 }
 
 // notifyWaiter passes a transport event to the in-flight Ask (best-effort: evCh
@@ -843,11 +822,17 @@ func (a *Agent) notifyWaiter(ev readerEvent) {
 // true when it consumed the message.
 func (a *Agent) absorbPush(plain []byte) bool {
 	var ps wire.PushSub
-	if err := json.Unmarshal(plain, &ps); err != nil {
+	if err := wire.StrictDecode(plain, &ps); err != nil {
 		return false
 	}
 	if ps.Kind != wire.KindPushSub {
 		return false
+	}
+	a.mu.Lock()
+	sess := a.sess
+	a.mu.Unlock()
+	if sess == nil || sess.protocol != wire.Protocol || ps.Protocol != wire.Protocol || ps.Room != sess.roomID || !wire.Verify(sess.devicePub, wire.PushSigningMessage(ps), ps.Sig) {
+		return true
 	}
 	if err := validatePushEndpoint(ps.Subscription.Endpoint); err != nil {
 		// Consume and discard invalid updates without replacing a working
@@ -866,75 +851,14 @@ func (a *Agent) absorbPush(plain []byte) bool {
 	return true
 }
 
-// absorbDeviceKey consumes a sealed wire.DeviceKey frame, recording the phone's
-// ECDSA P-256 public key on the session so later decisions can be signature-
-// verified (mirrors absorbPush). It returns true when the frame WAS a
-// device_key — so askOnce stops treating it as a decision — whether or not the
-// key parsed; a malformed key is noted on stderr and dropped, never silently
-// reinterpreted.
-//
-// The key is PINNED first-seen: the first valid device key for the session is
-// recorded and any LATER, different key is rejected. This pin is what makes the
-// signature meaningful against the very thief this feature targets — a
-// device_key frame is only session-key-sealed, so an attacker who stole the
-// persisted session key could otherwise seal a frame carrying their OWN device
-// key, overwrite the pin, and sign a forged approval that verifies. The real
-// phone establishes its key at pairing (when only it is the room peer), so the
-// pin is the real key; a re-send of the SAME key on reconnect/restore is a
-// no-op. See docs/decisions/architecture/0021.
-//
-// sess.devicePub is touched only from the Ask read-loop; sequential Asks run on
-// different goroutines but are serialized by the asking single-flight atomic
-// (which establishes the happens-before), so it needs no lock.
-func (a *Agent) absorbDeviceKey(sess *Session, plain []byte) bool {
+// absorbDeviceKey consumes obsolete enrollment frames without changing the
+// PAKE-authenticated identity. There is no first-seen post-pairing enrollment.
+func (a *Agent) absorbDeviceKey(_ *Session, plain []byte) bool {
 	var dk wire.DeviceKey
-	if err := json.Unmarshal(plain, &dk); err != nil {
-		return false
-	}
-	if dk.Kind != wire.KindDeviceKey {
-		return false
-	}
-	pub, err := parseDevicePub(dk.PublicKey)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "ask-a-human: ignoring malformed device key: %v\n", err)
-		return true // it IS a device_key frame: consume it regardless.
-	}
-	if sess.devicePub != nil {
-		// Pin first-seen: reject a swap. A re-send of the same key is a benign
-		// no-op; a DIFFERENT key means either a stray frame or a session-key
-		// thief trying to substitute their own signer — never overwrite the pin.
-		if !sess.devicePub.Equal(pub) {
-			fmt.Fprintf(os.Stderr, "ask-a-human: ignoring device key change (pinned)\n")
-		}
-		return true
-	}
-	sess.devicePub = pub // pin first-seen
-	return true
+	return json.Unmarshal(plain, &dk) == nil && dk.Kind == wire.KindDeviceKey
 }
 
-// parseDevicePub decodes a base64 SPKI DER string into an ECDSA P-256 public
-// key, rejecting anything that is not a P-256 ECDSA key.
-func parseDevicePub(spkiB64 string) (*ecdsa.PublicKey, error) {
-	if spkiB64 == "" {
-		return nil, errors.New("agent: empty device key")
-	}
-	der, err := base64.StdEncoding.DecodeString(spkiB64)
-	if err != nil {
-		return nil, fmt.Errorf("agent: device key b64: %w", err)
-	}
-	pubAny, err := x509.ParsePKIXPublicKey(der)
-	if err != nil {
-		return nil, fmt.Errorf("agent: device key parse: %w", err)
-	}
-	pub, ok := pubAny.(*ecdsa.PublicKey)
-	if !ok {
-		return nil, errors.New("agent: device key not ecdsa")
-	}
-	if pub.Curve != elliptic.P256() {
-		return nil, errors.New("agent: device key not p256")
-	}
-	return pub, nil
-}
+func parseDevicePub(spki string) (*ecdsa.PublicKey, error) { return wire.ParseSigner(spki) }
 
 // decodeDecision parses plain as a wire.Decision for req.ID; ok is false
 // unless it is a decision whose ID matches, whose Result shape matches the
@@ -943,10 +867,10 @@ func parseDevicePub(spkiB64 string) (*ecdsa.PublicKey, error) {
 // a choice not among the offered options) or a missing/invalid signature is
 // treated as not-yet-valid (ok=false) so Ask keeps waiting — never approved.
 func decodeDecision(plain []byte, req wire.Request, sess *Session) (dec wire.Decision, ok bool) {
-	if err := json.Unmarshal(plain, &dec); err != nil {
+	if err := wire.StrictDecode(plain, &dec); err != nil {
 		return wire.Decision{}, false
 	}
-	if dec.Kind != wire.KindDecision || dec.ID != req.ID {
+	if wire.ValidateDecision(dec) != nil || dec.ID != req.ID || dec.ResponseKind != req.Response.Kind || dec.RequestHash != wire.RequestHash(req) {
 		return wire.Decision{}, false
 	}
 	if !resultMatchesKind(dec.Result, req.Response) || !resultFieldsMatch(plain, req.Response.Kind) {
@@ -989,31 +913,11 @@ func resultFieldsMatch(plain []byte, kind wire.ResponseKind) bool {
 	return len(raw.Result) == 1 && ok && string(value) != "null"
 }
 
-// verifyDecisionSig enforces the per-device signature. Once the phone has
-// delivered a device key (sess.devicePub != nil), every decision MUST carry a
-// signature that verifies against that key over DecisionSigningMessage — a
-// stolen session key can decrypt traffic but cannot forge an approval. Before
-// any device key, an unsigned decision is accepted (compat with an older phone)
-// UNLESS strict mode (AAH_REQUIRE_DEVICE_SIG=1) is on, which rejects until a key
-// arrives. A bad or missing signature is never an approval: it returns false so
-// Ask keeps waiting. The wire signature is raw IEEE-P1363 r||s (64 bytes), so it
-// is verified with ecdsa.Verify (NOT VerifyASN1, which expects DER).
+// verifyDecisionSig is mandatory in protocol v2. A copied session key never
+// establishes a signing identity and no environment variable can downgrade it.
 func verifyDecisionSig(sess *Session, dec wire.Decision) bool {
-	if sess.devicePub == nil {
-		return !requireDeviceSig // no key to verify against: compat unless strict.
-	}
-	if dec.Sig == "" {
-		return false
-	}
-	sig, err := base64.StdEncoding.DecodeString(dec.Sig)
-	if err != nil || len(sig) != 64 {
-		return false
-	}
-	msg := wire.DecisionSigningMessage(sess.roomID, dec.ID, dec.Result)
-	digest := sha256.Sum256(msg)
-	r := new(big.Int).SetBytes(sig[:32])
-	s := new(big.Int).SetBytes(sig[32:])
-	return ecdsa.Verify(sess.devicePub, digest[:], r, s)
+	return sess.protocol == wire.Protocol && dec.Protocol == wire.Protocol && dec.Room == sess.roomID &&
+		wire.Verify(sess.devicePub, wire.BoundDecisionSigningMessage(dec), dec.Sig)
 }
 
 // resultMatchesKind reports whether res is a well-formed answer for the
@@ -1037,7 +941,11 @@ func resultMatchesKind(res wire.Result, resp wire.Response) bool {
 		if res.Approved != nil || res.Choice != "" {
 			return false
 		}
-		if resp.MaxLen > 0 && len(res.Text) > resp.MaxLen {
+		max := resp.MaxLen
+		if max == 0 {
+			max = wire.MaxText
+		}
+		if !utf8.ValidString(res.Text) || utf8.RuneCountInString(res.Text) > max {
 			return false
 		}
 		return true

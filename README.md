@@ -186,10 +186,16 @@ Ask a human. **BLOCKS** until they respond. Pass `expires_in_s` to also time out
 | `category` | string | no | Badge. Recognized: `cash` \| `deploy` \| `data` \| `access` \| `other`. Any other value is still shown, just with the neutral `other` color. |
 | `options` | string[] | no | Choices when `response_kind` is `"choice"`. |
 | `placeholder` | string | no | Input hint when `"text"`. |
-| `max_len` | integer | no | Max input length when `"text"`. |
-| `expires_in_s` | integer | no | Countdown seconds before timeout. Omit it and the request never times out on its own. |
+| `max_len` | integer | no | Text limit in Unicode scalar values, 1–4096; omitted or 0 defaults to 4096. |
+| `expires_in_s` | integer | no | Lifetime in seconds, 1–86400; omitted or 0 has no request-owned timeout. Caller cancellation/deadline still applies. |
 
 **Returns** the shape you asked for: `yesno` gives an `approved` boolean, `choice` gives the selected option, `text` gives the typed reply. A decline comes back as a non-approval; a timeout or transport error is returned as an error the agent can branch on. It never silently proceeds, and never returns approved on failure.
+
+Requests are validated before pairing: IDs up to 256 Unicode scalar values, titles 512, summaries 4096, agent/category/input hints 256, and 1–32 unique nonempty choice options up to 256 each. Only fields for the selected response kind are accepted. Encoded messages, including JSON escaping and signatures, are limited to 16 KiB. Text is preserved exactly, including whitespace and empty replies.
+
+Protocol v2 authenticates both peers' signing identities during pairing and signs the full question, answer, and agent receipt. The phone shows **Answer received by agent** only after verifying that receipt; a sent answer with no receipt remains uncertain. This confirms acceptance of the answer, not execution of an external action. The absolute deadline survives reconnects and page reloads.
+
+After upgrading from an older protocol, update the agent, refresh the phone app, and call `start_pairing` with `{"reset":true}`. Saved older entries remain visible with repair instructions; unsigned compatibility is disabled. The phone needs working WebCrypto and IndexedDB for secure signing.
 
 ### `pair_status`
 

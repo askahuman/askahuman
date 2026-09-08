@@ -1,34 +1,53 @@
-// session is the top-level client state machine: it wires the relay transport,
-// the SPAKE2 pairing, and the secretbox app layer into the nine PWA screens.
-//
-//   pair -> (handshake) -> listening -> (request arrives) -> yesno|choice|text
-//        -> (decision sealed & sent) -> confirmed -> listening
-//   any transport drop -> offline (Reconnecting…); paired key is kept in RAM.
-//
-// It owns: box seal/open of wire messages, de-dupe by request id, and the
-// single source of UI truth (SessionState). It depends on injectable factories
-// so it is unit-testable without a real WebSocket or DOM.
-
+// Session owns the phone's authenticated pairing, displayed requests, and
+// durable pending answers. A socket write is not an agent acceptance receipt.
 import { open as boxOpen, seal as boxSeal } from './crypto.ts';
-import { type DeviceKey as DeviceSigner, loadOrCreateDeviceKey } from './devicekey.ts';
-import { Pairing, type PairingSend } from './pairing.ts';
-import { RelayClient, type ConnState, type RelayEvents, type RelayOptions } from './relay.ts';
+import {
+  type DeviceKey as DeviceSigner,
+  loadOrCreateDeviceKey,
+} from './devicekey.ts';
+import { Pairing } from './pairing.ts';
+import {
+  RelayClient,
+  type ConnState,
+  type RelayEvents,
+  type RelayOptions,
+} from './relay.ts';
 import type { PairPayload } from './payload.ts';
 import {
   type Decision,
+  type Result,
   type PushSubscription,
+  type PushSub,
   type Request,
-  KindPushSub,
-  KindVAPIDKey,
-  decisionSigningMessage,
+  type VapidKey,
   decodeRequest,
-  decodeVapidKey,
   encodeDecision,
-  encodeDeviceKey,
   encodePushSub,
 } from './wire.ts';
+import {
+  PROTOCOL,
+  UPGRADE_MESSAGE,
+  MAX_TEXT,
+  MAX_PLAINTEXT,
+  fields,
+  importSigner,
+  verify,
+  strictJSON,
+  object,
+  bounded,
+  scalarLength,
+  requestHash,
+  requestSigningMessage,
+  boundDecisionSigningMessage,
+  decisionHash,
+  decodeAck,
+  ackSigningMessage,
+  pushSigningMessage,
+  vapidSigningMessage,
+  validateDecision,
+  type Ack,
+} from './protocol.ts';
 
-/** Screen is one of the nine PWA states the App renders. */
 export type Screen =
   | 'lock'
   | 'home'
@@ -37,65 +56,57 @@ export type Screen =
   | 'yesno'
   | 'choice'
   | 'text'
+  | 'pending'
   | 'confirmed'
   | 'offline';
-
-/** ResultLabel is the confirmed-screen headline + detail. */
+export type DeliveryState =
+  'signing' | 'awaiting' | 'uncertain' | 'expired' | null;
 export interface ConfirmedResult {
   icon: '✓' | '✗';
-  label: 'Approved' | 'Declined' | 'Choice sent' | 'Reply sent';
-  approved: boolean; // drives color (approve vs decline)
+  label: 'Answer received by agent';
+  approved: boolean;
   detail: string;
 }
-
-/** SessionState is the immutable snapshot the React island renders. */
 export interface SessionState {
   screen: Screen;
   conn: ConnState;
-  attempt: number; // reconnect attempt counter (offline screen)
+  attempt: number;
   peerPresent: boolean;
   paired: boolean;
   roomID: string;
-  agent: string; // last-known agent label, for badges
-  request: Request | null; // the active (deduped) request
-  result: ConfirmedResult | null; // last decision (confirmed screen)
-  pairError: string | null; // handshake failure message
+  agent: string;
+  request: Request | null;
+  result: ConfirmedResult | null;
+  pairError: string | null;
+  delivery?: DeliveryState;
+  answerError?: string | null;
 }
-
-/** RelayFactory builds a RelayClient (override in tests). */
 export type SessionRelayFactory = (
   relayURL: string,
   roomID: string,
   events: RelayEvents,
 ) => RelayClient;
-
-/** SessionOptions injects factories/clock for tests. */
 export interface SessionOptions {
   relayOptions?: RelayOptions;
   relayFactory?: SessionRelayFactory;
-  /**
-   * onVapidKey fires when the agent delivers its VAPID public key (sealed). The
-   * App subscribes for Web Push with this exact key so the signer == subscribe
-   * key; the resulting subscription is sent back via sendPushSubscription.
-   */
   onVapidKey?: (publicKey: string) => void;
+  deviceKeyLoader?: () => Promise<DeviceSigner | null>;
+  now?: () => number;
 }
-
-/**
- * RestoredSession is the persisted state a Session resumes from after a page
- * kill (see lib/store.ts): the already-derived SPAKE2 session key plus the
- * de-dupe/redelivery bookkeeping. A restored session NEVER runs the handshake
- * again — it rejoins the room paired and waits for the agent's re-announce.
- */
-export interface RestoredSession {
+export interface PersistedProtocolState {
+  protocol?: number;
+  agentSigner?: string;
+  deviceSigner?: string;
+  request?: Request;
+  seen?: string[];
+  decisions?: Record<string, Decision>;
+  receipts?: Record<string, Ack>;
+}
+export interface RestoredSession extends PersistedProtocolState {
   key: Uint8Array;
   agent?: string;
   vapid?: string;
-  seen?: string[];
-  decisions?: Record<string, Decision>;
 }
-
-/** initialState is the pre-pairing snapshot (the pair screen). */
 export function initialState(): SessionState {
   return {
     screen: 'pair',
@@ -108,368 +119,537 @@ export function initialState(): SessionState {
     request: null,
     result: null,
     pairError: null,
+    delivery: null,
   };
 }
 
-/**
- * Session is the orchestrator. Construct with a parsed pair payload, subscribe
- * with onChange, then start(). It transitions through the nine screens.
- */
 export class Session {
   private state: SessionState;
   private readonly relay: RelayClient;
-  // pairing is null for a RESTORED session: the key is already derived, so
-  // stray pake/confirm frames must be ignored (never re-derive over a live key).
-  private readonly pairing: Pairing | null;
+  private pairing: Pairing | null = null;
   private sessionKey?: Uint8Array;
-  // vapidKey is the agent-delivered VAPID public key (sealed during pairing); the
-  // App subscribes for Web Push with exactly this key. Undefined until received.
+  private deviceKey: DeviceSigner | null = null;
+  private agentPublic?: CryptoKey;
+  private agentSigner?: string;
+  private pinnedDeviceSigner?: string;
+  private protocol?: number;
   private vapidKey?: string;
   private readonly onVapidKey?: (publicKey: string) => void;
-  // deviceKey is this origin's non-extractable ECDSA signer (IndexedDB). It is
-  // loaded lazily once paired/restored (the constructor can't await); until then
-  // it is null and decisions go out unsigned (compat). Every decision is signed
-  // with it when present so a stolen session key cannot forge an approval.
-  private deviceKey: DeviceSigner | null = null;
+  private readonly now: () => number;
+  private readonly ready: Promise<void>;
+  private closed = false;
   private readonly seenIDs = new Set<string>();
-  // sentDecisions retains each decision we believe we sent, keyed by request
-  // id. If the agent re-announces an id that is in seenIDs, our decision never
-  // arrived (the socket was half-open when we wrote it — iOS freezes a
-  // backgrounded socket without erroring); re-send the retained decision so
-  // the request doesn't hang unanswerable until its deadline. Bounded FIFO.
   private readonly sentDecisions = new Map<string, Decision>();
+  private readonly receipts = new Map<string, Ack>();
   private readonly listeners = new Set<(s: SessionState) => void>();
   private confirmedTimer: ReturnType<typeof setTimeout> | null = null;
+  private receiptTimer: ReturnType<typeof setInterval> | null = null;
+  private readonly inbox: string[] = [];
+  private draining = false;
 
-  constructor(payload: PairPayload, opts: SessionOptions = {}, restored?: RestoredSession) {
+  constructor(
+    payload: PairPayload,
+    opts: SessionOptions = {},
+    restored?: RestoredSession,
+  ) {
     this.state = { ...initialState(), roomID: payload.room };
     this.onVapidKey = opts.onVapidKey;
-
-    const relayEvents: RelayEvents = {
+    this.now = opts.now ?? Date.now;
+    const events: RelayEvents = {
       onState: (conn, attempt) => this.onConnState(conn, attempt),
       onSignal: (signal) => this.onSignal(signal),
-      onPake: (b64) => this.pairing?.onPeerPake(b64),
+      onPake: (b64) => {
+        void this.pairing?.onPeerPake(b64);
+      },
       onConfirm: (b64) => this.pairing?.onPeerConfirm(b64),
-      onBox: (b64) => this.onBox(b64),
+      onBox: (b64) => this.enqueueBox(b64),
     };
-    this.relay = (opts.relayFactory ?? defaultRelayFactory(opts.relayOptions))(
-      payload.r,
-      payload.room,
-      relayEvents,
-    );
-
+    this.relay = (
+      opts.relayFactory ??
+      ((r, room, e) => new RelayClient(r, room, e, opts.relayOptions))
+    )(payload.r, payload.room, events);
+    // Retain legacy entries and identities for actionable repair. They may not
+    // connect, display authorization cards, or silently enroll a fresh signer.
     if (restored) {
-      // Resume paired: seed the key + bookkeeping and skip the handshake
-      // entirely. The agent's Ask loop re-announces the pending request within
-      // its backoff once we rejoin the room, so there is nothing else to do.
-      this.pairing = null;
       this.sessionKey = restored.key;
-      this.vapidKey = restored.vapid;
-      for (const id of restored.seen ?? []) this.seenIDs.add(id);
-      for (const [id, dec] of Object.entries(restored.decisions ?? {})) {
-        this.sentDecisions.set(id, dec);
-      }
-      this.state = {
-        ...this.state,
-        paired: true,
-        screen: 'listening',
-        agent: restored.agent || this.state.agent,
-      };
-      // A restored session is already paired: arm the device key so the agent
-      // (which lost devicePub from RAM on any restart) is re-armed before the
-      // next decision, and so this decision can be signed.
-      this.initDeviceKey();
-      return;
+      this.protocol = restored.protocol;
+      this.agentSigner = restored.agentSigner;
+      this.pinnedDeviceSigner = restored.deviceSigner;
+      this.state.agent = restored.agent || this.state.agent;
     }
-
-    const send: PairingSend = {
-      sendPake: (b64) => this.relay.sendPake(b64),
-      sendConfirm: (b64) => this.relay.sendConfirm(b64),
-    };
-    this.pairing = new Pairing(payload.code, send, {
-      onPaired: (key) => this.onPaired(key),
-      onError: (err) => this.onPairError(err),
+    this.ready = this.initialize(payload, opts, restored).catch(() => {
+      if (!this.closed)
+        this.onPairError(
+          new Error(`Secure signing is unavailable. ${UPGRADE_MESSAGE}`),
+        );
     });
   }
 
-  /** getState returns the current snapshot. */
+  private async initialize(
+    payload: PairPayload,
+    opts: SessionOptions,
+    restored?: RestoredSession,
+  ): Promise<void> {
+    if (
+      restored &&
+      (restored.protocol !== PROTOCOL ||
+        !restored.agentSigner ||
+        !restored.deviceSigner)
+    ) {
+      this.onPairError(
+        new Error(`This saved pairing needs an upgrade. ${UPGRADE_MESSAGE}`),
+      );
+      return;
+    }
+    const device = await (opts.deviceKeyLoader ?? loadOrCreateDeviceKey)();
+    if (this.closed) return;
+    if (!device) throw new Error('No secure signer');
+    const pub = await importSigner(device.spkiB64);
+    const proof = fields('aah:device-key-check:v2', device.spkiB64);
+    if (!(await verify(pub, proof, await device.sign(proof))))
+      throw new Error('Stored signer mismatch');
+    if (restored && device.spkiB64 !== restored.deviceSigner) {
+      this.onPairError(
+        new Error(
+          `The signing key for this pairing is unavailable. ${UPGRADE_MESSAGE}`,
+        ),
+      );
+      return;
+    }
+    if (this.closed) return;
+    this.deviceKey = device;
+    this.pinnedDeviceSigner = device.spkiB64;
+    if (restored) {
+      this.agentPublic = await importSigner(restored.agentSigner!);
+      if (this.closed) return;
+      for (const id of (restored.seen ?? []).slice(-50)) {
+        if (typeof id === 'string') this.seenIDs.add(id);
+      }
+      // Persistence is untrusted. Verify restored decisions/receipts before any
+      // retransmission or success UI; a copied session key cannot manufacture them.
+      for (const [id, d] of Object.entries(restored.decisions ?? {}).slice(
+        -32,
+      )) {
+        try {
+          validateDecision(d);
+          if (
+            d.id === id &&
+            d.room === payload.room &&
+            (await verify(pub, boundDecisionSigningMessage(d), d.sig))
+          )
+            this.sentDecisions.set(id, d);
+        } catch {
+          /* discard corrupt pending record */
+        }
+      }
+      for (const [id, a] of Object.entries(restored.receipts ?? {}).slice(
+        -32,
+      )) {
+        try {
+          const ack = decodeAck(new TextEncoder().encode(JSON.stringify(a)));
+          const d = this.sentDecisions.get(id);
+          if (
+            d &&
+            this.matchesAck(ack, d) &&
+            (await verify(this.agentPublic, ackSigningMessage(ack), ack.sig))
+          )
+            this.receipts.set(id, ack);
+        } catch {
+          /* no verified receipt means uncertain */
+        }
+      }
+      let request: Request | null = null;
+      if (restored.request) {
+        try {
+          const r = decodeRequest(
+            new TextEncoder().encode(JSON.stringify(restored.request)),
+          );
+          if (
+            r.room === payload.room &&
+            (await verify(this.agentPublic, requestSigningMessage(r), r.sig))
+          )
+            request = r;
+        } catch {
+          /* wait for an authenticated re-announcement */
+        }
+      }
+      if (this.closed) return;
+      this.vapidKey = restored.vapid;
+      const sent = request && this.sentDecisions.get(request.id);
+      // Even an expired pending answer can recover an earlier acceptance receipt.
+      if (request && !sent && this.expired(request)) {
+        this.seenIDs.add(request.id);
+        request = null;
+      }
+      this.set({
+        paired: true,
+        screen: request
+          ? sent
+            ? 'pending'
+            : cardScreen(request)
+          : 'listening',
+        request,
+        delivery: sent ? 'uncertain' : null,
+        pairError: null,
+      });
+      return;
+    }
+    this.pairing = new Pairing(
+      payload.code,
+      {
+        sendPake: (b64) => this.relay.sendPake(b64),
+        sendConfirm: (b64) => this.relay.sendConfirm(b64),
+      },
+      {
+        onPaired: (key, agentSigner, publicKey) =>
+          this.onPaired(key, agentSigner, publicKey),
+        onError: (err) => this.onPairError(err),
+      },
+      { room: payload.room, signer: device.spkiB64 },
+    );
+  }
+
   getState(): SessionState {
     return this.state;
   }
-
-  /** getVapidKey returns the agent-delivered VAPID public key, or undefined if
-   *  the agent has not sent one yet (App falls back to the build-time key). */
   getVapidKey(): string | undefined {
     return this.vapidKey;
   }
-
-  /** getSessionKey returns the derived session key once paired (persistence). */
   getSessionKey(): Uint8Array | undefined {
     return this.sessionKey;
   }
-
-  /** MAX_PERSISTED_SEEN bounds the persisted de-dupe list (newest kept). */
-  private static readonly MAX_PERSISTED_SEEN = 50;
-
-  /** persistState snapshots the de-dupe/redelivery bookkeeping for storage.
-   *  The OPEN card's id is excluded: it enters seenIDs on receipt (so live
-   *  re-announces don't reopen it), but persisting it before it is answered
-   *  would make the agent's re-announce after a page kill silently dropped —
-   *  the one re-announce that must re-open the card. */
-  persistState(): { seen: string[]; decisions: Record<string, Decision> } {
-    const open = this.state.request?.id;
+  persistState(): PersistedProtocolState {
     return {
-      seen: Array.from(this.seenIDs)
-        .filter((id) => id !== open)
-        .slice(-Session.MAX_PERSISTED_SEEN),
+      protocol: this.protocol,
+      agentSigner: this.agentSigner,
+      deviceSigner: this.pinnedDeviceSigner,
+      request: this.state.request ?? undefined,
+      seen: Array.from(this.seenIDs).slice(-50),
       decisions: Object.fromEntries(this.sentDecisions),
+      receipts: Object.fromEntries(this.receipts),
     };
   }
-
-  /** onChange subscribes to state snapshots; returns an unsubscribe. */
   onChange(fn: (s: SessionState) => void): () => void {
     this.listeners.add(fn);
     return () => this.listeners.delete(fn);
   }
-
-  /** start opens the relay; pairing kicks off when the peer is present. */
   start(): void {
-    this.relay.connect();
+    void this.ready.then(() => {
+      if (!this.closed && !this.state.pairError) this.relay.connect();
+    });
   }
-
-  /** retry forces an immediate reconnect (offline screen Retry button). */
   retry(): void {
-    this.relay.retryNow();
+    if (this.closed || this.state.pairError) return;
+    this.retryPending();
+    this.relay.retryNow(); // iOS can freeze a socket while it still looks open.
   }
-
-  /** close tears down the transport and timers. */
   close(): void {
+    this.closed = true;
     if (this.confirmedTimer) clearTimeout(this.confirmedTimer);
+    if (this.receiptTimer) clearInterval(this.receiptTimer);
+    this.inbox.length = 0;
     this.relay.close();
   }
-
-  // --- decisions (phone -> agent) -----------------------------------------
-
-  /** approve/decline send a yesno decision and advance to confirmed. A no-op
-   *  when no request is active: a deferred swipe commit whose request already
-   *  expired or was switched away must never seal against a later request. */
   approve(): void {
-    const req = this.state.request;
-    if (!req) return;
-    void this.sendDecision(req.id, { kind: 'decision', id: req.id, result: { approved: true } }, {
-      icon: '✓',
-      label: 'Approved',
-      approved: true,
-      detail: req.summary,
-    });
+    void this.sendDecision({ approved: true }, 'yesno');
   }
   decline(): void {
-    const req = this.state.request;
-    if (!req) return;
-    void this.sendDecision(req.id, { kind: 'decision', id: req.id, result: { approved: false } }, {
-      icon: '✗',
-      label: 'Declined',
-      approved: false,
-      detail: req.summary,
-    });
+    void this.sendDecision({ approved: false }, 'yesno');
   }
-  /** choose sends a choice decision. */
-  choose(label: string): void {
-    const req = this.state.request;
-    if (!req) return;
-    void this.sendDecision(req.id, { kind: 'decision', id: req.id, result: { choice: label } }, {
-      icon: '✓',
-      label: 'Choice sent',
-      approved: true,
-      detail: `“${label}”`,
-    });
+  choose(choice: string): void {
+    void this.sendDecision({ choice }, 'choice');
   }
-  /** reply sends a text decision (caller trims/clamps to max_len). */
   reply(text: string): void {
-    const req = this.state.request;
-    if (!req) return;
-    const t = text.trim();
-    if (!t) return;
-    void this.sendDecision(req.id, { kind: 'decision', id: req.id, result: { text: t } }, {
-      icon: '✓',
-      label: 'Reply sent',
-      approved: true,
-      detail: `“${t}”`,
+    void this.sendDecision({ text }, 'text');
+  }
+  expire(id: string): void {
+    if (this.state.request?.id !== id) return;
+    if (this.sentDecisions.has(id)) {
+      this.set({ screen: 'pending', delivery: 'uncertain' });
+      return;
+    }
+    this.seenIDs.add(id);
+    this.set({
+      screen: 'listening',
+      request: null,
+      result: null,
+      delivery: null,
     });
   }
-
-  /**
-   * expire drives the session out of the actionable card once the agent has
-   * timed the request out, so the user can't approve a dead request. No
-   * decision is sent (the agent already gave up); mirrors sendDecision cleanup.
-   */
-  expire(id: string): void {
-    if (this.state.request?.id !== id) return; // stale tick: card already gone
-    this.seenIDs.add(id);
-    this.set({ screen: 'listening', request: null, result: null });
+  async sendPushSubscription(sub: PushSubscription): Promise<boolean> {
+    await this.ready;
+    if (
+      !this.state.paired ||
+      !this.sessionKey ||
+      !this.deviceKey ||
+      this.closed
+    )
+      return false;
+    const ps: PushSub = {
+      kind: 'push_sub',
+      protocol: PROTOCOL,
+      room: this.state.roomID,
+      subscription: sub,
+    };
+    try {
+      ps.sig = await this.deviceKey.sign(pushSigningMessage(ps));
+      return (
+        !this.closed &&
+        this.relay.sendBox(boxSeal(this.sessionKey, encodePushSub(ps)))
+      );
+    } catch {
+      return false;
+    }
   }
 
-  /** sendPushSubscription seals + sends the phone's Web Push subscription. */
-  sendPushSubscription(sub: PushSubscription): boolean {
-    if (!this.sessionKey) return false;
-    const bytes = encodePushSub({ kind: KindPushSub, subscription: sub });
-    return this.relay.sendBox(boxSeal(this.sessionKey, bytes));
+  private expired(req: Request): boolean {
+    return !!req.deadline_ms && this.now() >= req.deadline_ms;
   }
-
-  // --- internals -----------------------------------------------------------
-
-  private async sendDecision(id: string, decision: Decision, result: ConfirmedResult): Promise<void> {
-    if (!this.sessionKey) return;
-    // Sign with this device's key when we have one. Fail CLOSED: if a device key
-    // exists but signing throws, never fall back to an unsigned decision (the
-    // agent would rightly reject it) — surface offline and keep the card
-    // answerable so a retry re-signs. With no device key (WebCrypto/IndexedDB
-    // unavailable) send unsigned (compat). The signed message binds room+id+result
-    // exactly (mirrors wire.DecisionSigningMessage); the agent verifies it.
-    if (this.deviceKey) {
-      const msg = decisionSigningMessage(this.state.roomID, id, decision.result);
+  private async sendDecision(
+    result: Result,
+    kind: Request['response']['kind'],
+  ): Promise<void> {
+    const req = this.state.request;
+    if (
+      !req ||
+      !this.sessionKey ||
+      !this.deviceKey ||
+      !this.state.paired ||
+      this.closed ||
+      req.response.kind !== kind ||
+      this.state.delivery ||
+      this.sentDecisions.has(req.id)
+    )
+      return;
+    if (this.expired(req)) {
+      this.expire(req.id);
+      return;
+    }
+    const d: Decision = {
+      kind: 'decision',
+      protocol: PROTOCOL,
+      room: this.state.roomID,
+      id: req.id,
+      request_hash: requestHash(req),
+      response_kind: kind,
+      result,
+    };
+    try {
+      validateDecision(d);
+      if (kind === 'choice' && !req.response.options?.includes(result.choice!))
+        return;
+      if (
+        kind === 'text' &&
+        scalarLength(result.text ?? '') > (req.response.max_len || MAX_TEXT)
+      )
+        return;
+      // Check the complete encoded answer (including signature space) before
+      // persisting or signing it. Long Unicode/control text can hit the shared
+      // transport cap before its scalar limit; keep the card editable.
       try {
-        decision = { ...decision, sig: await this.deviceKey.sign(msg) };
+        encodeDecision({ ...d, sig: 'A'.repeat(88) });
       } catch {
-        this.set({ screen: 'offline' });
+        this.set({
+          answerError:
+            'This reply is too large to send. Shorten it and try again.',
+        });
         return;
       }
-    }
-    const bytes = encodeDecision(decision);
-    if (!this.relay.sendBox(boxSeal(this.sessionKey, bytes))) {
-      // Send dropped (socket not open / threw): do NOT claim "sent". Keep the
-      // request so it stays answerable, leave id OUT of seenIDs so a resend is
-      // accepted, and surface offline (its copy: no answer was sent).
-      this.set({ screen: 'offline' });
-      return;
-    }
-    // De-dupe: a re-announced request with this id won't reopen the card.
-    this.seenIDs.add(id);
-    this.retainDecision(id, decision);
-    this.set({ screen: 'confirmed', result, request: null });
-    // After a beat, return to the listening idle state (mirror the mockup).
-    if (this.confirmedTimer) clearTimeout(this.confirmedTimer);
-    this.confirmedTimer = setTimeout(() => {
-      if (this.state.screen === 'confirmed') this.set({ screen: 'listening', result: null });
-    }, 2600);
-  }
-
-  /** MAX_RETAINED_DECISIONS bounds sentDecisions (FIFO eviction). */
-  private static readonly MAX_RETAINED_DECISIONS = 32;
-
-  private retainDecision(id: string, decision: Decision): void {
-    this.sentDecisions.set(id, decision);
-    if (this.sentDecisions.size > Session.MAX_RETAINED_DECISIONS) {
-      const oldest = this.sentDecisions.keys().next().value;
-      if (oldest !== undefined) this.sentDecisions.delete(oldest);
-    }
-  }
-
-  private onConnState(conn: ConnState, attempt: number): void {
-    // Offline only matters once we've gotten somewhere; pre-pair stays on pair.
-    if (conn === 'open') {
-      // Reconnected: if paired, restore where we were; else show pair and (re)send pake.
-      if (this.state.paired) {
-        // Coming back from offline: if a request is still pending, restore its
-        // card so a transient reconnect keeps it answerable; else go listening.
-        // Any non-offline screen (open card / confirmed) is left untouched.
-        const screen =
-          this.state.screen === 'offline'
-            ? this.state.request
-              ? cardScreen(this.state.request)
-              : 'listening'
-            : this.state.screen;
-        this.set({ conn, attempt, screen });
-        // Re-arm a possibly-restarted agent with our device key on every fresh
-        // connection so the next decision's signature can be verified.
-        this.sendDeviceKey();
-      } else {
-        this.set({ conn, attempt });
+      this.set({
+        screen: 'pending',
+        delivery: 'signing',
+        result: null,
+        answerError: null,
+      });
+      d.sig = await this.deviceKey.sign(boundDecisionSigningMessage(d));
+      if (this.closed || this.state.request !== req) return;
+      if (this.expired(req)) {
+        this.set({ delivery: null });
+        this.expire(req.id);
+        return;
       }
-      return;
+      // Register/persist before the socket write. A synchronous test transport
+      // (or a very fast peer) must never deliver an ack before pending exists.
+      this.retainDecision(d);
+      this.seenIDs.add(req.id);
+      this.set({ screen: 'pending', delivery: 'awaiting' });
+      const sent = this.relay.sendBox(
+        boxSeal(this.sessionKey, encodeDecision(d)),
+      );
+      if (!sent) this.set({ screen: 'pending', delivery: 'uncertain' });
+      this.armReceiptRetry();
+    } catch {
+      if (!this.closed && this.state.request === req)
+        this.set({ screen: 'offline', delivery: null });
     }
-    if (conn === 'closed') {
-      // A drop after pairing surfaces the offline screen (key kept in RAM).
-      const screen = this.state.paired && this.state.screen !== 'pair' ? 'offline' : this.state.screen;
-      this.set({ conn, attempt, peerPresent: false, screen });
-      return;
-    }
-    this.set({ conn, attempt });
   }
-
+  private retainDecision(d: Decision): void {
+    this.sentDecisions.set(d.id, d);
+    if (this.sentDecisions.size > 32) {
+      const id = this.sentDecisions.keys().next().value;
+      if (id !== undefined) {
+        this.sentDecisions.delete(id);
+        this.receipts.delete(id);
+      }
+    }
+  }
+  private armReceiptRetry(): void {
+    if (this.receiptTimer) return;
+    this.receiptTimer = setInterval(() => {
+      if (this.closed) return;
+      // A lost write or ack never becomes success just because time elapsed.
+      if (this.state.screen === 'pending' && this.state.delivery !== 'expired')
+        this.set({ delivery: 'uncertain' });
+      this.retryPending();
+    }, 5000);
+  }
+  private retryPending(): void {
+    if (!this.sessionKey || this.closed) return;
+    for (const [id, d] of this.sentDecisions) {
+      if (
+        this.receipts.get(id)?.status === 'accepted' ||
+        this.receipts.get(id)?.status === 'expired'
+      )
+        continue;
+      this.relay.sendBox(boxSeal(this.sessionKey, encodeDecision(d)));
+    }
+  }
+  private onConnState(conn: ConnState, attempt: number): void {
+    if (this.closed) return;
+    let screen = this.state.screen;
+    if (this.state.paired && screen !== 'pending' && screen !== 'confirmed') {
+      if (conn === 'closed') screen = 'offline';
+      else if (conn === 'open' && screen === 'offline')
+        screen = this.state.request
+          ? cardScreen(this.state.request)
+          : 'listening';
+    }
+    this.set({
+      conn,
+      attempt,
+      screen,
+      ...(conn === 'closed' ? { peerPresent: false } : {}),
+    });
+    if (conn === 'open' && this.state.paired) {
+      this.retryPending();
+      this.armReceiptRetry();
+    }
+  }
   private onSignal(signal: string): void {
+    if (this.closed) return;
     if (signal === 'peer_joined') {
       this.set({ peerPresent: true });
-      // Peer present => start (or re-send) our pake; harmless if already paired.
-      // Already paired => the peer is a (re)joining agent: re-arm it with our
-      // device key so it can verify the next decision even after a restart.
       if (!this.state.paired) this.pairing?.start();
-      else this.sendDeviceKey();
-      return;
-    }
-    if (signal === 'peer_left') {
-      // If a card is open, the agent that asked has departed: surface offline so
-      // the card isn't answerable against a gone agent (key kept in RAM; a
-      // returning agent + re-announce restores it via onConnState/onBox).
-      const onCard =
-        this.state.screen === 'yesno' ||
-        this.state.screen === 'choice' ||
-        this.state.screen === 'text';
-      this.set({ peerPresent: false, screen: onCard ? 'offline' : this.state.screen });
-      return;
-    }
-    // undeliverable: our frame had no peer. The agent owns retries; we just
-    // re-announce our pake so a returning agent can pair.
-    if (signal === 'undeliverable' && !this.state.paired) {
-      this.pairing?.start();
+      else this.retryPending();
+    } else if (signal === 'peer_left') {
+      const onCard = ['yesno', 'choice', 'text'].includes(this.state.screen);
+      this.set({
+        peerPresent: false,
+        screen: onCard ? 'offline' : this.state.screen,
+        ...(this.state.screen === 'pending' ? { delivery: 'uncertain' } : {}),
+      });
+    } else if (signal === 'undeliverable') {
+      if (!this.state.paired) this.pairing?.start();
+      else if (this.state.screen === 'pending')
+        this.set({ delivery: 'uncertain' });
     }
   }
-
-  private onBox(b64: string): void {
-    if (!this.sessionKey) return; // not paired yet; ignore stray box
-    let plaintext: Uint8Array;
+  private enqueueBox(b64: string): void {
+    if (
+      this.closed ||
+      !this.sessionKey ||
+      b64.length > Math.ceil((MAX_PLAINTEXT + 40) / 3) * 4 ||
+      this.inbox.length >= 32
+    )
+      return;
+    this.inbox.push(b64);
+    if (!this.draining) void this.drainBoxes();
+  }
+  private async drainBoxes(): Promise<void> {
+    this.draining = true;
     try {
-      plaintext = boxOpen(this.sessionKey, b64);
-    } catch {
-      return; // authentication failed: drop silently (never trust it)
+      while (!this.closed && this.inbox.length) {
+        const b64 = this.inbox.shift()!;
+        try {
+          await this.onBox(b64);
+        } catch {
+          /* malformed/invalid identity: fail closed */
+        }
+      }
+    } finally {
+      this.draining = false;
     }
-    // The agent's VAPID public key arrives sealed during pairing: store it and
-    // notify so the App subscribes for Web Push with exactly this key. Decode
-    // best-effort; a malformed frame is ignored (push stays best-effort).
-    if (peekKind(plaintext) === KindVAPIDKey) {
-      try {
-        const vk = decodeVapidKey(plaintext);
-        this.vapidKey = vk.public_key;
-        this.onVapidKey?.(vk.public_key);
-      } catch {
-        /* not a usable vapid_key — ignore */
+  }
+  private async onBox(b64: string): Promise<void> {
+    if (!this.sessionKey || !this.agentPublic || !this.state.paired) return;
+    const plain = boxOpen(this.sessionKey, b64);
+    const tag = object(strictJSON(plain), [
+      'kind',
+      'protocol',
+      'room',
+      'id',
+      'request_hash',
+      'decision_hash',
+      'status',
+      'sig',
+      'public_key',
+      'deadline_ms',
+      'title',
+      'category',
+      'summary',
+      'agent',
+      'response',
+      'expires_in_s',
+    ]);
+    if (tag.kind === 'ack') {
+      await this.onAck(decodeAck(plain));
+      return;
+    }
+    if (tag.kind === 'vapid_key') {
+      object(tag, ['kind', 'protocol', 'room', 'sig', 'public_key']);
+      const v = tag as unknown as VapidKey;
+      bounded(v.public_key, 'VAPID key', 256, true);
+      if (
+        v.protocol !== PROTOCOL ||
+        v.room !== this.state.roomID ||
+        !(await verify(this.agentPublic, vapidSigningMessage(v), v.sig)) ||
+        this.closed
+      )
+        return;
+      this.vapidKey = v.public_key;
+      this.onVapidKey?.(v.public_key);
+      return;
+    }
+    const req = decodeRequest(plain);
+    if (
+      req.room !== this.state.roomID ||
+      !(await verify(this.agentPublic, requestSigningMessage(req), req.sig)) ||
+      this.closed
+    )
+      return;
+    const d = this.sentDecisions.get(req.id);
+    if (d) {
+      if (
+        d.request_hash === requestHash(req) &&
+        this.receipts.get(req.id)?.status !== 'accepted'
+      ) {
+        this.relay.sendBox(boxSeal(this.sessionKey, encodeDecision(d)));
       }
       return;
     }
-    let req: Request;
-    try {
-      req = decodeRequest(plaintext);
-    } catch {
-      return; // not a request we render (e.g. an ack) — ignore
-    }
-    if (this.seenIDs.has(req.id)) {
-      // Seen also includes the unanswered card. A returning agent can join
-      // while the phone's own socket stays open, so no onConnState(open) will
-      // restore it. Require an authenticated re-announce, retain the original
-      // request object, and leave completed/expired IDs suppressed below.
-      if (this.state.request?.id === req.id) {
-        if (this.state.screen === 'offline') {
-          this.set({ screen: cardScreen(this.state.request), peerPresent: true });
-        }
+    if (this.state.request?.id === req.id) {
+      // A re-announcement cannot change the question or reset its deadline.
+      if (requestHash(this.state.request) !== requestHash(req)) return;
+      if (this.expired(this.state.request)) {
+        this.expire(req.id);
         return;
       }
-      // The agent re-announced an id we already handled. If we answered it,
-      // the agent is still asking, so our decision was lost in flight —
-      // re-send it (idempotent: the agent takes the first matching decision).
-      // A seen id WITHOUT a retained decision was expired locally; stay
-      // silent (the agent timed it out on its side too).
-      const dec = this.sentDecisions.get(req.id);
-      if (dec) this.relay.sendBox(boxSeal(this.sessionKey, encodeDecision(dec)));
+      if (this.state.screen === 'offline')
+        this.set({ screen: cardScreen(this.state.request), peerPresent: true });
+      return;
+    }
+    if (this.seenIDs.has(req.id) || this.expired(req)) {
+      this.seenIDs.add(req.id);
       return;
     }
     this.seenIDs.add(req.id);
@@ -478,76 +658,101 @@ export class Session {
       screen: cardScreen(req),
       agent: req.agent || this.state.agent,
       result: null,
+      delivery: null,
+      answerError: null,
+      peerPresent: true,
     });
   }
-
-  private onPaired(key: Uint8Array): void {
+  private matchesAck(a: Ack, d: Decision): boolean {
+    return (
+      a.room === this.state.roomID &&
+      a.id === d.id &&
+      a.request_hash === d.request_hash &&
+      a.decision_hash === decisionHash(d)
+    );
+  }
+  private async onAck(a: Ack): Promise<void> {
+    const d = this.sentDecisions.get(a.id);
+    if (
+      !d ||
+      !this.agentPublic ||
+      !this.matchesAck(a, d) ||
+      !(await verify(this.agentPublic, ackSigningMessage(a), a.sig)) ||
+      this.closed
+    )
+      return;
+    // An uncertain replay cannot overwrite a verified terminal receipt.
+    const old = this.receipts.get(a.id);
+    if (old?.status === 'accepted' || old?.status === 'expired') return;
+    this.receipts.set(a.id, a);
+    if (this.state.request?.id !== a.id) {
+      this.set({});
+      return;
+    }
+    if (a.status === 'accepted') {
+      const approved = d.result.approved !== false;
+      const detail =
+        d.response_kind === 'yesno'
+          ? approved
+            ? 'Approved'
+            : 'Declined'
+          : d.response_kind === 'choice'
+            ? `Choice: ${d.result.choice}`
+            : `Reply: ${d.result.text ?? ''}`;
+      this.set({
+        screen: 'confirmed',
+        request: null,
+        delivery: null,
+        result: {
+          icon: approved ? '✓' : '✗',
+          label: 'Answer received by agent',
+          approved,
+          detail,
+        },
+      });
+      if (this.confirmedTimer) clearTimeout(this.confirmedTimer);
+      this.confirmedTimer = setTimeout(() => {
+        if (!this.closed && this.state.screen === 'confirmed')
+          this.set({ screen: 'listening', result: null });
+      }, 2600);
+    } else
+      this.set({
+        screen: 'pending',
+        delivery: a.status === 'expired' ? 'expired' : 'uncertain',
+      });
+  }
+  private onPaired(
+    key: Uint8Array,
+    agentSigner: string,
+    publicKey: CryptoKey,
+  ): void {
+    if (this.closed) return;
+    this.agentPublic = publicKey;
+    this.agentSigner = agentSigner;
+    this.protocol = PROTOCOL;
     this.sessionKey = key;
     this.set({ paired: true, screen: 'listening', pairError: null });
-    this.initDeviceKey();
   }
-
-  /**
-   * initDeviceKey best-effort loads (or creates) this origin's non-extractable
-   * ECDSA signing key and hands its public half to the agent. Fire-and-forget:
-   * a browser without WebCrypto/IndexedDB yields null and the phone stays on
-   * unsigned decisions (compat). Called once the session is paired or restored.
-   */
-  private initDeviceKey(): void {
-    void (async () => {
-      this.deviceKey = await loadOrCreateDeviceKey();
-      this.sendDeviceKey();
-    })();
-  }
-
-  /**
-   * sendDeviceKey seals this device's ECDSA PUBLIC key to the agent so it can
-   * verify every decision's signature. Best-effort and idempotent on the agent;
-   * re-sent on each reconnect/peer_joined (see onConnState/onSignal) so an agent
-   * that restarted — and lost devicePub from RAM — is re-armed before the next
-   * decision. A no-op until both the session key and device key are ready.
-   */
-  private sendDeviceKey(): void {
-    if (!this.sessionKey || !this.deviceKey) return;
-    this.relay.sendBox(boxSeal(this.sessionKey, encodeDeviceKey(this.deviceKey.spkiB64)));
-  }
-
   private onPairError(err: Error): void {
-    // Pairing is single-shot after failure. Stop transport retries instead of
-    // keeping the UI waiting on a handshake that can never finish.
+    if (this.closed) return;
     this.relay.close();
-    this.set({ screen: 'pair', pairError: err.message, peerPresent: false });
+    this.set({
+      screen: 'pair',
+      pairError: err.message,
+      peerPresent: false,
+      paired: false,
+    });
   }
-
-  private req(): Request {
-    if (!this.state.request) throw new Error('session: no active request');
-    return this.state.request;
-  }
-
   private set(patch: Partial<SessionState>): void {
+    if (this.closed) return;
     this.state = { ...this.state, ...patch };
     for (const fn of this.listeners) fn(this.state);
   }
 }
-
-/** peekKind reads just the `kind` tag off a sealed-box plaintext so onBox can
- *  route to the right decoder. Returns '' if it isn't parseable JSON / no kind. */
-function peekKind(plaintext: Uint8Array): string {
-  try {
-    const v = JSON.parse(new TextDecoder().decode(plaintext)) as { kind?: unknown };
-    return typeof v.kind === 'string' ? v.kind : '';
-  } catch {
-    return '';
-  }
-}
-
-/** cardScreen maps a request's response kind to its answerable card screen. */
 function cardScreen(req: Request): Screen {
-  if (req.response.kind === 'choice') return 'choice';
-  if (req.response.kind === 'text') return 'text';
-  return 'yesno';
-}
-
-function defaultRelayFactory(opts?: RelayOptions): SessionRelayFactory {
-  return (relayURL, roomID, events) => new RelayClient(relayURL, roomID, events, opts);
+  return req.response.kind === 'choice'
+    ? 'choice'
+    : req.response.kind === 'text'
+      ? 'text'
+      : 'yesno';
 }

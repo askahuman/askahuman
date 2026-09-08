@@ -78,7 +78,7 @@ func TestIntegrationMCPRepairsForgottenPhonePairing(t *testing.T) {
 		require.NoError(t, err)
 		require.NoError(t, phone.write(ctx, envelope{Box: box}))
 	}
-	answer := func(phone *phoneStub, room string, signer deviceSigner, oldSigner *deviceSigner, oldKey []byte) {
+	answer := func(phone *phoneStub, oldPhone *phoneStub) {
 		t.Helper()
 		type reply struct {
 			result *mcp.CallToolResult
@@ -91,25 +91,20 @@ func TestIntegrationMCPRepairsForgottenPhonePairing(t *testing.T) {
 			}})
 			result <- reply{res, err}
 		}()
-		var request wire.Request
-		for request.Kind != wire.KindRequest {
-			env, err := phone.read(ctx)
+		request, err := phone.readRequest(ctx)
+		require.NoError(t, err)
+		if oldPhone != nil {
+			// Use the exact new request metadata and digest so rejection tests
+			// the abandoned signing identity, rather than a missing v2 field.
+			forged := boundDecision(request, wire.Result{Approved: boolPtr(true)})
+			forged.Sig, err = wire.Sign(oldPhone.signer, wire.BoundDecisionSigningMessage(forged))
 			require.NoError(t, err)
-			if env.Box == "" {
-				continue
-			}
-			plain, err := sealedbox.Open(phone.key, env.Box)
-			require.NoError(t, err)
-			require.NoError(t, json.Unmarshal(plain, &request))
+			send(phone, oldPhone.key, forged) // abandoned session key cannot decrypt.
+			send(phone, phone.key, forged)    // abandoned device pin cannot authorize.
 		}
-		if oldSigner != nil {
-			forged := wire.Decision{Kind: wire.KindDecision, ID: request.ID, Result: wire.Result{Approved: boolPtr(true)}}
-			forged.Sig = oldSigner.sign(t, room, forged)
-			send(phone, oldKey, forged)    // abandoned session key cannot decrypt.
-			send(phone, phone.key, forged) // abandoned device pin cannot authorize.
-		}
-		decline := wire.Decision{Kind: wire.KindDecision, ID: request.ID, Result: wire.Result{Approved: boolPtr(false)}}
-		decline.Sig = signer.sign(t, room, decline)
+		decline := boundDecision(request, wire.Result{Approved: boolPtr(false)})
+		decline.Sig, err = wire.Sign(phone.signer, wire.BoundDecisionSigningMessage(decline))
+		require.NoError(t, err)
 		send(phone, phone.key, decline)
 		got := <-result
 		require.NoError(t, got.err)
@@ -117,13 +112,12 @@ func TestIntegrationMCPRepairsForgottenPhonePairing(t *testing.T) {
 		out, ok := got.result.StructuredContent.(map[string]any)
 		require.True(t, ok)
 		assert.Equal(t, false, out["approved"], "only the current device's decline may be returned")
+		require.NoError(t, phone.readAcceptedAck(ctx, decline))
 	}
 
 	first, firstRoom, firstCode := start(false)
 	defer first.conn.CloseNow()
-	firstSigner := newDeviceSigner(t)
-	send(first, first.key, firstSigner.deviceKeyFrame())
-	answer(first, firstRoom, firstSigner, nil, nil)
+	answer(first, nil)
 	first.conn.CloseNow() // the phone has forgotten/closed its old agent entry.
 	require.Eventually(t, func() bool { return !ag.peerPresent.Load() }, time.Second, time.Millisecond)
 	res, err := cs.CallTool(ctx, &mcp.CallToolParams{Name: "start_pairing", Arguments: map[string]any{}})
@@ -141,7 +135,6 @@ func TestIntegrationMCPRepairsForgottenPhonePairing(t *testing.T) {
 	assert.NotEqual(t, firstCode, secondCode)
 	assert.NotEqual(t, firstRoom, secondRoom)
 	assert.NotEqual(t, first.key, second.key)
-	secondSigner := newDeviceSigner(t)
-	send(second, second.key, secondSigner.deviceKeyFrame())
-	answer(second, secondRoom, secondSigner, &firstSigner, first.key)
+	assert.NotEqual(t, first.spki, second.spki)
+	answer(second, first)
 }

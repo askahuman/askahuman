@@ -37,8 +37,8 @@ pass `--relay <wss-url>` and `--web <https-origin>`.
     `other`. Any other value is accepted and simply shown as `other` (not rejected).
   - `options` (string[], optional) — the choices, when `response_kind` is `choice`.
   - `placeholder` (string, optional) — input hint, when `response_kind` is `text`.
-  - `max_len` (integer, optional) — max input length, when `response_kind` is `text`.
-  - `expires_in_s` (integer, optional) — countdown in seconds before the request times out.
+  - `max_len` (integer, optional) — text limit in Unicode scalar values, 0–4096; 0/omitted defaults to 4096.
+  - `expires_in_s` (integer, optional) — request lifetime, 0–86400 seconds; 0/omitted adds no timeout. Caller deadlines still apply.
 - `pair_status` — Report whether a pairing session exists, the phone's relay presence, or waiting/idle status. Read-only; returns only
   non-secret status (the pairing code is shown out-of-band in the terminal, never in the result). It
   does not start pairing.
@@ -73,3 +73,5 @@ or any judgment call you are not authorized to make alone. Treat anything other 
 - npm package: https://www.npmjs.com/package/@askahuman/mcp
 - README: https://github.com/askahuman/askahuman/blob/main/README.md
 - Security policy: https://github.com/askahuman/askahuman/blob/main/SECURITY.md
+
+Approval protocol v2 signs the full question, exact typed answer, and agent acceptance receipt. Both signing identities are authenticated during pairing. The phone confirms receipt only after verifying the agent signature; lost receipts remain uncertain. An answer receipt does not claim an external action executed. Older saved pairings require an updated agent, refreshed phone app, and start_pairing with {"reset":true}. WebCrypto and IndexedDB are required; there is no unsigned fallback. Requests and encoded size are validated before pairing. Text is preserved exactly without trimming, including empty text; deadlines do not restart after reconnect or reload.

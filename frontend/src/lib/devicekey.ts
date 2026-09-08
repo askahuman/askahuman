@@ -4,7 +4,7 @@
 // clone — usable for signing across page reloads, never readable or copyable.
 // Only the PUBLIC key (SPKI) ever crosses the wire. Best-effort and never throws
 // to the caller: a browser without WebCrypto or IndexedDB yields null and the
-// phone falls back to unsigned decisions (compat). Styled after sw.ts's
+// phone keeps approvals unavailable until secure signing works. Like sw.ts's
 // openBadgeDB IndexedDB helper and push.ts's best-effort tone.
 //
 // Residual risk (see docs/decisions/architecture/0021): same-origin XSS on the
@@ -86,7 +86,7 @@ let initialization: Promise<DeviceKey | null> | null = null;
 /**
  * loadOrCreateDeviceKey returns this origin's device signer, creating and
  * persisting one on first use. Returns null (never throws) when WebCrypto or
- * IndexedDB is unavailable, so the phone degrades to unsigned decisions (compat).
+ * IndexedDB is unavailable, so the phone must keep pairing and decisions unavailable.
  * The private key is generated non-extractable; per the WebCrypto spec the public
  * half is always exportable, so exportKey('spki', publicKey) works while the
  * private key can never be exported.
@@ -119,7 +119,7 @@ async function loadDeviceKey(): Promise<DeviceKey | null> {
     const stored: StoredKey = { priv: kp.privateKey, spki: b64Encode(new Uint8Array(spkiBuf)) };
     return signerFrom(await chooseStoredKey(db, stored));
   } catch {
-    return null; // best-effort: never break decisions over a storage/crypto fault.
+    return null; // Caller keeps approvals unavailable until secure signing works.
   } finally {
     db?.close();
   }

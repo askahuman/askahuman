@@ -12,12 +12,12 @@
 // cannot be turned back into it, and a stolen key works only until either side
 // re-pairs. Removing an agent from the roster wipes its entry.
 
-import type { Decision } from './wire.ts';
+import type { PersistedProtocolState } from './session.ts';
 import { ROOM_RE, validRelayURL } from './payload.ts';
 import { b64Decode } from './b64.ts';
 
 /** StoredSession is one persisted paired agent. */
-export interface StoredSession {
+export interface StoredSession extends PersistedProtocolState {
   /** r is the relay WebSocket URL the session dials. */
   r: string;
   /** room is the 16-hex room id. */
@@ -28,11 +28,7 @@ export interface StoredSession {
   agent: string;
   /** vapid is the agent-delivered VAPID PUBLIC key, if one arrived. */
   vapid?: string;
-  /** seen is the bounded list of already-handled request ids (de-dupe). */
-  seen?: string[];
-  /** decisions maps answered request ids to the decision we sent, so a
-   *  re-announce after a page kill can re-send it (see session.sentDecisions). */
-  decisions?: Record<string, Decision>;
+
 }
 
 /** Persistence is the narrow storage interface the SessionManager depends on
@@ -47,7 +43,9 @@ const STORE_KEY = 'aah:sessions:v1';
 /** validStored reports whether one parsed entry is usable: a WS relay URL, a
  *  well-formed room id, and a key that decodes to exactly 32 bytes. */
 function validStored(s: StoredSession): boolean {
+  if (!s || typeof s !== 'object') return false;
   if (typeof s.r !== 'string' || !validRelayURL(s.r)) return false;
+  if (!s || typeof s !== 'object') return false;
   if (typeof s.room !== 'string' || !ROOM_RE.test(s.room)) return false;
   if (typeof s.key !== 'string') return false;
   try {

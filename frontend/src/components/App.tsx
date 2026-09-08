@@ -20,6 +20,7 @@ import { PushNotifications } from './PushNotifications.tsx';
 import { usePushNotifications } from './usePushNotifications.ts';
 import {
   ConfirmedScreen,
+  PendingScreen,
   ChoiceScreen,
   HomeScreen,
   ListeningScreen,
@@ -109,35 +110,29 @@ function usePalette(): Palette {
   return isDark ? dark : light;
 }
 
-/** useExpiryCountdown ticks an active request's expires_in_s down to 0, then
- *  calls onExpire(id) so the session leaves the actionable card — the user must
- *  not be able to approve a request the agent has already timed out on. */
-function useExpiryCountdown(state: SessionState, onExpire?: (id: string) => void): number | null {
-  const isCard = state.screen === 'yesno' || state.screen === 'choice' || state.screen === 'text';
-  const total = state.request?.expires_in_s ?? null;
-  const [remaining, setRemaining] = useState<number | null>(null);
-  const startedAt = useRef<number>(0);
+/** Render the signed absolute deadline. Screen/roster changes never create a
+ * new countdown; the agent's monotonic context remains the acceptance authority. */
+function useExpiryCountdown(
+  state: SessionState,
+  onExpire?: (id: string) => void,
+): number | null {
+  const deadline = state.request?.deadline_ms ?? 0;
   const reqID = state.request?.id;
-
+  const [remaining, setRemaining] = useState<number | null>(null);
   useEffect(() => {
-    if (!isCard || total == null) {
+    if (!deadline || !reqID) {
       setRemaining(null);
       return;
     }
-    startedAt.current = Date.now();
-    setRemaining(total);
-    const t = setInterval(() => {
-      const elapsed = Math.floor((Date.now() - startedAt.current) / 1000);
-      const left = Math.max(0, total - elapsed);
+    const tick = () => {
+      const left = Math.max(0, Math.ceil((deadline - Date.now()) / 1000));
       setRemaining(left);
-      if (left <= 0) {
-        clearInterval(t);
-        if (reqID) onExpire?.(reqID);
-      }
-    }, 1000);
-    return () => clearInterval(t);
-  }, [isCard, total, reqID]);
-
+      if (!left) onExpire?.(reqID);
+    };
+    tick();
+    const timer = setInterval(tick, 1000);
+    return () => clearInterval(timer);
+  }, [deadline, reqID]);
   return remaining;
 }
 
@@ -310,9 +305,7 @@ export default function App() {
       )}
       {renderScreen(c, state, expiresIn, {
         onSubmitCode,
-        pairError: pairError ?? (!showPair && state.pairError
-          ? 'Pairing failed. Get a new code from your agent and try again.'
-          : null),
+        pairError: pairError ?? state.pairError,
         onApprove: () => manager.approve(),
         onDecline: () => manager.decline(),
         onChoose: (l: string) => manager.choose(l),
@@ -362,10 +355,12 @@ function renderScreen(c: Palette, state: SessionState, expiresIn: number | null,
       );
     case 'text':
       return state.request ? (
-        <TextScreen key={state.request.id} c={c} req={state.request} expiresIn={expiresIn} onSend={h.onSend} />
+        <TextScreen key={state.request.id} c={c} req={state.request} expiresIn={expiresIn} onSend={h.onSend} error={state.answerError} />
       ) : (
         <ListeningScreen c={c} agent={state.agent} roomID={state.roomID} />
       );
+    case 'pending':
+      return <PendingScreen c={c} delivery={state.delivery ?? 'uncertain'} onRetry={h.onRetry} />;
     case 'confirmed':
       return state.result ? (
         <ConfirmedScreen

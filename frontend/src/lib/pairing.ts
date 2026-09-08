@@ -12,6 +12,16 @@
 
 import { b64Decode, b64Encode } from './b64.ts';
 import { Handshake } from './crypto.ts';
+import {
+  PROTOCOL,
+  UPGRADE_MESSAGE,
+  pairBinding,
+  strictJSON,
+  object,
+  importSigner,
+  canonicalBase64,
+  type PairHello,
+} from './protocol.ts';
 
 /** PairingPhase is the handshake's progress. */
 export type PairingPhase =
@@ -31,7 +41,11 @@ export interface PairingSend {
 export interface PairingEvents {
   onPhase?: (phase: PairingPhase) => void;
   /** onPaired delivers the 32-byte session key once both sides confirm. */
-  onPaired?: (sessionKey: Uint8Array) => void;
+  onPaired?: (
+    sessionKey: Uint8Array,
+    agentSigner: string,
+    publicKey: CryptoKey,
+  ) => void;
   onError?: (err: Error) => void;
 }
 
@@ -46,10 +60,20 @@ export class Pairing {
   private phase: PairingPhase = 'idle';
   private session?: Uint8Array;
   private started = false;
+  private finishing = false;
+  private agentSigner = '';
+  private agentPublic?: CryptoKey;
+  private readonly identity?: { room: string; signer: string };
   // A peer confirm can race ahead of our finish; buffer it.
   private pendingConfirm?: Uint8Array;
 
-  constructor(code: string, send: PairingSend, events: PairingEvents = {}) {
+  constructor(
+    code: string,
+    send: PairingSend,
+    events: PairingEvents = {},
+    identity?: { room: string; signer: string },
+  ) {
+    this.identity = identity;
     this.hs = Handshake.newB(code); // phone is always role B
     this.send = send;
     this.events = events;
@@ -70,11 +94,25 @@ export class Pairing {
    */
   start(): void {
     if (this.phase === 'paired' || this.phase === 'failed') return;
+    if (!this.identity) {
+      this.fail(new Error(UPGRADE_MESSAGE));
+      return;
+    }
     const msg = this.started ? this.startSameMsg() : this.hs.start();
     this.started = true;
     this.cachedPake = msg;
     if (this.phase === 'idle') this.setPhase('awaiting_peer_pake');
-    this.send.sendPake(b64Encode(msg));
+    this.send.sendPake(
+      b64Encode(
+        new TextEncoder().encode(
+          JSON.stringify({
+            protocol: PROTOCOL,
+            pake: b64Encode(msg),
+            signer: this.identity.signer,
+          } satisfies PairHello),
+        ),
+      ),
+    );
   }
 
   private cachedPake?: Uint8Array;
@@ -84,33 +122,54 @@ export class Pairing {
   }
 
   /** onPeerPake handles a peer {pake}: finish + send our confirm. */
-  onPeerPake(peerB64: string): void {
-    if (this.phase === 'paired' || this.phase === 'failed') return;
-    let peerMsg: Uint8Array;
-    try {
-      peerMsg = b64Decode(peerB64);
-    } catch (e) {
-      this.fail(new Error('pairing: bad pake base64'));
+  async onPeerPake(peerB64: string): Promise<void> {
+    if (
+      this.phase === 'paired' ||
+      this.phase === 'failed' ||
+      this.finishing ||
+      this.session
+    )
       return;
-    }
-    let confirm: Uint8Array;
-    let session: Uint8Array;
+    this.finishing = true;
     try {
-      const res = this.hs.finish(peerMsg); // throws on invalid element
-      confirm = res.confirm;
-      session = res.sessionKey;
+      if (!this.identity) throw new Error(UPGRADE_MESSAGE);
+      const hello = object(strictJSON(b64Decode(peerB64)), [
+        'protocol',
+        'pake',
+        'signer',
+      ]);
+      if (
+        hello.protocol !== PROTOCOL ||
+        !canonicalBase64(hello.pake, 32) ||
+        typeof hello.signer !== 'string'
+      )
+        throw new Error(UPGRADE_MESSAGE);
+      this.agentPublic = await importSigner(hello.signer);
+      if (this.currentPhase() === 'failed') return;
+      // A peer can speak first. Starting here also caches the exact outgoing
+      // point before finishing, so later relay events cannot re-randomize it.
+      if (!this.started) this.start();
+      const res = this.hs.finish(
+        b64Decode(hello.pake),
+        pairBinding(this.identity.room, hello.signer, this.identity.signer),
+      );
+      this.agentSigner = hello.signer;
+      this.session = res.sessionKey;
+      this.setPhase('awaiting_peer_confirm');
+      this.send.sendConfirm(b64Encode(res.confirm));
+      if (this.pendingConfirm) {
+        const buffered = this.pendingConfirm;
+        this.pendingConfirm = undefined;
+        this.verifyConfirm(buffered);
+      }
     } catch (e) {
-      this.fail(new Error(`pairing: finish: ${(e as Error).message}`));
-      return;
-    }
-    this.session = session;
-    this.setPhase('awaiting_peer_confirm');
-    this.send.sendConfirm(b64Encode(confirm));
-    // If the peer's confirm arrived before we finished, verify it now.
-    if (this.pendingConfirm) {
-      const buffered = this.pendingConfirm;
-      this.pendingConfirm = undefined;
-      this.verifyConfirm(buffered);
+      this.fail(
+        new Error(
+          `Pairing failed. ${UPGRADE_MESSAGE} (${(e as Error).message})`,
+        ),
+      );
+    } finally {
+      this.finishing = false;
     }
   }
 
@@ -141,11 +200,14 @@ export class Pairing {
       return;
     }
     if (!ok) {
-      this.fail(new Error('pairing: confirmation mismatch (wrong code or MITM)'));
+      this.fail(
+        new Error('pairing: confirmation mismatch (wrong code or MITM)'),
+      );
       return;
     }
     this.setPhase('paired');
-    if (this.session) this.events.onPaired?.(this.session);
+    if (this.session && this.agentPublic)
+      this.events.onPaired?.(this.session, this.agentSigner, this.agentPublic);
   }
 
   private fail(err: Error): void {
