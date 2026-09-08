@@ -17,6 +17,13 @@ The two images:
 - `ask-a-human-relay` — Go WebSocket rendezvous, built by **ko** (distroless static nonroot). Listens `:8080`, serves `/healthz` + `/ws`.
 - `ask-a-human-web` — static Astro PWA served by **nginx-unprivileged**. Listens `:8080` (non-root).
 
+Client relay text frames must be JSON objects within the relay parser's bounds
+(including Go's nesting limit). The relay reserves the top-level `_relay` key in
+every case/value form and rejects envelopes it cannot classify; it never assumes
+a Go parse failure also prevents JavaScript from reading a control signal.
+Admitted objects are forwarded byte-for-byte without interpreting application
+fields or ciphertext. Malformed/non-object text is closed with code `4003`.
+
 ## Hardening (base)
 
 Both Deployments run locked down (`base/{relay,web}-deployment.yaml`):
@@ -53,6 +60,53 @@ It targets GKE with:
 - `FrontendConfig` (HTTP → HTTPS redirect).
 - `BackendConfig` for the relay: `timeoutSec: 3600` so the GLB does not cut long-lived WebSockets; health check `/healthz` on port 8080.
 - Image refs: `<artifact-registry>/ask-a-human/{relay,web}:VERSION` (CI sets `VERSION`).
+
+### Relay client identity and capacity
+
+The relay defaults to **256 simultaneous connections per source IP** and **10,000
+live rooms**. A phone connected to 100 agents uses 100 connections; if the agents
+share its public NAT, the total is 200. The remaining 56 slots provide reconnect
+headroom. These are admission ceilings, not a tested global throughput guarantee:
+the relay still caps frames at 32 KiB and each connection at 120 frames/second.
+Tune `AAH_RELAY_MAX_CONNS_PER_IP` and `AAH_RELAY_MAX_ROOMS` against observed memory
+and connection pressure before increasing them; full-capacity load testing is
+still required for the pod's configured memory limit.
+
+Direct and local deployments ignore `X-Forwarded-For`. Proxy mode requires all
+three settings below. An incomplete or invalid configuration disables forwarded
+header trust and emits a configuration-only warning; it never logs headers or
+client identities. Existing deployments that set only `AAH_RELAY_TRUST_PROXY=1`
+must add the explicit CIDRs and position.
+
+| Setting | Meaning | GKE production overlay |
+| --- | --- | --- |
+| `AAH_RELAY_TRUST_PROXY` | Explicitly enable forwarded-header trust | `1` |
+| `AAH_RELAY_TRUSTED_PROXY_CIDRS` | Allowlisted **direct TCP peer** networks | `35.191.0.0/16,130.211.0.0/22,2600:2d00:1:1::/64` |
+| `AAH_RELAY_XFF_CLIENT_FROM_RIGHT` | Client position in the proxy-authored XFF suffix, from 1 to 16 | `2` |
+
+Google appends the client and forwarding-rule addresses, in that order. Earlier
+header values are client-controlled. The relay selects the second address from
+the right only when the TCP peer is in Google's documented GFE ranges and both
+suffix addresses parse; malformed or missing suffixes fall back to the TCP peer.
+Multiple header field lines are combined before suffix selection. A direct
+caller, including another pod, cannot select its own accounting key with XFF.
+See [Google's XFF contract](https://docs.cloud.google.com/load-balancing/docs/https#x-forwarded-for_header)
+and [GFE source ranges](https://docs.cloud.google.com/load-balancing/docs/firewall-rules).
+
+The prod relay Service explicitly enables an ingress NEG. This overlay requires
+**VPC-native GKE** and the global/classic `gce` ingress path, with GFE connecting
+directly to pod endpoints. See [GKE container-native load balancing](https://docs.cloud.google.com/kubernetes-engine/docs/concepts/ingress#container-native_load_balancing).
+If a node, sidecar, or another reverse proxy sits in that path, or the LB is
+regional/Envoy-based, use that topology's actual trusted peer CIDRs and exact
+suffix contract instead. Do not add all pod/node/private ranges or a universal
+CIDR to make forwarded headers work. `/0` trust is rejected.
+
+Before release, verify the live Service's NEG annotation, healthy NEG endpoints,
+and that two distinct external clients retain separate connection budgets. Check
+that prepending arbitrary XFF values does not create more budget for one client.
+The unit/integration suite covers the parser and 100 real paired rooms behind a
+single local IP; it does not certify the live load-balancer topology. Keep access
+logging disabled while validating (see below).
 
 ### Privacy: relay request logging MUST stay off (HARD INVARIANT)
 

@@ -18,7 +18,6 @@ import (
 	"net/http"
 	"os"
 	"strconv"
-	"strings"
 	"sync"
 	"time"
 
@@ -37,53 +36,6 @@ func logf(format string, args ...any) {
 	if verbose {
 		log.Printf(format, args...)
 	}
-}
-
-// trustProxy, when AAH_RELAY_TRUST_PROXY=1, makes clientIP read the rightmost
-// X-Forwarded-For hop (the IP the trusted L7 LB observed) instead of RemoteAddr.
-// Default OFF: direct-exposure deployments must NOT trust a client-supplied XFF.
-var trustProxy = os.Getenv("AAH_RELAY_TRUST_PROXY") == "1"
-
-// clientIP returns the key for the per-IP cap (and dev logging): the rightmost
-// X-Forwarded-For hop when behind a trusted proxy (the IP the trusted LB saw),
-// else the direct TCP peer. ref. m3-relay-xff: never trust a client-supplied
-// leftmost XFF; the rightmost hop is the one the trusted LB appended.
-func clientIP(req *http.Request) string {
-	host := remoteHost(req.RemoteAddr)
-	if !trustProxy {
-		return host
-	}
-	if ip := rightmostXFF(req.Header.Get("X-Forwarded-For")); ip != "" {
-		return ip
-	}
-	return host
-}
-
-// remoteHost strips the port from a host:port, returning addr unchanged if it
-// has none.
-func remoteHost(addr string) string {
-	h, _, err := net.SplitHostPort(addr)
-	if err != nil {
-		return addr
-	}
-	return h
-}
-
-// rightmostXFF returns the last syntactically-valid IP in an X-Forwarded-For
-// header value, or "" when none parses. The rightmost hop is the one the
-// trusted proxy appended; earlier (leftmost) hops are client-controllable and
-// must not be trusted as the cap key. ponytail: trusts exactly one proxy hop —
-// for N chained trusted proxies, skip N-1 from the right.
-func rightmostXFF(xff string) string {
-	parts := strings.Split(xff, ",")
-	for i := len(parts) - 1; i >= 0; i-- {
-		h := strings.TrimSpace(parts[i])
-		// Tolerate an accidental host:port hop.
-		if hh := remoteHost(h); net.ParseIP(hh) != nil {
-			return hh
-		}
-	}
-	return ""
 }
 
 // StatusRoomFull is the WebSocket close code returned when a third peer
@@ -106,11 +58,12 @@ const StatusPolicyViolation websocket.StatusCode = 4003
 var (
 	// maxRooms caps the number of simultaneously live rooms.
 	maxRooms = envInt("AAH_RELAY_MAX_ROOMS", 10000)
-	// maxConnsPerIP caps simultaneous connections from one client IP. A
-	// legitimate pairing needs at most one connection per IP per room, so a
-	// small cap still allows several rooms behind one NAT.
-	maxConnsPerIP = envInt("AAH_RELAY_MAX_CONNS_PER_IP", 64)
+	// A phone connected to 100 agents uses 100 sockets. When both ends share
+	// a NAT, those rooms use 200 sockets; 256 leaves bounded reconnect headroom.
+	maxConnsPerIP = envInt("AAH_RELAY_MAX_CONNS_PER_IP", defaultMaxConnsPerIP)
 )
+
+const defaultMaxConnsPerIP = 256
 
 // maxFrameBytes bounds a single inbound WebSocket frame (SetReadLimit). App
 // frames are small JSON envelopes around a base64 box; 32KiB is generous.
@@ -348,9 +301,11 @@ func (r *Relay) pump(ctx context.Context, roomID string, p *peer) {
 		// _relay signals. A peer setting _relay could spoof peer_joined /
 		// peer_left / undeliverable to the other side. We inspect ONLY the
 		// _relay field and never the opaque box, so we stay content-blind.
+		// If envelope classification fails, reject it instead of assuming
+		// clients share Go's parser limits.
 		if relaySet(data) {
-			logf("relay: client sent _relay, closing room=%s", roomID)
-			_ = p.conn.Close(StatusPolicyViolation, "relay: clients must not set _relay")
+			logf("relay: invalid client envelope, closing room=%s", roomID)
+			_ = p.conn.Close(StatusPolicyViolation, "relay: invalid client envelope")
 			return
 		}
 
@@ -362,19 +317,6 @@ func (r *Relay) pump(ctx context.Context, roomID string, p *peer) {
 		// Forward verbatim. The relay never parses app frames.
 		writeRaw(ctx, other, data)
 	}
-}
-
-// relaySet reports whether a client text frame carries a non-empty _relay
-// control field. It decodes only into wire.Frame (the relay-visible envelope);
-// the opaque box field is never inspected, preserving content-blindness. A
-// frame that does not parse as JSON is treated as not setting _relay and is
-// forwarded verbatim (the relay does not validate app frames).
-func relaySet(data []byte) bool {
-	var f wire.Frame
-	if err := json.Unmarshal(data, &f); err != nil {
-		return false
-	}
-	return f.Relay != ""
 }
 
 // probeRoom pings every current peer of roomID once; a peer that fails to
