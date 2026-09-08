@@ -1,7 +1,7 @@
 # 0021 — Per-device decision-signing keypair (a stolen session key cannot forge an approval)
 
 Date: 2026-07-03
-Status: accepted
+Status: superseded by [0026 — Versioned approval protocol](0026_versioned_approval_protocol.md) in v0.2.0. The first-seen enrollment and unsigned compatibility described below are historical; neither is supported by the current protocol.
 
 ## Context
 

@@ -6,11 +6,11 @@
 
 The architecture is deliberately split so no single piece holds everything:
 
-- **The relay is content-blind.** It only ever sees `base64(nonce‖ciphertext)` and which room talks to which. No database, RAM-only — restart means re-pair. It cannot read messages, and it is open-source and self-hostable (override `--relay` / `--public-relay`).
-- **The agent runs locally**, next to your editor (Cursor/Claude/Codex) via `npx @askahuman/mcp serve`. It holds the SPAKE2-derived key and the plaintext. It exposes `request_approval` (the only decision-bearing tool), plus two read-only helpers, `pair_status` and `start_pairing`, that report non-secret status and never return the code. `request_approval` blocks until a human answers (approve / decline / choose / reply). It never auto-approves.
-- **The phone PWA** (https://ask-a-human.ai/app) is the only other key-holder.
+- **The relay is content-blind.** It sees encrypted application traffic, public pairing/control messages, room identifiers, connection metadata and timing. It has no database and holds rooms in memory. It can disconnect peers, suppress, delay or replay traffic; it cannot decrypt application messages. Existing paired peers can reconnect after a relay restart. It is open-source and self-hostable (override `--relay` / `--public-relay`).
+- **The agent runs locally**, next to your editor (Cursor/Claude/Codex) via `npx @askahuman/mcp serve`. It holds the session and signing keys in memory; restarting this process requires fresh pairing. It exposes `request_approval` (the only decision-bearing tool), read-only `pair_status`, and `start_pairing`, which starts pairing or explicitly resets it with `reset:true`. These helpers return non-secret status and never the code. `request_approval` blocks until a human answers (approve / decline / choose / reply), cancellation, or expiry. It never auto-approves.
+- **The phone PWA** (https://ask-a-human.ai/app) is the other key-holder. It persists session data in localStorage and a non-extractable signing key plus sequence state in IndexedDB. Browser data is not an encrypted vault: copying the symmetric key can expose recorded message content. Code executing in this origin can use its signing key and compromise approvals.
 
-Pairing uses a Magic-Wormhole-style SPAKE2 handshake: a short code becomes a strong shared key, so the relay cannot MITM the exchange.
+Pairing uses a Magic-Wormhole-style SPAKE2 handshake: a private short code authenticates the exchange and derives a shared key. Protocol v2 binds both signing identities and the room into this exchange, then signs complete questions, typed answers and acceptance receipts. A copied symmetric key alone cannot forge these signatures. Keep the complete code private: someone who knows it can race the intended peer during pairing. See [ADR 0026](docs/decisions/architecture/0026_versioned_approval_protocol.md) for the protocol and its limits.
 
 Because the relay can't read anything, the **highest-value targets are the PWA and the pairing channel**:
 
@@ -70,10 +70,12 @@ changes domains, add its documented ownership/endpoint policy with regression
 tests rather than disabling these checks. Foreground approvals continue to use
 the relay when push is unavailable.
 
-This boundary limits network access from a compromised phone/session key. It
-does not authenticate subscription updates with the device signing key, prove
-which person owns a permitted subscription, or solve multi-agent VAPID ownership.
-Those are separate protocol concerns. Tests use local TLS fixtures for delivery;
+This destination boundary limits network access even from a compromised phone.
+Protocol v2 separately authenticates each subscription update with the paired
+device's signing key and an increasing sequence. Each agent has its own VAPID
+key and room-scoped browser registration. Neither signature verification nor
+provider allowlisting proves which person owns a permitted subscription.
+Tests use local TLS fixtures for delivery;
 physical iPhone wake-up and real provider delivery still require device testing.
 
 ## Supported versions

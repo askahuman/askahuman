@@ -66,6 +66,8 @@ Running your own relay? Point the agent at it with `--relay <wss-url>` (and `--p
 
 The hosted app at `ask-a-human.ai` connects only to its hosted relay. For a custom relay, open your self-hosted PWA and set its relay URL in Advanced. If the relay uses a different origin from that PWA, allow that specific origin in your server's `connect-src` CSP. Local development continues to accept loopback relay URLs.
 
+Upgrading from 0.1.x? Version 0.2.0 requires an updated agent and phone app, followed by fresh pairing. See the [upgrade and iPhone test guide](docs/releases/0.2.0.md).
+
 ## Works with your agents
 
 <table>
@@ -158,7 +160,7 @@ No data to sell, no funnel, no catch. We built it because we needed it, and our 
 
 ## How it works
 
-The MCP server runs **locally** on your machine, on purpose. It is the only party holding the key and the plaintext, so it is never hosted. Only the content-blind relay lives on a server, and it is a dumb pipe.
+The MCP server runs **locally** on your machine. It and your phone hold the keys and plaintext. The hosted relay forwards encrypted traffic between them.
 
 ```
   AGENT SIDE                    RELAY (content-blind)          YOUR PHONE
@@ -215,8 +217,8 @@ This is the whole point, so it is built to be boring and verifiable.
 
 - **End-to-end encrypted.** Plaintext only ever exists on your machine and on your phone.
 - **Content-blind relay.** It only ever forwards `base64(nonce‖ciphertext)` plus which room talks to which. It can record, delay, replay, or drop traffic. Signed request digests and per-pair sequence checks prevent it from forging a decision or rolling observed authorization state backward.
-- **No accounts, no database.** Pairing lives in RAM for the server's lifetime. Restart = re-pair. There is nothing on the relay to breach: no accounts, no database, content-blind. (The real attack surface is your phone's PWA and the pairing channel. See [`SECURITY.md`](SECURITY.md).)
-- **Pairing is a SPAKE2-style PAKE.** A short code becomes a strong shared key. Even if the code is shoulder-surfed, an attacker gets exactly **one** online guess against the live handshake.
+- **No accounts or relay database.** The local agent retains pairing secrets in memory; restarting that agent requires re-pairing. The phone persists its pairing in browser storage. A relay restart disconnects the peers, which can reconnect using their existing pairing. See [`SECURITY.md`](SECURITY.md) for endpoint and storage risks.
+- **Pairing is a SPAKE2-style PAKE.** A short code becomes a strong shared key. A failed confirmation ends the pairing attempt, limiting online password guesses. Keep the code private: someone who learns the complete code can race the intended phone during pairing.
 - **App traffic is sealed with NaCl secretbox** (XSalsa20-Poly1305), keyed by the symmetric SPAKE2 session key.
 
 The PAKE is an in-house construction following [RFC 9382](https://www.rfc-editor.org/rfc/rfc9382) over the ristretto255 group ([RFC 9496](https://www.rfc-editor.org/rfc/rfc9496)), Magic-Wormhole-inspired. Go uses [`gtank/ristretto255`](https://github.com/gtank/ristretto255), the PWA uses [`@noble/curves`](https://github.com/paulmillr/noble-curves), and Go to JS interop is pinned by `frontend/test/spake2-interop.mjs`. The short code is the PAKE password: it never reaches the model and never travels in a URL.

@@ -1,6 +1,6 @@
 # 0026 — Versioned, mutually authenticated approval protocol
 
-Status: implementation in progress. Supersedes the unsigned compatibility mode and post-pairing key enrollment in ADR 0021. Addresses review findings R02, R07, R08, and R09; retains the R01/R03 acceptance guards and the atomic signer initialization from R16.
+Status: accepted for v0.2.0. Supersedes the unsigned compatibility mode and post-pairing key enrollment in ADR 0021. Addresses review findings R02, R07, R08, and R09; retains the R01/R03 acceptance guards and the atomic signer initialization from R16.
 
 ## Trust and pairing
 
@@ -26,7 +26,7 @@ A new request receives one positive, safe-integer `request_seq` from the paired 
 
 Before asynchronously signing a subscription update, the phone reserves the next positive `push_seq` in one IndexedDB readwrite transaction. Reservations serialize across tabs and survive page reloads. An older signing completion checks the latest reservation and does not send after a newer reservation. The agent verifies the signature and provider policy, then atomically accepts only a sequence newer than its last subscription update for the same paired session. Recorded old or conflicting equal-sequence endpoints cannot roll it back. Invalid updates do not consume the agent's high-water sequence. Counters never wrap; exhaustion fails closed and requires re-pairing.
 
-The ledger is keyed by the room and both PAKE-bound signing identities. It is authoritative over whole-roster localStorage snapshots: a stale roster cannot lower a request high-water mark or a push counter, and a restored card must match the ledger before becoming actionable. Missing or failed sequence storage retains the saved pairing for explicit repair guidance and does not open an approval socket. New pairing creates ledger state before it becomes restorable. Forget deletes the corresponding ledger entry; storage is bounded to 256 retained pairings. The agent's counters reset only with a fresh paired session and identities. Protocol v2 is not yet released, so incomplete pre-release v2 state also requires explicit re-pairing.
+The ledger is keyed by the room and both PAKE-bound signing identities. It is authoritative over whole-roster localStorage snapshots: a stale roster cannot lower a request high-water mark or a push counter, and a restored card must match the ledger before becoming actionable. Missing or failed sequence storage retains the saved pairing for explicit repair guidance and does not open an approval socket. New pairing creates ledger state before it becomes restorable. Forget deletes the corresponding ledger entry; storage is bounded to 256 retained pairings. The agent's counters reset only with a fresh paired session and identities. Incomplete state from pre-release v2 builds also requires explicit re-pairing.
 
 These checks prevent rollback relative to authenticated state already observed by the recipient. They do not guarantee delivery or reveal a newer request that the transport has completely suppressed. The transport can record, delay or drop frames; only the currently pending question can produce a new agent acceptance. A replayed VAPID message carries the same immutable public key for that agent process/session.
 
