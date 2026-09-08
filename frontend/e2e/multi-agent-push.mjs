@@ -21,6 +21,16 @@ page.on('request', (request) => requests.push(request.url()));
 const fixture = async (key, value) => page.evaluate(([key, value]) => localStorage.setItem(`push-fixture:${key}`, JSON.stringify(value)), [key, value]);
 const readFixture = async (key, fallback) => page.evaluate(([key, fallback]) => JSON.parse(localStorage.getItem(`push-fixture:${key}`) || JSON.stringify(fallback)), [key, fallback]);
 const ready = (n) => page.getByTestId('push-status').getByText(`Notifications set up for ${n} ${n === 1 ? 'agent' : 'agents'}.`, { exact: true }).waitFor();
+async function resizeViewport(viewport) {
+  await page.setViewportSize(viewport);
+  // The DevTools resize acknowledgement can precede visualViewport's event. Wait
+  // for the fixed app shell to adopt its observed height before measuring it.
+  await page.waitForFunction((height) => {
+    const vv = window.visualViewport;
+    const observed = Math.round(vv ? vv.height * (vv.scale || 1) : innerHeight);
+    return observed === height && parseFloat(document.documentElement.style.getPropertyValue('--app-vvh')) === height;
+  }, viewport.height);
+}
 async function shot(name) {
   if (!process.env.PUSH_SHOTS) return;
   await mkdir(process.env.PUSH_SHOTS, { recursive: true });
@@ -90,10 +100,10 @@ try {
   const a = await pair('notification-agent-a');
   await page.getByRole('button', { name: 'Enable notifications' }).waitFor();
   assert.deepEqual(await readFixture('events', []), [], 'pairing must not request permission or subscribe');
-  await page.setViewportSize({ width: 320, height: 568 });
+  await resizeViewport({ width: 320, height: 568 });
   const button = page.getByRole('button', { name: 'Enable notifications' });
   const rect = await button.boundingBox();
-  assert.ok(rect && rect.height >= 44 && rect.y >= 0 && rect.y + rect.height <= 568);
+  assert.ok(rect && rect.height >= 44 && rect.y >= 0 && rect.y + rect.height <= 568, `44px notification control must fit the settled 320×568 viewport: ${JSON.stringify(rect)}`);
   await shot('permission-320');
   await button.click();
   await ready(1);
@@ -121,7 +131,7 @@ try {
   assert.deepEqual(await page.evaluate(() => caches.keys()), cachesBefore, 'wake-only workers add no precache copies');
   assert.equal(requests.some((url) => url.includes('/app/_push/')), false, 'room scope is registration metadata, never a fetched URL');
   checks.push('two actual agents with different VAPID keys retain separate fixture subscriptions on activated native workers; one direct-gesture permission request; no extra shell caches or room URL requests');
-  await page.setViewportSize({ width: 390, height: 844 });
+  await resizeViewport({ width: 390, height: 844 });
   await shot('both-agents-390');
 
   await page.reload(); await ready(2);
@@ -196,7 +206,7 @@ try {
   await page.reload(); await ready(1);
   checks.push('forget removes only its room subscription/registration, preserves the sibling and shell, and remains removed after reload');
 
-  await page.setViewportSize({ width: 320, height: 568 });
+  await resizeViewport({ width: 320, height: 568 });
   await context.setOffline(true);
   for (const permission of ['denied', 'default']) {
     await fixture('permission', permission);
@@ -212,7 +222,7 @@ try {
       const enable = page.getByRole('button', { name: 'Enable notifications' });
       await enable.scrollIntoViewIfNeeded();
       const rect = await enable.boundingBox();
-      assert.ok(rect && rect.height >= 44 && rect.y >= 0 && rect.y + rect.height <= 568);
+      assert.ok(rect && rect.height >= 44 && rect.y >= 0 && rect.y + rect.height <= 568, `44px notification control must fit the settled 320×568 viewport: ${JSON.stringify(rect)}`);
       await shot('offline-permission-320');
       await enable.click();
       assert.equal((await readFixture('events', [])).filter((e) => e.type === 'permission').at(-1).gesture, true);
