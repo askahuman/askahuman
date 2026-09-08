@@ -9,7 +9,7 @@ const root = createRoot(document.getElementById('root')!);
 let version = 0;
 const test = {
   answers: [] as unknown[],
-  render(kind: string, request: Request) {
+  render(kind: string, request: Request, confirmation: { label?: string; detail?: string; agent?: string } = {}) {
     this.answers = [];
     version++;
     const props = { c: dark, req: request, expiresIn: null };
@@ -21,7 +21,7 @@ const test = {
         : kind === 'text'
           ? <TextScreen {...props} onSend={record} />
           : kind === 'confirmed'
-            ? <ConfirmedScreen c={dark} icon="✓" label="Approved" approved detail="Decision received." agent="test agent" />
+            ? <ConfirmedScreen c={dark} icon="✓" label="Approved" approved detail="Decision received." agent="test agent" onDone={() => record('done')} {...confirmation} />
             : kind === 'offline'
               ? <OfflineScreen c={dark} attempt={1} onRetry={() => {}} />
               : <ListeningScreen c={dark} agent="test agent" roomID="test-room" />;

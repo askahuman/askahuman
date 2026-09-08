@@ -24,6 +24,7 @@ import {
   Session,
   type SessionOptions,
   type SessionState,
+  type ConfirmedResult,
   initialState,
 } from "./session.ts";
 
@@ -302,6 +303,9 @@ export class SessionManager {
   }
   reply(text: string): void {
     this.activeSession()?.reply(text);
+  }
+  dismissConfirmation(result: ConfirmedResult): void {
+    this.activeSession()?.dismissConfirmation(result);
   }
   retry(): void {
     this.activeSession()?.retry();

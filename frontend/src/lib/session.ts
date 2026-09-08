@@ -153,7 +153,6 @@ export class Session {
   private readonly sentDecisions = new Map<string, Decision>();
   private readonly receipts = new Map<string, Ack>();
   private readonly listeners = new Set<(s: SessionState) => void>();
-  private confirmedTimer: ReturnType<typeof setTimeout> | null = null;
   private receiptTimer: ReturnType<typeof setInterval> | null = null;
   private readonly inbox: string[] = [];
   private draining = false;
@@ -374,7 +373,6 @@ export class Session {
   }
   close(): void {
     this.closed = true;
-    if (this.confirmedTimer) clearTimeout(this.confirmedTimer);
     if (this.receiptTimer) clearInterval(this.receiptTimer);
     this.inbox.length = 0;
     this.relay.close();
@@ -394,6 +392,11 @@ export class Session {
   }
   approve(): void {
     void this.sendDecision({ approved: true }, 'yesno');
+  }
+  /** Dismiss only the receipt the user saw, never a newer request or result. */
+  dismissConfirmation(result: ConfirmedResult): void {
+    if (this.closed || this.state.screen !== 'confirmed' || this.state.result !== result) return;
+    this.set({ screen: this.state.conn === 'closed' ? 'offline' : 'listening', result: null });
   }
   decline(): void {
     void this.sendDecision({ approved: false }, 'yesno');
@@ -822,11 +825,6 @@ export class Session {
           detail,
         },
       });
-      if (this.confirmedTimer) clearTimeout(this.confirmedTimer);
-      this.confirmedTimer = setTimeout(() => {
-        if (!this.closed && this.state.screen === 'confirmed')
-          this.set({ screen: 'listening', result: null });
-      }, 2600);
     } else
       this.set({
         screen: 'pending',

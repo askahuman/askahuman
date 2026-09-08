@@ -309,6 +309,7 @@ export default function App() {
         onDecline: () => manager.decline(),
         onChoose: (l: string) => manager.choose(l),
         onSend: (t: string) => manager.reply(t),
+        onDone: () => { if (state.result) manager.dismissConfirmation(state.result); },
         onRetry: () => manager.retry(),
       }, <PushNotifications c={c} push={push} />)}
     </>
@@ -322,6 +323,7 @@ interface Handlers {
   onDecline: () => void;
   onChoose: (label: string) => void;
   onSend: (text: string) => void;
+  onDone: () => void;
   onRetry: () => void;
 }
 
@@ -369,6 +371,7 @@ function renderScreen(c: Palette, state: SessionState, expiresIn: number | null,
           approved={state.result.approved}
           detail={state.result.detail}
           agent={state.agent}
+          onDone={h.onDone}
         />
       ) : (
         <ListeningScreen c={c} agent={state.agent} roomID={state.roomID} />

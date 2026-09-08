@@ -183,6 +183,59 @@ describe('authenticated Session protocol', () => {
       session.close();
     }
   });
+  it('Done dismisses only the displayed receipt and sends no decision', async () => {
+    const { session, ws, agentKey } = await paired();
+    await sendReq(ws, agentKey, req());
+    session.approve();
+    await acknowledge(ws, agentKey);
+    const result = session.getState().result!;
+    session.dismissConfirmation({ ...result });
+    expect(session.getState().screen).toBe('confirmed');
+    session.dismissConfirmation(result);
+    expect(session.getState().screen).toBe('listening');
+    expect(session.getState().result).toBeNull();
+    const dismissed = session.getState();
+    session.dismissConfirmation(result);
+    expect(session.getState()).toBe(dismissed);
+    expect(decisions(ws, agentKey)).toHaveLength(1);
+  });
+  it('a delayed Done cannot discard a new request or a later receipt with identical content', async () => {
+    const { session, ws, agentKey } = await paired();
+    await sendReq(ws, agentKey, req('first'));
+    session.approve();
+    await acknowledge(ws, agentKey);
+    const first = session.getState().result!;
+    await sendReq(ws, agentKey, req('next'));
+    session.dismissConfirmation(first);
+    expect(session.getState().screen).toBe('yesno');
+    expect(session.getState().request?.id).toBe('next');
+    session.approve();
+    await until(() => decisions(ws, agentKey).length === 2);
+    await acknowledge(ws, agentKey);
+    const next = session.getState().result!;
+    expect(next).toEqual(first);
+    expect(next).not.toBe(first);
+    session.dismissConfirmation(first);
+    expect(session.getState().result).toBe(next);
+    expect(session.getState().screen).toBe('confirmed');
+    session.dismissConfirmation(next);
+    expect(session.getState().screen).toBe('listening');
+  });
+  it('Done returns an unavailable connection to offline and does nothing after close', async () => {
+    const { session, ws, agentKey } = await paired();
+    await sendReq(ws, agentKey, req());
+    session.approve();
+    await acknowledge(ws, agentKey);
+    const result = session.getState().result!;
+    ws.close();
+    expect(session.getState().screen).toBe('confirmed');
+    session.dismissConfirmation(result);
+    expect(session.getState().screen).toBe('offline');
+    session.close();
+    const closed = session.getState();
+    session.dismissConfirmation(result);
+    expect(session.getState()).toBe(closed);
+  });
   it('rejects a copied-session-key attacker changing every displayed request field', async () => {
     const { session, ws, agentKey } = await paired();
     const original = await signRequest(agentKey, {
