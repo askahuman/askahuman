@@ -38,35 +38,57 @@ So reach back. `ask-a-human` lets that one agent tap you on the shoulder: it pin
      terminal blocking on request_approval  ->  iPhone buzz + Yes/No card + tap  ->  terminal unblocks.
      Then drop in: <p align="center"><img src="https://ask-a-human.ai/demo.gif" width="720" alt="ask-a-human: an agent asks, your phone buzzes, you tap, it continues" /></p> -->
 
-## Setup in 30 seconds
+## Setup
 
-Zero install. Zero account. Zero API key.
+Use agent **0.2.1** with the current phone app. [Download and verify the signed GitHub release binary](docs/releases/0.2.1.md#upgrade), then keep its full path for the configuration below. This works while npm publication is unavailable; use an exact compatible version rather than an older or unpinned npm package. ask-a-human needs no account or API key.
 
-Paste this into your MCP client config (Cursor `~/.cursor/mcp.json`, Claude Desktop `claude_desktop_config.json`, Codex, or any MCP client), then restart the agent.
+### Codex
+
+Register the local server with the Codex CLI, replacing the example path with your verified binary:
+
+```sh
+codex mcp add ask-a-human -- "/absolute/path/to/ask-a-human" serve
+```
+
+Then edit the resulting entry in `~/.codex/config.toml` to allow time for a phone response. You can also add this table directly, without running the command above:
+
+```toml
+[mcp_servers.ask-a-human]
+command = "/absolute/path/to/ask-a-human"
+args = ["serve"]
+tool_timeout_sec = 600
+```
+
+`600` allows ten minutes for a tool call; increase it if you need longer. Codex's default is 60 seconds, and a request's `expires_in_s` can end the wait sooner. The Codex CLI and desktop/IDE clients on the same host share this configuration. See the [official Codex MCP documentation](https://developers.openai.com/codex/mcp).
+
+Restart your Codex session, then use `codex mcp list` or `/mcp` in the terminal UI to check the server. Ask Codex to call `start_pairing`, then follow the phone steps below.
+
+### Cursor and Claude Desktop
+
+For Cursor (`~/.cursor/mcp.json`) or Claude Desktop (`claude_desktop_config.json`), use their JSON configuration and restart the client:
 
 ```json
 {
   "mcpServers": {
     "ask-a-human": {
-      "command": "npx",
-      "args": ["-y", "@askahuman/mcp", "serve"]
+      "command": "/absolute/path/to/ask-a-human",
+      "args": ["serve"]
     }
   }
 }
 ```
 
-That is it. Here is what happens:
+### Pair your phone
 
-- `npx` fetches one static release binary on first run.
-- It defaults to the hosted relay `wss://ask-a-human.ai/ws` and the PWA at `https://ask-a-human.ai`.
-- The first `request_approval` prints the pairing code to stderr **and** opens a local loopback browser page showing it. The code is never in a URL.
+- The local server defaults to the hosted relay `wss://ask-a-human.ai/ws` and the PWA at `https://ask-a-human.ai`.
+- `start_pairing` (or the first `request_approval`) prints the pairing code to stderr **and** opens a local loopback browser page showing it. The code is never in a URL.
 - Pin `https://ask-a-human.ai/app` to your iPhone home screen as a PWA, then type the code. (On iOS, Web Push only works once the app is installed to the home screen, and wake-ups are best-effort; when you open the app it shows a pending-count badge.)
 
 Running your own relay? Point the agent at it with `--relay <wss-url>` (and `--public-relay <wss-url>` if your phone reaches the relay at a different address). See [self-hosting](#self-hosting).
 
 The hosted app at `ask-a-human.ai` connects only to its hosted relay. For a custom relay, open your self-hosted PWA and set its relay URL in Advanced. If the relay uses a different origin from that PWA, allow that specific origin in your server's `connect-src` CSP. Local development continues to accept loopback relay URLs.
 
-Upgrading from 0.1.x? Version 0.2.0 requires an updated agent and phone app, followed by fresh pairing. See the [upgrade and iPhone test guide](docs/releases/0.2.0.md).
+Upgrading from 0.1.x? Version 0.2.1 requires an updated agent and phone app, followed by fresh pairing. See the [upgrade and iPhone test guide](docs/releases/0.2.1.md).
 
 ## Works with your agents
 
@@ -81,7 +103,7 @@ Upgrading from 0.1.x? Version 0.2.0 requires an updated agent and phone app, fol
   </tr>
 </table>
 
-If it speaks MCP, it can reach you. Same one-line config, zero extra setup.
+If it speaks MCP, it can reach you. Configure ask-a-human as a local stdio MCP server in your client.
 
 ## What lands on your phone
 
@@ -230,23 +252,23 @@ Read every line. See [`SECURITY.md`](SECURITY.md) and the ADRs in [`docs/decisio
 The server is already local. To point at your own relay, pass `--relay`:
 
 ```bash
-npx -y @askahuman/mcp serve --relay <wss-url>
+"/absolute/path/to/ask-a-human" serve --relay <wss-url>
 ```
 
 If your phone dials the relay at a different URL than the agent does, add `--public-relay`:
 
 ```bash
-npx -y @askahuman/mcp serve --relay <wss-url> --public-relay <wss-url>
+"/absolute/path/to/ask-a-human" serve --relay <wss-url> --public-relay <wss-url>
 ```
 
-Or in your MCP client config:
+Or in a client that uses JSON configuration (for Codex, add the same flags to `args` in the TOML table above):
 
 ```json
 {
   "mcpServers": {
     "ask-a-human": {
-      "command": "npx",
-      "args": ["-y", "@askahuman/mcp", "serve", "--relay", "wss://your-relay/ws"]
+      "command": "/absolute/path/to/ask-a-human",
+      "args": ["serve", "--relay", "wss://your-relay/ws"]
     }
   }
 }
