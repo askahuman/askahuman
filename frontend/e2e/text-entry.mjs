@@ -1,5 +1,5 @@
-// Real TextScreen regression: composition Enter cannot send, while ordinary
-// Enter, explicit Send, and exact single-line paste remain usable.
+// Real reply and pairing controls: composition Enter cannot submit, while
+// ordinary Enter, explicit buttons, and exact single-line paste remain usable.
 // Chromium uses its native IME composition path. Both engines also exercise
 // KeyboardEvent composition flags, including the legacy keyCode 229 boundary.
 import assert from 'node:assert/strict';
@@ -14,10 +14,15 @@ import { chromium, webkit } from 'playwright';
 const frontend = fileURLToPath(new URL('../', import.meta.url));
 const out = await mkdtemp(join(tmpdir(), 'aah-text-entry-'));
 execFileSync('bun', ['build', 'e2e/fixtures/phone-interactions.tsx', '--target=browser', `--outfile=${join(out, 'fixture.js')}`], { cwd: frontend, stdio: 'pipe' });
-const fixture = await readFile(join(out, 'fixture.js'));
+execFileSync('bun', ['build', 'e2e/fixtures/hosted-pairing.tsx', '--target=browser', `--outfile=${join(out, 'pair.js')}`], { cwd: frontend, stdio: 'pipe' });
+const fixtures = new Map([
+  ['/fixture.js', await readFile(join(out, 'fixture.js'))],
+  ['/pair.js', await readFile(join(out, 'pair.js'))],
+]);
 const server = createServer((req, res) => {
-  res.setHeader('Content-Type', req.url === '/fixture.js' ? 'text/javascript' : 'text/html');
-  res.end(req.url === '/fixture.js' ? fixture : '<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"></head><body><div id="root"></div><script type="module" src="/fixture.js"></script></body></html>');
+  const fixture = fixtures.get(req.url);
+  res.setHeader('Content-Type', fixture ? 'text/javascript' : 'text/html');
+  res.end(fixture ?? `<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"></head><body><div id="root"></div><script type="module" src="${req.url === '/pair/' ? '/pair.js' : '/fixture.js'}"></script></body></html>`);
 });
 await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
 const origin = `http://127.0.0.1:${server.address().port}`;
@@ -95,6 +100,51 @@ try {
     await send.click();
     assert.deepEqual(await received(), [longReply]);
     checks.push(`${name}: native single-line paste and Send preserve the complete long reply`);
+
+    // The pairing fixture records attempts; it cannot open a relay connection.
+    const codeInput = page.getByTestId('code-input');
+    const submissions = () => page.evaluate(() => window.pairingSubmissions);
+    const expectedPair = [{ code: 'ABCDE-23456', relay: origin.replace('http:', 'ws:') + '/ws' }];
+    const openPairing = async () => {
+      await page.goto(origin + '/pair/');
+      await codeInput.waitFor();
+      await codeInput.focus();
+    };
+    if (name === 'chromium') {
+      await openPairing();
+      await codeInput.fill('ABCDE-2345');
+      await codeInput.evaluate(el => {
+        el.setSelectionRange(el.value.length, el.value.length);
+        window.compositionEnter = null;
+        el.addEventListener('keydown', e => { if (e.key === 'Enter') window.compositionEnter = { trusted: e.isTrusted, composing: e.isComposing }; });
+      });
+      const cdp = await context.newCDPSession(page);
+      try {
+        await cdp.send('Input.imeSetComposition', { text: '6', selectionStart: 1, selectionEnd: 1 });
+        assert.equal(await codeInput.inputValue(), 'ABCDE-23456', 'the formatter admits a complete code while its last symbol is still composing');
+        await page.keyboard.press('Enter');
+        assert.deepEqual(await page.evaluate(() => window.compositionEnter), { trusted: true, composing: true });
+        assert.deepEqual(await submissions(), [], 'native composition Enter must not initiate pairing');
+        assert.equal(await page.getByTestId('pair-waiting').count(), 0);
+        await cdp.send('Input.insertText', { text: '6' });
+        assert.equal(await codeInput.inputValue(), 'ABCDE-23456');
+        assert.deepEqual(await submissions(), [], 'committing the final code symbol must not initiate pairing');
+        await page.keyboard.press('Enter');
+        assert.deepEqual(await submissions(), expectedPair, 'ordinary Enter submits the completed code');
+      } finally { await cdp.detach(); }
+      checks.push('chromium: native composition of a valid final code symbol cannot pair; later Enter submits once');
+    }
+    for (const init of [{ isComposing: true, keyCode: 13 }, { isComposing: false, keyCode: 229 }]) {
+      await openPairing();
+      await codeInput.fill('ABCDE-23456');
+      await codeInput.dispatchEvent('keydown', { key: 'Enter', code: 'Enter', ...init });
+      assert.deepEqual(await submissions(), [], 'IME Enter must not initiate pairing');
+      assert.equal(await page.getByTestId('pair-waiting').count(), 0);
+      if (init.isComposing) await page.keyboard.press('Enter');
+      else await page.getByTestId('code-submit').click();
+      assert.deepEqual(await submissions(), expectedPair);
+      checks.push(`${name}: pairing composing=${init.isComposing}, keyCode=${init.keyCode} cannot submit; deliberate submission works`);
+    }
     assert.deepEqual(errors, []);
     await context.close(); await browser.close(); browser = null;
   }
