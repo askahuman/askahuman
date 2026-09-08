@@ -4,6 +4,7 @@
 The CLI requires an Actions runner and uses an isolated Connect Gateway config.
 No Compute API or cluster-wide read; missing namespace permissions fail closed.
 """
+import ipaddress
 import json
 import os
 import re
@@ -46,16 +47,19 @@ def failure_class(error):
 class Report:
     def __init__(self):
         self.ok = True
+        self.failures = {}
 
     def _result(self, field, name, predicate):
         # Names are constants at call sites. Untrusted API/CLI exception messages
         # may contain credentials, headers or private resource paths: discard.
         result = {field: name}
+        self.failures.pop(name, None)
         try:
             ok = bool(predicate())
         except Exception as error:
             ok = False
             result["failure"] = failure_class(error)
+            self.failures[name] = result["failure"]
         result["ok"] = ok
         print(json.dumps(result), flush=True)
         return ok
@@ -343,19 +347,62 @@ def endpoints_match(pods, slices):
     return bool(expected) and expected == observed
 
 
-def core_endpoints_match(pods, endpoints):
-    # This is additional evidence only, never an EndpointSlice fallback gate.
-    # Refuse the deprecated API's truncated representation and unready entries.
-    if endpoints["metadata"].get("annotations", {}).get("endpoints.kubernetes.io/over-capacity"):
+def core_endpoints_match(service, pods, endpoints):
+    # Core Endpoints cannot represent dual-stack or large endpoint sets fully.
+    # Only the current single-pod, single-address, single-port topology qualifies.
+    if service["spec"].get("publishNotReadyAddresses", False) is not False:
         return False
-    slices = {"items": []}
-    for subset in endpoints.get("subsets", []):
-        if subset.get("notReadyAddresses"):
-            return False
-        slices["items"].append({"ports": subset["ports"], "endpoints": [
-            {"conditions": {"ready": True}, "targetRef": a["targetRef"], "addresses": [a["ip"]]}
-            for a in subset.get("addresses", [])
-        ]})
+    if service["spec"]["selector"] != {"app": RELAY}:
+        return False
+    service_ports = service["spec"]["ports"]
+    if (len(service_ports) != 1 or service_ports[0]["port"] != 8080
+            or service_ports[0]["targetPort"] != 8080 or service_ports[0].get("protocol", "TCP") != "TCP"):
+        return False
+    metadata = endpoints["metadata"]
+    if metadata.get("name") != RELAY or metadata.get("namespace") != NAMESPACE:
+        return False
+    if "endpoints.kubernetes.io/over-capacity" in metadata.get("annotations", {}):
+        return False
+    selected = active_pods(pods)
+    if len(selected) != 1:
+        return False
+    pod = selected[0]
+    pod_ips = pod["status"]["podIPs"]
+    if len(pod_ips) != 1 or pod["status"]["phase"] != "Running":
+        return False
+    pod_ip = pod_ips[0]["ip"]
+    if not isinstance(pod_ip, str) or "%" in pod_ip:
+        return False
+    ipaddress.ip_address(pod_ip)  # Reject malformed data; never echo an address.
+    ready = [c for c in pod["status"]["conditions"] if c["type"] == "Ready"]
+    if len(ready) != 1 or ready[0]["status"] != "True":
+        return False
+    subsets = endpoints.get("subsets", [])
+    if len(subsets) != 1:
+        return False
+    subset = subsets[0]
+    if subset.get("notReadyAddresses"):
+        return False
+    ports = subset["ports"]
+    if len(ports) != 1 or ports[0]["port"] != 8080 or ports[0].get("protocol", "TCP") != "TCP":
+        return False
+    addresses = subset.get("addresses", [])
+    if len(addresses) != 1:
+        return False  # Includes duplicate entries: no set deduplication hides extras.
+    address = addresses[0]
+    ref = address["targetRef"]
+    uid, name = pod["metadata"]["uid"], pod["metadata"]["name"]
+    return (address["ip"] == pod_ip and ref["kind"] == "Pod" and ref.get("namespace") == NAMESPACE
+            and isinstance(uid, str) and bool(uid) and ref["uid"] == uid
+            and isinstance(name, str) and bool(name) and ref.get("name") == name)
+
+
+def ready_endpoint_membership(report, service, pods, slices, core_endpoints):
+    # A denied/absent Slice API can use equivalent complete core membership.
+    # Timeouts, transport/auth errors, malformed data and readable mismatches
+    # remain failures; never hide those by looking for a more favorable source.
+    if report.failures.get("relay_endpoints_read") in {"forbidden", "not_found"}:
+        return core_endpoints_match(service, pods, core_endpoints)
     return endpoints_match(pods, slices)
 
 
@@ -387,7 +434,7 @@ def check_cluster(report, env, expected_version=""):
         "relay_endpoints": ["endpointslices.discovery.k8s.io", "--selector=kubernetes.io/service-name=" + RELAY],
     }
     for key, args in reads.items():
-        objects[key] = read_object(report, key, args, env)
+        objects[key] = read_object(report, key, args, env, diagnostic=key == "relay_endpoints")
     core_endpoints = read_object(report, "relay_core_endpoints", ["endpoints", RELAY], env, diagnostic=True)
     relay, web = objects["relay_deployment"], objects["web_deployment"]
     service, ingress, pods = objects["relay_service"], objects["ingress"], objects["relay_pods"]
@@ -397,8 +444,11 @@ def check_cluster(report, env, expected_version=""):
     report.check("relay_service_ingress_neg", lambda: service_neg(service))
     report.check("relay_neg_observed_healthy", lambda: healthy_neg(service, ingress, pods))
     neg_diagnostics(report, service, ingress, pods)
-    report.check("relay_ready_endpoints_match_pods", lambda: endpoints_match(pods, objects["relay_endpoints"]))
-    report.diagnostic("relay_core_endpoints_match_pods", lambda: core_endpoints_match(pods, core_endpoints))
+    report.check("relay_ready_endpoints_match_pods", lambda:
+                 ready_endpoint_membership(report, service, pods, objects["relay_endpoints"], core_endpoints))
+    report.diagnostic("relay_membership_uses_core_api", lambda:
+                      report.failures.get("relay_endpoints_read") in {"forbidden", "not_found"})
+    report.diagnostic("relay_core_endpoints_match_pods", lambda: core_endpoints_match(service, pods, core_endpoints))
     report.check("relay_logging_disabled_in_backendconfig", lambda:
                  annotation(service, "cloud.google.com/backend-config") == {"default": BACKEND}
                  and objects["relay_backendconfig"]["spec"]["logging"]["enable"] is False)
