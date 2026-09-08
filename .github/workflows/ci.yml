@@ -150,3 +150,13 @@ jobs:
           node-version: "20"
       - name: Installer isolation, integrity failures, and interrupted response regressions
         run: node --test npm/test/install.test.cjs
+
+  npm-installer-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "20"
+      - name: Windows PowerShell extraction with literal installation paths
+        run: node --test npm/test/windows-paths.test.cjs

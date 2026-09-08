@@ -154,8 +154,16 @@ function extract(archive, destDir) {
     } catch {
       execFileSync(
         "powershell",
-        ["-NoProfile", "-Command", `Expand-Archive -Force -Path '${archive}' -DestinationPath '${destDir}'`],
-        { stdio: "inherit" },
+        ["-NoProfile", "-NonInteractive", "-Command",
+          "$ErrorActionPreference = 'Stop'; Set-Location -LiteralPath $env:AAH_INSTALL_DESTINATION; Expand-Archive -Force -LiteralPath $env:AAH_INSTALL_ARCHIVE -DestinationPath ."],
+        {
+          stdio: "inherit",
+          // Keep paths out of PowerShell source and use literal path handling.
+          // Expand-Archive itself treats destination brackets as wildcards, so
+          // enter the existing bin directory literally and extract into '.'.
+          // Preserve Windows' environment, overriding only our own path values.
+          env: { ...process.env, AAH_INSTALL_ARCHIVE: archive, AAH_INSTALL_DESTINATION: destDir },
+        },
       );
     }
     return;
