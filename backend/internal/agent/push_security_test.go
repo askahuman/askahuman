@@ -42,7 +42,7 @@ func TestPushRejectsLoopbackEndpoint(t *testing.T) {
 	require.NoError(t, err)
 	sub := wire.PushSubscription{Endpoint: srv.URL + "/internal-admin", Keys: wire.PushKeys{P256dh: testP256dh, Auth: testAuth}}
 	phone := newDeviceSigner(t)
-	ps := wire.PushSub{Kind: wire.KindPushSub, Protocol: wire.Protocol, Room: testRoom, Subscription: sub}
+	ps := wire.PushSub{Kind: wire.KindPushSub, Protocol: wire.Protocol, PushSeq: 1, Room: testRoom, Subscription: sub}
 	ps.Sig, err = wire.Sign(phone.priv, wire.PushSigningMessage(ps))
 	require.NoError(t, err)
 	raw, err := json.Marshal(ps)
@@ -102,9 +102,11 @@ func TestPushEndpointProviderPolicy(t *testing.T) {
 func TestPushInvalidUpdatePreservesWorkingSubscription(t *testing.T) {
 	phone := newDeviceSigner(t)
 	a := &Agent{sess: &Session{protocol: wire.Protocol, roomID: testRoom, devicePub: &phone.priv.PublicKey}}
+	var sequence int64
 	accept := func(endpoint string) {
 		t.Helper()
-		ps := wire.PushSub{Kind: wire.KindPushSub, Protocol: wire.Protocol, Room: testRoom, Subscription: wire.PushSubscription{Endpoint: endpoint}}
+		sequence++
+		ps := wire.PushSub{Kind: wire.KindPushSub, Protocol: wire.Protocol, PushSeq: sequence, Room: testRoom, Subscription: wire.PushSubscription{Endpoint: endpoint}}
 		var err error
 		ps.Sig, err = wire.Sign(phone.priv, wire.PushSigningMessage(ps))
 		require.NoError(t, err)

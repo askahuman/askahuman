@@ -108,6 +108,7 @@ export interface Response {
 
 /** Request is an approval request sent agent -> phone, sealed inside a box. */
 export interface Request {
+  request_seq?: number;
   protocol?: number;
   room?: string;
   deadline_ms?: number;
@@ -157,6 +158,7 @@ export interface PushSubscription {
 
 /** PushSub delivers the phone's PushSubscription to the agent, sealed. */
 export interface PushSub {
+  push_seq?: number;
   protocol?: number;
   room?: string;
   sig?: string;

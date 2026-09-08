@@ -191,9 +191,9 @@ Ask a human. **BLOCKS** until they respond. Pass `expires_in_s` to also time out
 
 **Returns** the shape you asked for: `yesno` gives an `approved` boolean, `choice` gives the selected option, `text` gives the typed reply. A decline comes back as a non-approval; a timeout or transport error is returned as an error the agent can branch on. It never silently proceeds, and never returns approved on failure.
 
-Requests are validated before pairing: IDs up to 256 Unicode scalar values, titles 512, summaries 4096, agent/category/input hints 256, and 1–32 unique nonempty choice options up to 256 each. Only fields for the selected response kind are accepted. Encoded messages, including JSON escaping and signatures, are limited to 16 KiB. Text is preserved exactly, including whitespace and empty replies.
+Requests are validated before pairing: IDs up to 256 Unicode scalar values, titles 512, summaries 4096, agent/category/input hints 256, and 1–32 unique nonempty choice options up to 256 each. Only fields for the selected response kind are accepted. Encoded messages, including JSON escaping and signatures, are limited to 16 KiB. Text is preserved exactly, including whitespace and explicit `{"text":""}` empty replies.
 
-Protocol v2 authenticates both peers' signing identities during pairing and signs the full question, answer, and agent receipt. The phone shows **Answer received by agent** only after verifying that receipt; a sent answer with no receipt remains uncertain. This confirms acceptance of the answer, not execution of an external action. The absolute deadline survives reconnects and page reloads.
+Protocol v2 authenticates both peers' signing identities during pairing and signs the full question, answer, and agent receipt. The phone shows **Answer received by agent** only after verifying that receipt; a sent answer with no receipt remains uncertain. This confirms acceptance of the answer, not execution of an external action. The absolute deadline survives reconnects and page reloads. Authenticated request and subscription sequences prevent recorded older messages from replacing newer observed state; atomic IndexedDB counters preserve this across tabs and reloads. Missing sequence storage requires explicit re-pairing.
 
 After upgrading from an older protocol, update the agent, refresh the phone app, and call `start_pairing` with `{"reset":true}`. Saved older entries remain visible with repair instructions; unsigned compatibility is disabled. The phone needs working WebCrypto and IndexedDB for secure signing.
 
@@ -214,7 +214,7 @@ For agents: [`https://ask-a-human.ai/llms.txt`](https://ask-a-human.ai/llms.txt)
 This is the whole point, so it is built to be boring and verifiable.
 
 - **End-to-end encrypted.** Plaintext only ever exists on your machine and on your phone.
-- **Content-blind relay.** It only ever forwards `base64(nonce‖ciphertext)` plus which room talks to which. It cannot read, log, or forge a decision (replay is blocked separately, by per-request IDs the phone de-dupes on). It is a dumb pipe.
+- **Content-blind relay.** It only ever forwards `base64(nonce‖ciphertext)` plus which room talks to which. It can record, delay, replay, or drop traffic. Signed request digests and per-pair sequence checks prevent it from forging a decision or rolling observed authorization state backward.
 - **No accounts, no database.** Pairing lives in RAM for the server's lifetime. Restart = re-pair. There is nothing on the relay to breach: no accounts, no database, content-blind. (The real attack surface is your phone's PWA and the pairing channel. See [`SECURITY.md`](SECURITY.md).)
 - **Pairing is a SPAKE2-style PAKE.** A short code becomes a strong shared key. Even if the code is shoulder-surfed, an attacker gets exactly **one** online guess against the live handshake.
 - **App traffic is sealed with NaCl secretbox** (XSalsa20-Poly1305), keyed by the symmetric SPAKE2 session key.

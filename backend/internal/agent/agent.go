@@ -831,7 +831,7 @@ func (a *Agent) absorbPush(plain []byte) bool {
 	a.mu.Lock()
 	sess := a.sess
 	a.mu.Unlock()
-	if sess == nil || sess.protocol != wire.Protocol || ps.Protocol != wire.Protocol || ps.Room != sess.roomID || !wire.Verify(sess.devicePub, wire.PushSigningMessage(ps), ps.Sig) {
+	if sess == nil || sess.protocol != wire.Protocol || ps.Protocol != wire.Protocol || ps.Room != sess.roomID || ps.PushSeq <= 0 || ps.PushSeq > wire.MaxSafeInteger || !wire.Verify(sess.devicePub, wire.PushSigningMessage(ps), ps.Sig) {
 		return true
 	}
 	if err := validatePushEndpoint(ps.Subscription.Endpoint); err != nil {
@@ -840,6 +840,11 @@ func (a *Agent) absorbPush(plain []byte) bool {
 		return true
 	}
 	a.mu.Lock()
+	if a.sess != sess || ps.PushSeq <= sess.pushSeq {
+		a.mu.Unlock()
+		return true
+	}
+	sess.pushSeq = ps.PushSeq
 	a.sub = &webpush.Subscription{
 		Endpoint: ps.Subscription.Endpoint,
 		Keys: webpush.Keys{

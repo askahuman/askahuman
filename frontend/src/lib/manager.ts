@@ -195,7 +195,7 @@ export class SessionManager {
     const entry = this.entries.get(room);
     if (!entry) return;
     entry.unsub();
-    entry.session.close();
+    entry.session.forget();
     this.entries.delete(room);
     const i = this.order.indexOf(room);
     if (i >= 0) this.order.splice(i, 1);

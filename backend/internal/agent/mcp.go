@@ -28,9 +28,9 @@ type ApprovalInput struct {
 // ApprovalOutput is the request_approval tool's structured result; exactly
 // one field is set, matching the request's response_kind.
 type ApprovalOutput struct {
-	Approved *bool  `json:"approved,omitempty"`
-	Choice   string `json:"choice,omitempty"`
-	Text     string `json:"text,omitempty"`
+	Approved *bool   `json:"approved,omitempty"`
+	Choice   string  `json:"choice,omitempty"`
+	Text     *string `json:"text,omitempty"`
 }
 
 // MCPServer wraps an Agent as an MCP server exposing request_approval,
@@ -338,9 +338,14 @@ func (h *MCPServer) requestApproval(ctx context.Context, call *mcp.CallToolReque
 	if err != nil {
 		return nil, ApprovalOutput{}, err
 	}
-	return nil, ApprovalOutput{
-		Approved: dec.Result.Approved,
-		Choice:   dec.Result.Choice,
-		Text:     dec.Result.Text,
-	}, nil
+	out := ApprovalOutput{}
+	switch wire.ResponseKind(in.ResponseKind) {
+	case wire.ResponseYesNo:
+		out.Approved = dec.Result.Approved
+	case wire.ResponseChoice:
+		out.Choice = dec.Result.Choice
+	case wire.ResponseText:
+		out.Text = &dec.Result.Text // retain a present, accepted empty reply
+	}
+	return nil, out, nil
 }

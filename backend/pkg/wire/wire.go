@@ -250,6 +250,7 @@ type Response struct {
 
 // Request is an approval request sent agent -> phone, sealed inside a Box.
 type Request struct {
+	RequestSeq int64  `json:"request_seq"`
 	Protocol   int    `json:"protocol"`
 	Room       string `json:"room"`
 	DeadlineMS int64  `json:"deadline_ms"`
@@ -322,6 +323,7 @@ type PushKeys struct {
 // PushSub delivers the phone's PushSubscription to the agent, sealed
 // inside a Box so the relay never sees the endpoint.
 type PushSub struct {
+	PushSeq  int64  `json:"push_seq"`
 	Protocol int    `json:"protocol"`
 	Room     string `json:"room"`
 	Sig      string `json:"sig"`

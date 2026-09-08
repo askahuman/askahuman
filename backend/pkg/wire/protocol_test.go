@@ -14,7 +14,7 @@ import (
 )
 
 func sampleRequest() Request {
-	return Request{Kind: KindRequest, Protocol: Protocol, Room: "0123456789abcdef", ID: "id", Title: "Title", Summary: "Summary", Agent: "agent", Category: CategoryDeploy, Response: Response{Kind: ResponseText, Placeholder: "explain", MaxLen: 4096}, ExpiresInS: 300, DeadlineMS: 1800000000123}
+	return Request{Kind: KindRequest, Protocol: Protocol, RequestSeq: 1, Room: "0123456789abcdef", ID: "id", Title: "Title", Summary: "Summary", Agent: "agent", Category: CategoryDeploy, Response: Response{Kind: ResponseText, Placeholder: "explain", MaxLen: 4096}, ExpiresInS: 300, DeadlineMS: 1800000000123}
 }
 
 func TestProtocolRequestBindsEveryAuthorizationField(t *testing.T) {
@@ -23,7 +23,7 @@ func TestProtocolRequestBindsEveryAuthorizationField(t *testing.T) {
 	r := sampleRequest()
 	sig, e := Sign(key, RequestSigningMessage(r))
 	require.NoError(t, e)
-	changes := map[string]func(*Request){"protocol": func(r *Request) { r.Protocol = 1 }, "room": func(r *Request) { r.Room = "fedcba9876543210" }, "id": func(r *Request) { r.ID += "x" }, "title": func(r *Request) { r.Title += "x" }, "summary": func(r *Request) { r.Summary += "x" }, "category": func(r *Request) { r.Category = CategoryCash }, "agent": func(r *Request) { r.Agent += "x" }, "kind": func(r *Request) { r.Response.Kind = ResponseYesNo }, "options": func(r *Request) { r.Response.Options = []string{"one", "two"} }, "placeholder": func(r *Request) { r.Response.Placeholder += "x" }, "max_len": func(r *Request) { r.Response.MaxLen-- }, "expires": func(r *Request) { r.ExpiresInS-- }, "deadline": func(r *Request) { r.DeadlineMS++ }}
+	changes := map[string]func(*Request){"sequence": func(r *Request) { r.RequestSeq++ }, "protocol": func(r *Request) { r.Protocol = 1 }, "room": func(r *Request) { r.Room = "fedcba9876543210" }, "id": func(r *Request) { r.ID += "x" }, "title": func(r *Request) { r.Title += "x" }, "summary": func(r *Request) { r.Summary += "x" }, "category": func(r *Request) { r.Category = CategoryCash }, "agent": func(r *Request) { r.Agent += "x" }, "kind": func(r *Request) { r.Response.Kind = ResponseYesNo }, "options": func(r *Request) { r.Response.Options = []string{"one", "two"} }, "placeholder": func(r *Request) { r.Response.Placeholder += "x" }, "max_len": func(r *Request) { r.Response.MaxLen-- }, "expires": func(r *Request) { r.ExpiresInS-- }, "deadline": func(r *Request) { r.DeadlineMS++ }}
 	for name, change := range changes {
 		t.Run(name, func(t *testing.T) {
 			mutated := r
@@ -57,6 +57,21 @@ func TestProtocolStrictJSONRejectsAmbiguity(t *testing.T) {
 	require.Equal(t, "😀", r.Title)
 	require.Equal(t, `\ud800`, r.Summary)
 	require.Error(t, StrictDecode(bytes.Repeat([]byte{' '}, MaxPlaintext+1), &r))
+}
+
+func TestProtocolRequestSequenceBounds(t *testing.T) {
+	for _, seq := range []int64{0, -1, MaxSafeInteger + 1} {
+		r := sampleRequest()
+		r.RequestSeq = seq
+		require.Error(t, ValidateRequest(r))
+	}
+	r := sampleRequest()
+	r.RequestSeq = MaxSafeInteger
+	require.NoError(t, ValidateRequest(r))
+	for _, raw := range []string{`{"request_seq":1.5}`, `{"request_seq":2e0}`, `{"request_seq":9007199254740992}`, `{"request_seq":-0}`} {
+		var r Request
+		require.Error(t, StrictDecode([]byte(raw), &r))
+	}
 }
 
 func TestProtocolSharedFieldAndEncodedBounds(t *testing.T) {

@@ -18,6 +18,16 @@ func prepareRequest(ctx context.Context, req wire.Request, sess *Session) (wire.
 	req.Kind = wire.KindRequest
 	req.Protocol = wire.Protocol
 	req.Room = sess.roomID
+	for {
+		previous := sess.requestSeq.Load()
+		if previous < 0 || previous >= wire.MaxSafeInteger {
+			return req, errors.New("agent: request sequence exhausted; " + wire.UpgradeMessage)
+		}
+		if sess.requestSeq.CompareAndSwap(previous, previous+1) {
+			req.RequestSeq = previous + 1
+			break
+		}
+	}
 	req.DeadlineMS = 0
 	if deadline, ok := ctx.Deadline(); ok {
 		// The signed wall-clock deadline is informative on the phone. The agent

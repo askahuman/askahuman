@@ -57,7 +57,7 @@ or any judgment call you are not authorized to make alone. Treat anything other 
 ## Security model
 
 - End-to-end encrypted — plaintext only ever exists on your machine and the human's phone.
-- Content-blind relay — forwards ciphertext verbatim; it cannot read, log, or replay approvals, and holds
+- Content-blind relay — forwards ciphertext verbatim; it cannot read or forge approvals, and holds
   no database (pairing lives in RAM for the server's lifetime; a restart means re-pair).
 - Pairing is a SPAKE2-style handshake — an in-house construction following RFC 9382 over the ristretto255
   group (RFC 9496). A short code (delivered out-of-band, typed into the app) becomes a strong shared key with no
@@ -74,4 +74,4 @@ or any judgment call you are not authorized to make alone. Treat anything other 
 - README: https://github.com/askahuman/askahuman/blob/main/README.md
 - Security policy: https://github.com/askahuman/askahuman/blob/main/SECURITY.md
 
-Approval protocol v2 signs the full question, exact typed answer, and agent acceptance receipt. Both signing identities are authenticated during pairing. The phone confirms receipt only after verifying the agent signature; lost receipts remain uncertain. An answer receipt does not claim an external action executed. Older saved pairings require an updated agent, refreshed phone app, and start_pairing with {"reset":true}. WebCrypto and IndexedDB are required; there is no unsigned fallback. Requests and encoded size are validated before pairing. Text is preserved exactly without trimming, including empty text; deadlines do not restart after reconnect or reload.
+Approval protocol v2 signs the full question, exact typed answer, and agent acceptance receipt. Both signing identities are authenticated during pairing. The phone confirms receipt only after verifying the agent signature; lost receipts remain uncertain. An answer receipt does not claim an external action executed. Older saved pairings require an updated agent, refreshed phone app, and start_pairing with {"reset":true}. WebCrypto and IndexedDB are required; there is no unsigned fallback. Requests and encoded size are validated before pairing. Text is preserved exactly without trimming, including an explicit text:"" result for empty text; deadlines do not restart after reconnect or reload. Signed request/subscription sequences and atomic per-pair IndexedDB counters reject older recorded state across tabs and reloads. Missing sequence storage requires re-pairing; transport suppression remains possible.

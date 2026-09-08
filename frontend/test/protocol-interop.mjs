@@ -38,11 +38,11 @@ const messages = {
   ),
 };
 const pins = {
-  ack: '14b8621fd371e6acb5130c8aad7b109a2bd87032c7a718d1e134e8b4dca1d9a5',
-  decision: '3fe791ce167517dd9e6826040758df157cdd49e7428f47a0e5c3cd0bc25516f7',
+  ack: '45a3182d80de566e724f12376a4d6b57fde67383b27e81f0efc6528ccb3139f4',
+  decision: '5ceb7c0ba988574dc661d180c84be7ebbe0409d55dd63ced604fff29a55f9e8c',
   pair: '65deb4c9388c3a8a786c9ba2655a4c6133fa5abe37acd355e944d2bb5abf3295',
-  push: '7392ef9d0eab375a3c0a01b9bb337dd1045b04725b2819844fb866657231ed34',
-  request: 'b6a91c4aec200f3f5024398344bdd6ff801a18d29d0005f4b1c109b7cbf99df1',
+  push: 'dbed1491e38c50be6cf6bae18b867b1c69aa9c54ef50897ebbc07ccb6f600336',
+  request: 'a6e8779a967c6b02a9e64b8ef6a2ac1f4ae4c902ee2c34177de5907dc74bf951',
   vapid: '273633315ef5b4cd4d163fae9584e530b4efd704439f06033232ad2d0541700c', // gitleaks:allow public SHA-256 transcript digest
 };
 for (const [name, bytes] of Object.entries(messages)) {

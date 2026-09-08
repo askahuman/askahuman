@@ -34,7 +34,7 @@ func main() {
 	must(e)
 	phoneSPKI, e := wire.PublicSigner(phone)
 	must(e)
-	req := wire.Request{Kind: wire.KindRequest, Protocol: wire.Protocol, Room: "0123456789abcdef", ID: "req_🧭\x00:1", Title: "Ship 🧭?", Category: wire.CategoryDeploy, Summary: "a|b\ne\u0301 😀 \u2028", Agent: "工具", Response: wire.Response{Kind: wire.ResponseChoice, Options: []string{"No", "Yes", "Maybe 🧭"}}, ExpiresInS: 300, DeadlineMS: 1800000000123}
+	req := wire.Request{Kind: wire.KindRequest, Protocol: wire.Protocol, RequestSeq: 42, Room: "0123456789abcdef", ID: "req_🧭\x00:1", Title: "Ship 🧭?", Category: wire.CategoryDeploy, Summary: "a|b\ne\u0301 😀 \u2028", Agent: "工具", Response: wire.Response{Kind: wire.ResponseChoice, Options: []string{"No", "Yes", "Maybe 🧭"}}, ExpiresInS: 300, DeadlineMS: 1800000000123}
 	req.Sig, e = wire.Sign(agent, wire.RequestSigningMessage(req))
 	must(e)
 	dec := wire.Decision{Kind: wire.KindDecision, Protocol: wire.Protocol, Room: req.Room, ID: req.ID, RequestHash: wire.RequestHash(req), ResponseKind: req.Response.Kind, Result: wire.Result{Choice: "Maybe 🧭"}}
@@ -43,7 +43,7 @@ func main() {
 	ack := wire.Ack{Kind: wire.KindAck, Protocol: wire.Protocol, Room: req.Room, ID: req.ID, RequestHash: dec.RequestHash, DecisionHash: wire.DecisionHash(dec), Status: "accepted"}
 	ack.Sig, e = wire.Sign(agent, wire.AckSigningMessage(ack))
 	must(e)
-	push := wire.PushSub{Kind: wire.KindPushSub, Protocol: wire.Protocol, Room: req.Room, Subscription: wire.PushSubscription{Endpoint: "https://web.push.apple.com/vector", Keys: wire.PushKeys{P256dh: "p256dh", Auth: "auth"}}}
+	push := wire.PushSub{Kind: wire.KindPushSub, Protocol: wire.Protocol, PushSeq: 27, Room: req.Room, Subscription: wire.PushSubscription{Endpoint: "https://web.push.apple.com/vector", Keys: wire.PushKeys{P256dh: "p256dh", Auth: "auth"}}}
 	push.Sig, e = wire.Sign(phone, wire.PushSigningMessage(push))
 	must(e)
 	vapid := wire.VAPIDKey{Kind: wire.KindVAPIDKey, Protocol: wire.Protocol, Room: req.Room, PublicKey: "public-vector-key"}

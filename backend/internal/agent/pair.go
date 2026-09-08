@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/askahuman/askahuman/backend/pkg/spake2"
@@ -36,10 +37,12 @@ var ErrPairing = errors.New("agent: pairing failed")
 // Session is a paired channel: a live relay connection plus the SPAKE2
 // session key. It is the result of Pair and the input to Ask.
 type Session struct {
-	relayURL string
-	roomID   string
-	code     string
-	key      []byte
+	requestSeq atomic.Int64
+	pushSeq    int64 // guarded by Agent.mu
+	relayURL   string
+	roomID     string
+	code       string
+	key        []byte
 	// connMu guards conn, which the persistent reader swaps on reconnect while
 	// Ask writes and Close tears down. Access it only via currentConn/setConn.
 	connMu sync.Mutex

@@ -79,7 +79,7 @@ describe("decodeRequest", () => {
       JSON.stringify({
         protocol: 2,
         room: "0123456789abcdef",
-        deadline_ms: 0,
+        deadline_ms: 0, request_seq: 1,
         ...(o as object),
       }),
     );
@@ -205,7 +205,7 @@ describe("decodeRequest bounded validation", () => {
   const base = {
     protocol: 2,
     room: "0123456789abcdef",
-    deadline_ms: 0,
+    deadline_ms: 0, request_seq: 1,
     kind: "request",
     id: "a",
     title: "T",

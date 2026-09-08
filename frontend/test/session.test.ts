@@ -18,6 +18,7 @@ import {
 } from '../src/lib/protocol.ts';
 import {
   deviceKeyLoader,
+  protocolLedgerLoader,
   makeSigner,
   pairAgent,
   signRequest,
@@ -73,6 +74,7 @@ function newSession(
     payload,
     {
       deviceKeyLoader,
+      protocolLedgerLoader,
       relayOptions: {
         wsFactory: (u) => new FakeWS(u),
         setTimer: (fn, ms) => {
@@ -93,7 +95,7 @@ function newSession(
 async function paired(extra: SessionOptions = {}) {
   const { session, timers } = newSession(extra);
   const peer = await pairAgent(() => FakeWS.last, payload.code, payload.room);
-  expect(session.getState().paired).toBe(true);
+  await until(() => session.getState().paired);
   return { session, timers, ...peer };
 }
 const req = (
@@ -211,6 +213,9 @@ describe('authenticated Session protocol', () => {
         r.protocol = 1;
       },
       (r) => {
+        r.request_seq! += 1;
+      },
+      (r) => {
         r.deadline_ms! += 1;
       },
       (r) => {
@@ -232,6 +237,124 @@ describe('authenticated Session protocol', () => {
     ws.recv(await sealReq(agentKey, original));
     await until(() => session.getState().request);
     expect(session.getState().request?.summary).toBe(original.summary);
+  });
+  it('rejects unseen older and equal-conflicting signed requests, including a stale roster after reload', async () => {
+    const first = await paired();
+    const old = await signRequest(first.agentKey, {
+      ...req('older'),
+      request_seq: 1,
+    });
+    const current = await signRequest(first.agentKey, {
+      ...req('current'),
+      request_seq: 2,
+      deadline_ms: Date.now() + 30000,
+    });
+    await sendReq(first.ws, first.agentKey, current);
+    await sendReq(first.ws, first.agentKey, old);
+    await sendReq(first.ws, first.agentKey, {
+      ...req('equal-conflict'),
+      request_seq: 2,
+    });
+    expect(first.session.getState().request?.id).toBe('current');
+    await sendReq(first.ws, first.agentKey, current);
+    expect(first.session.getState().request?.deadline_ms).toBe(
+      current.deadline_ms,
+    );
+    const stale = {
+      key: first.agentKey,
+      ...first.session.persistState(),
+      request: old,
+    };
+    first.session.close();
+    const next = newSession({}, stale);
+    await until(() => FakeWS.last);
+    const ws = FakeWS.last!;
+    ws.open();
+    expect(next.session.getState().request).toBeNull();
+    await sendReq(ws, first.agentKey, old);
+    expect(next.session.getState().request).toBeNull();
+    await sendReq(ws, first.agentKey, current);
+    expect(next.session.getState().request?.id).toBe('current');
+    expect(next.session.getState().request?.deadline_ms).toBe(
+      current.deadline_ms,
+    );
+  });
+  it('retains repair guidance and opens no socket when the persisted protocol ledger is missing', async () => {
+    const first = await paired();
+    const saved = { key: first.agentKey, ...first.session.persistState() };
+    first.session.close();
+    const { session } = newSession(
+      {
+        protocolLedgerLoader: async () => {
+          throw new Error('missing');
+        },
+      },
+      saved,
+    );
+    await until(() => session.getState().pairError);
+    expect(session.getState().paired).toBe(false);
+    expect(session.getState().pairError).toContain(
+      'start_pairing with reset:true',
+    );
+    expect(session.getSessionKey()).toEqual(first.agentKey);
+    expect(FakeWS.last).toBeNull();
+  });
+  it('reserves push sequences before signing and suppresses an older signing completion', async () => {
+    const device = await deviceKeyLoader();
+    let release!: () => void, entered!: () => void;
+    const gate = new Promise<void>((r) => {
+      release = r;
+    });
+    const started = new Promise<void>((r) => {
+      entered = r;
+    });
+    let count = 0;
+    const wrapped = {
+      spkiB64: device.spkiB64,
+      sign: async (msg: Uint8Array<ArrayBuffer>) => {
+        if (
+          new TextDecoder().decode(msg).includes('aah:push-sub:v2') &&
+          ++count === 1
+        ) {
+          entered();
+          await gate;
+        }
+        return device.sign(msg);
+      },
+    };
+    const { session, ws, agentKey } = await paired({
+      deviceKeyLoader: async () => wrapped,
+    });
+    const sub = (name: string) => ({
+      endpoint: `https://web.push.apple.com/${name}`,
+      keys: { p256dh: 'p', auth: 'a' },
+    });
+    const old = session.sendPushSubscription(sub('old'));
+    await started;
+    expect(await session.sendPushSubscription(sub('new'))).toBe(true);
+    release();
+    expect(await old).toBe(false);
+    const pushes = ws.sent
+      .filter((f) => f.box)
+      .map((f) =>
+        JSON.parse(new TextDecoder().decode(open(agentKey, f.box as string))),
+      )
+      .filter((m) => m.kind === 'push_sub');
+    expect(pushes).toHaveLength(1);
+    expect(pushes[0].subscription.endpoint.endsWith('/new')).toBe(true);
+    expect(pushes[0].push_seq).toBe(2);
+    const saved = { key: agentKey, ...session.persistState() };
+    session.close();
+    const next = newSession({}, saved);
+    await until(() => FakeWS.last);
+    FakeWS.last!.open();
+    expect(await next.session.sendPushSubscription(sub('reload'))).toBe(true);
+    const restoredPush = FakeWS.last!.sent.filter((f) => f.box)
+      .map((f) =>
+        JSON.parse(new TextDecoder().decode(open(agentKey, f.box as string))),
+      )
+      .find((m) => m.kind === 'push_sub');
+    expect(restoredPush.push_seq).toBe(3);
   });
   it('binds all choice and text schema fields before showing them', async () => {
     for (const response of [
@@ -313,6 +436,12 @@ describe('authenticated Session protocol', () => {
       expect(session.getState().delivery).toBe(
         status === 'expired' ? 'expired' : 'uncertain',
       );
+      // The UI's absolute-deadline ticker and later re-announcements cannot
+      // erase an authenticated terminal receipt.
+      session.expire('r1');
+      expect(session.getState().delivery).toBe(
+        status === 'expired' ? 'expired' : 'uncertain',
+      );
       session.close();
     }
   });
@@ -363,6 +492,28 @@ describe('authenticated Session protocol', () => {
     await sendReq(FakeWS.last!, first.agentKey, r);
     expect(session.getState().request).toBeNull();
   });
+  it('does not reopen a locally expired request when the clock moves backward, including after reload', async () => {
+    let now = Date.now();
+    const first = await paired({ now: () => now });
+    const r = { ...req(), deadline_ms: now + 1000 };
+    await sendReq(first.ws, first.agentKey, r);
+    now += 2000;
+    first.session.approve();
+    expect(first.session.getState().request).toBeNull();
+    expect(decisions(first.ws, first.agentKey)).toHaveLength(0);
+    now -= 60000;
+    await sendReq(first.ws, first.agentKey, r);
+    expect(first.session.getState().request).toBeNull();
+    const saved = { key: first.agentKey, ...first.session.persistState() };
+    first.session.close();
+    const { session } = newSession({ now: () => now }, saved);
+    await until(() => FakeWS.last);
+    const ws = FakeWS.last!;
+    ws.open();
+    await sendReq(ws, first.agentKey, r);
+    expect(session.getState().request).toBeNull();
+    expect(decisions(ws, first.agentKey)).toHaveLength(0);
+  });
   it('keeps a too-large encoded Unicode answer editable and unsent', async () => {
     const { session, ws, agentKey } = await paired();
     await sendReq(ws, agentKey, req('huge', { kind: 'text', max_len: 4096 }));
@@ -371,6 +522,11 @@ describe('authenticated Session protocol', () => {
     expect(session.getState().screen).toBe('text');
     expect(session.getState().answerError).toContain('too large');
     expect(decisions(ws, agentKey)).toHaveLength(0);
+    expect(Object.keys(session.persistState().decisions ?? {})).toHaveLength(0);
+    session.reply('\u0001'.repeat(4096));
+    await settle();
+    expect(session.getState().screen).toBe('text');
+    expect(session.getState().answerError).toContain('too large');
     expect(Object.keys(session.persistState().decisions ?? {})).toHaveLength(0);
   });
   it('checks expiry again after asynchronous device signing', async () => {
@@ -400,6 +556,40 @@ describe('authenticated Session protocol', () => {
     await settle();
     expect(decisions(ws, agentKey)).toHaveLength(0);
     expect(session.getState().request).toBeNull();
+  });
+  it('does not retain or send a decision after closing during the final ledger read', async () => {
+    let release!: () => void, entered!: () => void;
+    const gate = new Promise<void>((r) => {
+      release = r;
+    });
+    const started = new Promise<void>((r) => {
+      entered = r;
+    });
+    let reads = 0;
+    const { session, ws, agentKey } = await paired({
+      protocolLedgerLoader: async (scope, restored) => {
+        const ledger = await protocolLedgerLoader(scope, restored);
+        return {
+          ...ledger,
+          currentRequest: async (seq, digest) => {
+            const valid = await ledger.currentRequest(seq, digest);
+            if (++reads === 2) {
+              entered();
+              await gate;
+            }
+            return valid;
+          },
+        };
+      },
+    });
+    await sendReq(ws, agentKey, req());
+    session.approve();
+    await started;
+    session.close();
+    release();
+    await settle();
+    expect(decisions(ws, agentKey)).toHaveLength(0);
+    expect(session.persistState().decisions).toEqual({});
   });
   it('never submits a deferred answer after the request cleared or session closed', async () => {
     const { session, ws, agentKey } = await paired();

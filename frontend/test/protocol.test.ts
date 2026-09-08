@@ -9,10 +9,16 @@ import {
   requestSigningMessage,
   MAX_PLAINTEXT,
 } from '../src/lib/protocol.ts';
-import { encodeRequest, type Request, type Decision } from '../src/lib/wire.ts';
+import {
+  encodeRequest,
+  encodeDecision,
+  type Request,
+  type Decision,
+} from '../src/lib/wire.ts';
 const utf8 = (s: string) => new TextEncoder().encode(s);
 const request = (): Request => ({
   kind: 'request',
+  request_seq: 1,
   protocol: 2,
   room: '0123456789abcdef',
   id: 'r1',
@@ -47,6 +53,17 @@ describe('shared Unicode and encoded transport bounds', () => {
       expect(() => validateRequest(r)).toThrow();
     },
   );
+  it.each([undefined, 0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1])(
+    'rejects invalid request sequence %s',
+    (request_seq) => {
+      expect(() => validateRequest({ ...request(), request_seq })).toThrow();
+    },
+  );
+  it('accepts the largest positive safe request sequence', () => {
+    expect(() =>
+      validateRequest({ ...request(), request_seq: Number.MAX_SAFE_INTEGER }),
+    ).not.toThrow();
+  });
   it('rejects irrelevant response fields, duplicate or empty choices and invalid limits', () => {
     for (const response of [
       { kind: 'yesno', max_len: 0 },
@@ -73,6 +90,35 @@ describe('shared Unicode and encoded transport bounds', () => {
     r.summary = '😀'.repeat(4096);
     expect(() => encodeRequest(r)).toThrow();
   });
+  it.each(['😀', '\u0001'])(
+    'accepts the last byte below the decision limit for %s and rejects the next byte',
+    (unit) => {
+      const d: Decision = {
+        kind: 'decision',
+        protocol: 2,
+        room: '0123456789abcdef',
+        id: 'r1',
+        request_hash: 'A'.repeat(43) + '=',
+        response_kind: 'text',
+        result: { text: '' },
+        sig: 'A'.repeat(88),
+      };
+      const budget = MAX_PLAINTEXT - 1 - utf8(JSON.stringify(d)).length;
+      const cost = utf8(JSON.stringify(unit)).length - 2;
+      const text =
+        unit.repeat(Math.floor(budget / cost)) + 'a'.repeat(budget % cost);
+      d.result.text = text;
+      expect(scalarLength(text)).toBeLessThanOrEqual(4096);
+      expect(utf8(JSON.stringify(d)).length).toBe(MAX_PLAINTEXT - 1);
+      expect(() => validateDecision(d)).not.toThrow();
+      const encoded = encodeDecision(d);
+      expect(encoded.length).toBe(MAX_PLAINTEXT);
+      expect(strictJSON(encoded)).toEqual(d);
+      d.result.text += 'a';
+      expect(utf8(JSON.stringify(d)).length).toBe(MAX_PLAINTEXT);
+      expect(() => encodeDecision(d)).toThrow(/16 KiB/);
+    },
+  );
   it('binds distinct Unicode representations and delimiter placements distinctly', () => {
     const r = request();
     r.title = 'é';

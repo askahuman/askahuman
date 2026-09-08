@@ -67,7 +67,7 @@ func PairBinding(room, agentSPKI, phoneSPKI string) []byte {
 
 func RequestSigningMessage(r Request) []byte {
 	parts := []string{
-		"aah:request:v2", strconv.Itoa(r.Protocol), r.Room, r.ID,
+		"aah:request:v2", strconv.Itoa(r.Protocol), r.Room, strconv.FormatInt(r.RequestSeq, 10), r.ID,
 		r.Title, string(r.Category), r.Summary, r.Agent, string(r.Response.Kind),
 		strconv.Itoa(len(r.Response.Options)),
 	}
@@ -100,7 +100,7 @@ func AckSigningMessage(a Ack) []byte {
 }
 
 func PushSigningMessage(p PushSub) []byte {
-	return fields("aah:push-sub:v2", strconv.Itoa(p.Protocol), p.Room, p.Subscription.Endpoint,
+	return fields("aah:push-sub:v2", strconv.Itoa(p.Protocol), p.Room, strconv.FormatInt(p.PushSeq, 10), p.Subscription.Endpoint,
 		p.Subscription.Keys.P256dh, p.Subscription.Keys.Auth)
 }
 
@@ -237,6 +237,7 @@ func ValidateRequestInput(r Request) error {
 	r.Protocol = Protocol
 	r.Room = strings.Repeat("f", 16)
 	r.DeadlineMS = MaxSafeInteger
+	r.RequestSeq = MaxSafeInteger
 	r.Sig = strings.Repeat("A", 88)
 	_, err := EncodeMessage(r)
 	return err
@@ -246,7 +247,7 @@ func ValidateRequest(r Request) error {
 	if err := scalarBound(r.Sig, "signature", 88, false); err != nil {
 		return err
 	}
-	if r.Kind != KindRequest || r.Protocol != Protocol || !validRoom(r.Room) || r.DeadlineMS < 0 || r.DeadlineMS > MaxSafeInteger {
+	if r.Kind != KindRequest || r.Protocol != Protocol || !validRoom(r.Room) || r.RequestSeq <= 0 || r.RequestSeq > MaxSafeInteger || r.DeadlineMS < 0 || r.DeadlineMS > MaxSafeInteger {
 		return errors.New("wire: invalid request metadata")
 	}
 	return ValidateRequestInput(r)

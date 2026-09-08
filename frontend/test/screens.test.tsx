@@ -19,7 +19,7 @@ const req: Request = decodeRequest(
     JSON.stringify({
       protocol: 2,
       room: "0123456789abcdef",
-      deadline_ms: 0,
+      deadline_ms: 0, request_seq: 1,
       kind: "request",
       id: "display-boundary",
       title,

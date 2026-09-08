@@ -450,7 +450,7 @@ func TestIntegrationPushSubAbsorbedWithoutAsk(t *testing.T) {
 		if e := phone.pair(ctx); e != nil {
 			return
 		}
-		sub := wire.PushSub{Kind: wire.KindPushSub, Protocol: wire.Protocol, Room: phone.room, Subscription: wire.PushSubscription{
+		sub := wire.PushSub{Kind: wire.KindPushSub, Protocol: wire.Protocol, PushSeq: 1, Room: phone.room, Subscription: wire.PushSubscription{
 			Endpoint: "https://web.push.apple.com/e2e-idle", Keys: wire.PushKeys{P256dh: testP256dh, Auth: testAuth},
 		}}
 		var e error

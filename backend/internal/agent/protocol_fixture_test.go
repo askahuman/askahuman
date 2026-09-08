@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -14,6 +15,8 @@ import (
 )
 
 const testRoom = "0123456789abcdef"
+
+var testPushSequence atomic.Int64
 
 var testPhones sync.Map // *Agent -> deviceSigner, test-private signing keys only.
 
@@ -35,6 +38,7 @@ func answerBox(t *testing.T, a *Agent, f *fakeConn, key []byte, v any) {
 	case wire.PushSub:
 		d.Protocol = wire.Protocol
 		d.Room = a.sess.roomID
+		d.PushSeq = testPushSequence.Add(1)
 		var err error
 		d.Sig, err = wire.Sign(testPhone(t, a).priv, wire.PushSigningMessage(d))
 		require.NoError(t, err)

@@ -1,3 +1,9 @@
+import {
+  loadProtocolLedger,
+  protocolScope,
+  type ProtocolLedger,
+  type ProtocolLedgerLoader,
+} from './protocol-state.ts';
 // Session owns the phone's authenticated pairing, displayed requests, and
 // durable pending answers. A socket write is not an agent acceptance receipt.
 import { open as boxOpen, seal as boxSeal } from './crypto.ts';
@@ -92,6 +98,7 @@ export interface SessionOptions {
   onVapidKey?: (publicKey: string) => void;
   deviceKeyLoader?: () => Promise<DeviceSigner | null>;
   now?: () => number;
+  protocolLedgerLoader?: ProtocolLedgerLoader;
 }
 export interface PersistedProtocolState {
   protocol?: number;
@@ -128,6 +135,7 @@ export class Session {
   private readonly relay: RelayClient;
   private pairing: Pairing | null = null;
   private sessionKey?: Uint8Array;
+  private canPersist = false;
   private deviceKey: DeviceSigner | null = null;
   private agentPublic?: CryptoKey;
   private agentSigner?: string;
@@ -137,6 +145,9 @@ export class Session {
   private readonly onVapidKey?: (publicKey: string) => void;
   private readonly now: () => number;
   private readonly ready: Promise<void>;
+  private readonly ledgerLoader: ProtocolLedgerLoader;
+  private ledger?: ProtocolLedger;
+  private protocolReady: Promise<void> = Promise.resolve();
   private closed = false;
   private readonly seenIDs = new Set<string>();
   private readonly sentDecisions = new Map<string, Decision>();
@@ -155,6 +166,7 @@ export class Session {
     this.state = { ...initialState(), roomID: payload.room };
     this.onVapidKey = opts.onVapidKey;
     this.now = opts.now ?? Date.now;
+    this.ledgerLoader = opts.protocolLedgerLoader ?? loadProtocolLedger;
     const events: RelayEvents = {
       onState: (conn, attempt) => this.onConnState(conn, attempt),
       onSignal: (signal) => this.onSignal(signal),
@@ -172,6 +184,7 @@ export class Session {
     // connect, display authorization cards, or silently enroll a fresh signer.
     if (restored) {
       this.sessionKey = restored.key;
+      this.canPersist = true;
       this.protocol = restored.protocol;
       this.agentSigner = restored.agentSigner;
       this.pinnedDeviceSigner = restored.deviceSigner;
@@ -221,6 +234,10 @@ export class Session {
     this.pinnedDeviceSigner = device.spkiB64;
     if (restored) {
       this.agentPublic = await importSigner(restored.agentSigner!);
+      this.ledger = await this.ledgerLoader(
+        protocolScope(payload.room, restored.agentSigner!, device.spkiB64),
+        true,
+      );
       if (this.closed) return;
       for (const id of (restored.seen ?? []).slice(-50)) {
         if (typeof id === 'string') this.seenIDs.add(id);
@@ -273,6 +290,14 @@ export class Session {
           /* wait for an authenticated re-announcement */
         }
       }
+      if (
+        request &&
+        !(await this.ledger.currentRequest(
+          request.request_seq!,
+          requestHash(request),
+        ))
+      )
+        request = null;
       if (this.closed) return;
       this.vapidKey = restored.vapid;
       const sent = request && this.sentDecisions.get(request.id);
@@ -289,7 +314,11 @@ export class Session {
             : cardScreen(request)
           : 'listening',
         request,
-        delivery: sent ? 'uncertain' : null,
+        delivery: sent
+          ? this.receipts.get(sent.id)?.status === 'expired'
+            ? 'expired'
+            : 'uncertain'
+          : null,
         pairError: null,
       });
       return;
@@ -316,7 +345,7 @@ export class Session {
     return this.vapidKey;
   }
   getSessionKey(): Uint8Array | undefined {
-    return this.sessionKey;
+    return this.canPersist ? this.sessionKey : undefined;
   }
   persistState(): PersistedProtocolState {
     return {
@@ -350,6 +379,20 @@ export class Session {
     this.inbox.length = 0;
     this.relay.close();
   }
+  forget(): void {
+    this.close();
+    void this.ready
+      .then(() => this.protocolReady)
+      .then(() => this.ledger?.forget())
+      .catch(() => {});
+  }
+  private ledgerFailed(): void {
+    this.onPairError(
+      new Error(
+        `Secure pairing sequence storage is unavailable. ${UPGRADE_MESSAGE}`,
+      ),
+    );
+  }
   approve(): void {
     void this.sendDecision({ approved: true }, 'yesno');
   }
@@ -365,7 +408,11 @@ export class Session {
   expire(id: string): void {
     if (this.state.request?.id !== id) return;
     if (this.sentDecisions.has(id)) {
-      this.set({ screen: 'pending', delivery: 'uncertain' });
+      this.set({
+        screen: 'pending',
+        delivery:
+          this.receipts.get(id)?.status === 'expired' ? 'expired' : 'uncertain',
+      });
       return;
     }
     this.seenIDs.add(id);
@@ -378,7 +425,9 @@ export class Session {
   }
   async sendPushSubscription(sub: PushSubscription): Promise<boolean> {
     await this.ready;
+    await this.protocolReady;
     if (
+      !this.ledger ||
       !this.state.paired ||
       !this.sessionKey ||
       !this.deviceKey ||
@@ -392,12 +441,15 @@ export class Session {
       subscription: sub,
     };
     try {
+      ps.push_seq = await this.ledger.nextPush();
       ps.sig = await this.deviceKey.sign(pushSigningMessage(ps));
+      if (!(await this.ledger.currentPush(ps.push_seq))) return false;
       return (
         !this.closed &&
         this.relay.sendBox(boxSeal(this.sessionKey, encodePushSub(ps)))
       );
     } catch {
+      if (!this.closed) this.ledgerFailed();
       return false;
     }
   }
@@ -461,7 +513,26 @@ export class Session {
         result: null,
         answerError: null,
       });
+      if (
+        !this.ledger ||
+        !(await this.ledger.currentRequest(req.request_seq!, d.request_hash!))
+      ) {
+        if (!this.closed && this.state.request === req) {
+          this.set({ delivery: null });
+          this.expire(req.id);
+        }
+        return;
+      }
+      if (this.closed || this.state.request !== req) return;
       d.sig = await this.deviceKey.sign(boundDecisionSigningMessage(d));
+      if (this.closed || this.state.request !== req) return;
+      if (
+        !(await this.ledger.currentRequest(req.request_seq!, d.request_hash!))
+      ) {
+        this.set({ delivery: null });
+        this.expire(req.id);
+        return;
+      }
       if (this.closed || this.state.request !== req) return;
       if (this.expired(req)) {
         this.set({ delivery: null });
@@ -479,8 +550,7 @@ export class Session {
       if (!sent) this.set({ screen: 'pending', delivery: 'uncertain' });
       this.armReceiptRetry();
     } catch {
-      if (!this.closed && this.state.request === req)
-        this.set({ screen: 'offline', delivery: null });
+      if (!this.closed && this.state.request === req) this.ledgerFailed();
     }
   }
   private retainDecision(d: Decision): void {
@@ -546,11 +616,16 @@ export class Session {
       this.set({
         peerPresent: false,
         screen: onCard ? 'offline' : this.state.screen,
-        ...(this.state.screen === 'pending' ? { delivery: 'uncertain' } : {}),
+        ...(this.state.screen === 'pending' && this.state.delivery !== 'expired'
+          ? { delivery: 'uncertain' }
+          : {}),
       });
     } else if (signal === 'undeliverable') {
       if (!this.state.paired) this.pairing?.start();
-      else if (this.state.screen === 'pending')
+      else if (
+        this.state.screen === 'pending' &&
+        this.state.delivery !== 'expired'
+      )
         this.set({ delivery: 'uncertain' });
     }
   }
@@ -581,6 +656,7 @@ export class Session {
     }
   }
   private async onBox(b64: string): Promise<void> {
+    await this.protocolReady;
     if (!this.sessionKey || !this.agentPublic || !this.state.paired) return;
     const plain = boxOpen(this.sessionKey, b64);
     const tag = object(strictJSON(plain), [
@@ -594,6 +670,7 @@ export class Session {
       'sig',
       'public_key',
       'deadline_ms',
+      'request_seq',
       'title',
       'category',
       'summary',
@@ -637,6 +714,17 @@ export class Session {
       }
       return;
     }
+    try {
+      if (
+        !this.ledger ||
+        !(await this.ledger.observeRequest(req.request_seq!, requestHash(req)))
+      )
+        return;
+    } catch {
+      this.ledgerFailed();
+      return;
+    }
+    if (this.closed) return;
     if (this.state.request?.id === req.id) {
       // A re-announcement cannot change the question or reset its deadline.
       if (requestHash(this.state.request) !== requestHash(req)) return;
@@ -652,7 +740,9 @@ export class Session {
       this.seenIDs.add(req.id);
       return;
     }
-    this.seenIDs.add(req.id);
+    // Only completed/expired IDs belong in the closed-request set. Merely
+    // seeing a card must not suppress an authenticated re-announcement after
+    // a stale roster snapshot was rejected by the sequence ledger.
     this.set({
       request: req,
       screen: cardScreen(req),
@@ -731,7 +821,22 @@ export class Session {
     this.agentSigner = agentSigner;
     this.protocol = PROTOCOL;
     this.sessionKey = key;
-    this.set({ paired: true, screen: 'listening', pairError: null });
+    this.protocolReady = this.ledgerLoader(
+      protocolScope(this.state.roomID, agentSigner, this.pinnedDeviceSigner!),
+      false,
+    )
+      .then((ledger) => {
+        this.ledger = ledger;
+        if (this.closed) {
+          void ledger.forget().catch(() => {});
+          return;
+        }
+        this.canPersist = true;
+        this.set({ paired: true, screen: 'listening', pairError: null });
+      })
+      .catch(() => {
+        if (!this.closed) this.ledgerFailed();
+      });
   }
   private onPairError(err: Error): void {
     if (this.closed) return;

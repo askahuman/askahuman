@@ -1,3 +1,4 @@
+import type { ProtocolLedgerLoader } from '../src/lib/protocol-state.ts';
 // Scripted v2 peer for tests. Uses real P-256/WebCrypto, PAKE, and secretbox;
 // nothing repairs malformed frames or bypasses production signature checks.
 import { expect } from 'vitest';
@@ -19,6 +20,49 @@ import {
   type Ack,
 } from '../src/lib/protocol.ts';
 
+// In-memory fixture for isolated Session tests. Real atomic IndexedDB behavior
+// is exercised separately in the actual multi-page browser protocol harness.
+const ledgerStates = new Map<
+  string,
+  { request: number; digest: string; push: number }
+>();
+export const protocolLedgerLoader: ProtocolLedgerLoader = async (
+  scope,
+  restored,
+) => {
+  if (!ledgerStates.has(scope)) {
+    if (restored) throw new Error('missing ledger');
+    ledgerStates.set(scope, { request: 0, digest: '', push: 0 });
+  }
+  const read = () => {
+    const s = ledgerStates.get(scope);
+    if (!s) throw new Error('forgotten');
+    return s;
+  };
+  return {
+    observeRequest: async (seq, digest) => {
+      const s = read();
+      if (seq < s.request || (seq === s.request && digest !== s.digest))
+        return false;
+      s.request = seq;
+      s.digest = digest;
+      return true;
+    },
+    currentRequest: async (seq, digest) => {
+      const s = read();
+      return s.request === seq && s.digest === digest;
+    },
+    nextPush: async () => {
+      const s = read();
+      if (s.push >= Number.MAX_SAFE_INTEGER) throw new Error('exhausted');
+      return ++s.push;
+    },
+    currentPush: async (seq) => read().push === seq,
+    forget: async () => {
+      ledgerStates.delete(scope);
+    },
+  };
+};
 export interface TestSigner extends DeviceKey {
   privateKey: CryptoKey;
   publicKey: CryptoKey;
@@ -58,6 +102,8 @@ export interface TestPeer {
   phone: CryptoKey;
   room: string;
   key: Uint8Array;
+  requestSeq: number;
+  requestIDs: Map<string, number>;
 }
 const peers = new Map<string, TestPeer>();
 export function peerFor(key: Uint8Array): TestPeer {
@@ -106,7 +152,14 @@ export async function pairAgent<T extends ScriptedSocket>(
       ),
     ),
   ).toBe(true);
-  const peer = { signer, phone, room, key: result.sessionKey };
+  const peer = {
+    signer,
+    phone,
+    room,
+    key: result.sessionKey,
+    requestSeq: 0,
+    requestIDs: new Map<string, number>(),
+  };
   peers.set(b64Encode(peer.key), peer);
   ws.recv({ confirm: b64Encode(result.confirm) });
   return { ws, agentKey: peer.key, peer };
@@ -116,6 +169,10 @@ export async function signRequest(
   r: Request,
 ): Promise<Request> {
   const p = peerFor(key);
+  if (r.request_seq === undefined) {
+    r.request_seq = p.requestIDs.get(r.id) ?? ++p.requestSeq;
+    p.requestIDs.set(r.id, r.request_seq);
+  }
   Object.assign(r, {
     protocol: PROTOCOL,
     room: p.room,

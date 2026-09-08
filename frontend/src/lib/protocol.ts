@@ -47,6 +47,7 @@ export function requestSigningMessage(r: Request): Uint8Array<ArrayBuffer> {
     'aah:request:v2',
     String(r.protocol ?? 0),
     r.room ?? '',
+    String(r.request_seq ?? 0),
     r.id,
     r.title,
     r.category ?? '',
@@ -102,6 +103,7 @@ export const pushSigningMessage = (p: PushSub): Uint8Array<ArrayBuffer> =>
     'aah:push-sub:v2',
     String(p.protocol ?? 0),
     p.room ?? '',
+    String(p.push_seq ?? 0),
     p.subscription.endpoint,
     p.subscription.keys.p256dh,
     p.subscription.keys.auth,
@@ -206,6 +208,7 @@ export function validateRequest(r: Request): void {
     'protocol',
     'room',
     'deadline_ms',
+    'request_seq',
     'sig',
     'id',
     'title',
@@ -222,6 +225,8 @@ export function validateRequest(r: Request): void {
   )
     throw new Error('wire: invalid request metadata');
   integer(r.deadline_ms, Number.MAX_SAFE_INTEGER);
+  integer(r.request_seq, Number.MAX_SAFE_INTEGER);
+  if (!r.request_seq) throw new Error('wire: invalid request sequence');
   bounded(r.sig, 'signature', 88);
   bounded(r.id, 'id', 256, true);
   bounded(r.title, 'title', 512);
@@ -260,6 +265,7 @@ export function validateRequest(r: Request): void {
     protocol: PROTOCOL,
     room: 'f'.repeat(16),
     deadline_ms: Number.MAX_SAFE_INTEGER,
+    request_seq: Number.MAX_SAFE_INTEGER,
     sig: 'A'.repeat(88),
     kind: 'request',
     id: r.id,

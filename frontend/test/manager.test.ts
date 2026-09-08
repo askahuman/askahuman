@@ -12,6 +12,7 @@ import {
   acknowledge,
   decisions,
   deviceKeyLoader,
+  protocolLedgerLoader,
   pairAgent,
   sendReq,
   sendVapid,
@@ -70,6 +71,7 @@ function newManager(persist?: Persistence): SessionManager {
   const manager = new SessionManager(
     {
       deviceKeyLoader,
+      protocolLedgerLoader,
       relayOptions: {
         wsFactory: (url) => new FakeWS(url),
         setTimer: () => 0,
