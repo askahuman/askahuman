@@ -34,8 +34,9 @@ RUN bun run build
 # nginx-unprivileged: tiny, no Node runtime / no node_modules in the final image,
 # runs as non-root (uid 101) out of the box, listens on 8080. The PWA is content-blind
 # static assets, so a plain static server is the correct minimum (architecture/0004).
-# ponytail: base pinned by tag only; upgrade path = append @sha256:<digest>.
-FROM nginxinc/nginx-unprivileged:1.27-alpine AS runner
+# Maintained stable nginx + Alpine, pinned to the reviewed multi-platform image.
+# CI scans the final image; refresh this digest when upstream fixes are released.
+FROM nginxinc/nginx-unprivileged:1.30.4-alpine@sha256:442753882674b49ae2c1de83ed67896131c0777f56df5005e356e62bc3f7e7ce AS runner
 COPY nginx.conf /etc/nginx/conf.d/default.conf
 COPY --from=builder /app/dist /usr/share/nginx/html
 EXPOSE 8080

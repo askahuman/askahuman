@@ -56,6 +56,13 @@ jobs:
         run: bun run build
       - name: Go<->JS SPAKE2 + secretbox interop
         run: bun run interop
+      - name: Install regression browser
+        run: bunx playwright install --with-deps chromium
+      - name: Phone interaction, session recovery, and hosted pairing regressions
+        run: |
+          node e2e/phone-interactions.mjs
+          node e2e/session-recovery.mjs
+          node e2e/hosted-pairing.mjs
 
   web-container:
     runs-on: ubuntu-24.04
@@ -63,6 +70,16 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - name: Build production Linux image
         run: docker build --tag askahuman-web:ci frontend
+      - name: Scan final runtime image for high and critical vulnerabilities
+        run: |
+          curl --fail --silent --show-error --location --max-time 120 \
+            https://github.com/aquasecurity/trivy/releases/download/v0.74.0/trivy_0.74.0_Linux-64bit.tar.gz \
+            --output /tmp/trivy.tar.gz
+          echo '2ae6fe3ee734b7fdf11335663e18c75ea12dccc76062f09f164a3b0f8be4371a  /tmp/trivy.tar.gz' | sha256sum --check --strict
+          mkdir /tmp/trivy-bin
+          tar -xzf /tmp/trivy.tar.gz -C /tmp/trivy-bin trivy
+          /tmp/trivy-bin/trivy image --scanners vuln --severity HIGH,CRITICAL \
+            --exit-code 1 --no-progress askahuman-web:ci
       - name: Serve the PWA with production runtime restrictions
         run: |
           test "$(docker image inspect --format '{{.Config.User}}' askahuman-web:ci)" = 101
