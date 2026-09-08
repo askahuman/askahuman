@@ -56,16 +56,20 @@ jobs:
         run: bun run test
       - name: Build PWA
         run: bun run build
-      - name: Go<->JS SPAKE2 + secretbox interop
+      - name: Go<->JS PAKE, secretbox, and v2 approval protocol interop
         run: bun run interop
-      - name: Install regression browser
-        run: bunx playwright install --with-deps chromium
+      - name: Install regression browsers
+        run: bunx playwright install --with-deps chromium webkit
       - name: Phone interaction, recovery, hosted pairing, and notification regressions
         run: |
           node e2e/phone-interactions.mjs
           node e2e/session-recovery.mjs
           node e2e/hosted-pairing.mjs
           node e2e/multi-agent-push.mjs
+      - name: Authenticated approval protocol in Chromium and WebKit
+        run: |
+          RECOVERY_PORT=19280 node e2e/approval-protocol.mjs
+          RECOVERY_BROWSER=webkit RECOVERY_PORT=19380 node e2e/approval-protocol.mjs
 
   web-container:
     runs-on: ubuntu-24.04
