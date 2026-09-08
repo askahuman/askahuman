@@ -306,7 +306,7 @@ export function ListeningScreen({
             <span style={{ animation: 'blink 1.1s steps(1) infinite' }}>▌</span>
           </div>
           <div style={{ fontFamily: SANS, fontSize: 13.5, color: c.muted, marginTop: 10, lineHeight: 1.55, maxWidth: 240 }}>
-            Approvals from your agents land here and wake your phone. Nothing is stored.
+            Approvals arrive here. Pairing keys and recent replies stay on this device so you can reconnect. The relay cannot read them.
           </div>
         </div>
       </div>

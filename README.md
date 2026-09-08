@@ -64,6 +64,8 @@ That is it. Here is what happens:
 
 Running your own relay? Point the agent at it with `--relay <wss-url>` (and `--public-relay <wss-url>` if your phone reaches the relay at a different address). See [self-hosting](#self-hosting).
 
+The hosted app at `ask-a-human.ai` connects only to its hosted relay. For a custom relay, open your self-hosted PWA and set its relay URL in Advanced. If the relay uses a different origin from that PWA, allow that specific origin in your server's `connect-src` CSP. Local development continues to accept loopback relay URLs.
+
 ## Works with your agents
 
 <table>
