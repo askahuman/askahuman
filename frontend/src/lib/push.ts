@@ -10,6 +10,7 @@
 
 import type { PushSubscription as WirePushSubscription } from './wire.ts';
 import { PUSH_WORKER_URL, pushScope } from './push-routing.ts';
+import type { PushSubscriptionProvider } from './push-delivery.ts';
 
 /** urlBase64ToUint8Array decodes a VAPID public key (base64url) to bytes
  *  backed by a plain ArrayBuffer (so it satisfies BufferSource for the
@@ -69,13 +70,20 @@ export function requestPushPermission(): Promise<PushPermission> {
   catch { return Promise.resolve(pushPermission()); }
 }
 
-const operations = new Map<string, Promise<unknown>>();
-function withRoom<T>(room: string, action: () => Promise<T>): Promise<T> {
-  const previous = operations.get(room) ?? Promise.resolve();
-  const current = previous.catch(() => {}).then(action);
-  operations.set(room, current);
-  void current.finally(() => { if (operations.get(room) === current) operations.delete(room); }).catch(() => {});
-  return current;
+async function withRoom<T>(room: string, action: () => Promise<T>, waitForCleanup = false): Promise<T> {
+  // A tab-local queue cannot serialize subscription reads against another tab's
+  // replace/send. Hold the origin-wide lock through the caller's async delivery.
+  // Never steal a frozen tab's lock or fall back to an unlocked cached value.
+  if (typeof navigator === 'undefined' || !navigator.locks?.request)
+    throw new Error('push coordination unavailable');
+  const waiting = new AbortController();
+  const timer = waitForCleanup ? undefined : setTimeout(() => waiting.abort(), 10000);
+  try {
+    return await navigator.locks.request(`aah:push:${room}`, { mode: 'exclusive', signal: waiting.signal }, async () => {
+      clearTimeout(timer);
+      return await action();
+    });
+  } finally { clearTimeout(timer); }
 }
 
 async function activated(reg: ServiceWorkerRegistration): Promise<void> {
@@ -97,35 +105,39 @@ async function activated(reg: ServiceWorkerRegistration): Promise<void> {
   });
 }
 
-/** One registration/subscription per room. Never prompts automatically and
- * never changes another room's subscription or the shell worker. */
-export async function subscribeForPush(vapidPublicKey: string, room: string): Promise<WirePushSubscription | null> {
+/** Reconcile one native registration and consume its subscription while still
+ * holding the room lock. Never prompts or returns a cacheable subscription. */
+export const withPushSubscription: PushSubscriptionProvider = async (vapidPublicKey, room, use, current) => {
   try {
     const wantKey = urlBase64ToUint8Array(vapidPublicKey);
-    if (wantKey.length !== 65 || wantKey[0] !== 4) return null;
+    if (wantKey.length !== 65 || wantKey[0] !== 4) return false;
     const scope = pushScope(room);
     return await withRoom(room, async () => {
-      if (pushPermission() !== 'granted') return null;
+      if (!current() || pushPermission() !== 'granted') return false;
       const reg = await navigator.serviceWorker.register(PUSH_WORKER_URL, { scope });
       await activated(reg);
+      if (!current()) return false;
       let sub = await reg.pushManager.getSubscription();
+      if (!current()) return false;
       if (sub && !sameServerKey(sub.options.applicationServerKey, wantKey)) {
         await sub.unsubscribe();
         // If removal failed or is not yet reflected, do not claim that a new
         // key was subscribed. A future explicit retry can safely try again.
-        if (await reg.pushManager.getSubscription()) return null;
+        if (await reg.pushManager.getSubscription()) return false;
         sub = null;
       }
+      if (!current()) return false;
       sub ??= await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: wantKey });
-      return sameServerKey(sub.options.applicationServerKey, wantKey) ? toWireSubscription(sub.toJSON()) : null;
+      const wire = sameServerKey(sub.options.applicationServerKey, wantKey) ? toWireSubscription(sub.toJSON()) : null;
+      return !!wire && current() && pushPermission() === 'granted' && await use(wire);
     });
   } catch {
-    return null; // best-effort: a missing push service must not break the app
+    return false; // best-effort: a missing push service must not break the app
   }
-}
+};
 
 /** Forget only the exact room registration created by this application.
- * The queue also cleans up a subscribe that was in flight when Forget was tapped. */
+ * Wait across tabs for any in-flight subscribe/delivery, then clean it up. */
 export async function removePushForRoom(room: string): Promise<void> {
   try {
     const scope = new URL(pushScope(room), window.location.origin).href;
@@ -136,6 +148,6 @@ export async function removePushForRoom(room: string): Promise<void> {
       if (worker?.scriptURL !== new URL(PUSH_WORKER_URL, window.location.origin).href) return;
       try { await (await reg.pushManager.getSubscription())?.unsubscribe(); }
       finally { await reg.unregister(); }
-    });
+    }, true);
   } catch { /* best-effort; never remove broader/sibling registrations */ }
 }

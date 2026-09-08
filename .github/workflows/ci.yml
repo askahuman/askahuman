@@ -66,6 +66,10 @@ jobs:
           node e2e/session-recovery.mjs
           node e2e/hosted-pairing.mjs
           node e2e/multi-agent-push.mjs
+      - name: Native push reconciliation across Chromium and WebKit tabs
+        run: |
+          RECOVERY_PORT=19480 node e2e/push-reconciliation.mjs
+          RECOVERY_BROWSER=webkit RECOVERY_PORT=19580 node e2e/push-reconciliation.mjs
       - name: Authenticated approval protocol in Chromium and WebKit
         run: |
           RECOVERY_PORT=19280 node e2e/approval-protocol.mjs

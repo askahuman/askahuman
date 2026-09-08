@@ -23,7 +23,8 @@ import { SessionManager } from "../src/lib/manager.ts";
 import { type WSLike } from "../src/lib/relay.ts";
 import { type PairPayload } from "../src/lib/payload.ts";
 import { type Persistence, type StoredSession } from "../src/lib/store.ts";
-import { type PushSub, type Request, KindRequest } from "../src/lib/wire.ts";
+import type { PushSubscriptionProvider } from "../src/lib/push-delivery.ts";
+import { type PushSubscription, type PushSub, type Request, KindRequest } from "../src/lib/wire.ts";
 
 /** FakeWS captures sent frames per-room; the test plays the agent + relay. */
 class FakeWS implements WSLike {
@@ -61,12 +62,22 @@ function payload(room: string, code = "PAIR-1"): PairPayload {
 }
 
 const managers = new Set<SessionManager>();
+const nativeSubscriptions = new Map<string, PushSubscription>();
+const nativeProvider: PushSubscriptionProvider = async (_key, room, use, current) => {
+  const sub = nativeSubscriptions.get(room);
+  return !!sub && current() && await use(sub);
+};
+function deliver(manager: SessionManager, room: string, sub: PushSubscription, key = "build-key") {
+  nativeSubscriptions.set(room, sub);
+  return manager.reconcilePushSubscription(room, key);
+}
 afterEach(() => {
   for (const manager of managers) manager.closeAll();
   managers.clear();
+  nativeSubscriptions.clear();
 });
 
-function newManager(persist?: Persistence): SessionManager {
+function newManager(persist?: Persistence, provider = nativeProvider): SessionManager {
   FakeWS.byRoom.clear();
   const manager = new SessionManager(
     {
@@ -79,6 +90,7 @@ function newManager(persist?: Persistence): SessionManager {
       },
     },
     persist,
+    provider,
   );
   managers.add(manager);
   return manager;
@@ -361,7 +373,7 @@ describe("SessionManager", () => {
     expect(FakeWS.byRoom.get(b)).not.toBe(beforeB);
   });
 
-  it("sendPushSubscription fans out to every paired session", async () => {
+  it("reconciles each room separately even with a shared fallback key", async () => {
     const m = newManager();
     const a = "dddd000000000000";
     const b = "eeee000000000000";
@@ -374,12 +386,14 @@ describe("SessionManager", () => {
       endpoint: "https://push.example/x",
       keys: { p256dh: "p", auth: "au" },
     };
-    expect(await m.sendPushSubscription(sub)).toBe(true);
+    const otherSub = { ...sub, endpoint: "https://push.example/other-room" };
+    expect(await deliver(m, a, sub)).toBe(true);
+    expect(await deliver(m, b, otherSub)).toBe(true);
     expect(await pushSubscriptions(wsA, keyA)).toEqual([
       expect.objectContaining({ room: a, subscription: sub }),
     ]);
     expect(await pushSubscriptions(wsB, keyB)).toEqual([
-      expect.objectContaining({ room: b, subscription: sub }),
+      expect.objectContaining({ room: b, subscription: otherSub }),
     ]);
   });
 
@@ -396,14 +410,14 @@ describe("SessionManager", () => {
     m.onVapidKey((pub, room) => got.push({ pub, room }));
 
     // Only agent A delivers a key -> the handler fires with A's room id, and
-    // firstVapidKey reflects A's key (used by the App's first-paired fallback).
+    // firstVapidKey reflects A's key.
     await sendVapid(wsA, keyA, "Akey");
     expect(got).toEqual([{ pub: "Akey", room: a }]);
     expect(m.firstVapidKey()).toBe("Akey");
     void keyB; // B intentionally sends no key in this case
   });
 
-  it("sendPushSubscriptionTo delivers the agent-keyed sub back to ONLY that room", async () => {
+  it("reconciliation delivers the agent-keyed sub back to ONLY that room", async () => {
     const m = newManager();
     const a = "c3c3c3c3c3c3c3c3";
     const b = "d4d4d4d4d4d4d4d4";
@@ -420,7 +434,7 @@ describe("SessionManager", () => {
     };
     let delivery: Promise<boolean> | undefined;
     m.onVapidKey((_pub, room) => {
-      delivery = m.sendPushSubscriptionTo(room, sub);
+      delivery = deliver(m, room, sub, _pub);
     });
     await sendVapid(wsA, keyA, "Akey");
 
@@ -484,7 +498,7 @@ describe("SessionManager", () => {
     expect(m.pendingCount()).toBe(1);
   });
 
-  it("re-delivers the retained push subscription on every fresh connection (reconnect re-arm)", async () => {
+  it("reconciles the native subscription on every fresh connection", async () => {
     const m = newManager();
     const room = "f00d0000f00d0000";
     m.add(payload(room));
@@ -494,7 +508,7 @@ describe("SessionManager", () => {
       endpoint: "https://push.example/x",
       keys: { p256dh: "p", auth: "au" },
     };
-    expect(await m.sendPushSubscription(sub)).toBe(true);
+    expect(await deliver(m, room, sub)).toBe(true);
     const ws1 = FakeWS.byRoom.get(room)!;
     expect(
       ws1.sent.filter((f) => typeof f.box === "string").length,
@@ -502,7 +516,7 @@ describe("SessionManager", () => {
 
     // iOS resume: retryAll drops + reopens the socket. A sub written into the now
     // half-open socket while the agent was away was counted "sent"; on the fresh
-    // connection it must be re-delivered (pushSent re-armed on the open transition).
+    // connection it must be reconciled and delivered again.
     m.retryAll();
     const ws2 = FakeWS.byRoom.get(room)!;
     expect(ws2).not.toBe(ws1);
@@ -514,32 +528,32 @@ describe("SessionManager", () => {
     ).toBeGreaterThanOrEqual(1);
   });
 
-  it("retains a per-room sub sent while CONNECTING and delivers it once the socket opens", async () => {
+  it("retains only retry intent while CONNECTING and reads the current sub after open", async () => {
     const m = newManager();
     const room = "ab12ab12ab12ab12";
     m.add(payload(room));
-    await pair(room);
+    const { agentKey } = await pair(room);
 
     // iOS kill -> restore race: retryAll dropped the socket and the replacement
-    // is still CONNECTING when subscribeForPush resolves and the App delivers.
+    // is still CONNECTING when reconciliation starts and the App attempts delivery.
     m.retryAll();
     const ws2 = FakeWS.byRoom.get(room)!;
     const sub = {
       endpoint: "https://push.example/agent",
       keys: { p256dh: "p", auth: "au" },
     };
-    expect(await m.sendPushSubscriptionTo(room, sub)).toBe(false); // write into a connecting socket
+    expect(await deliver(m, room, sub)).toBe(false); // write into a connecting socket
     expect(ws2.sent.filter((f) => typeof f.box === "string")).toHaveLength(0);
 
-    // The sub must be RETAINED: the open transition is the retry that delivers it.
+    // Native state can change while connecting. Retry must obtain the new value.
+    const current = { ...sub, endpoint: "https://push.example/current" };
+    nativeSubscriptions.set(room, current);
     ws2.open();
     await until(() => ws2.sent.some((f) => typeof f.box === "string"));
-    expect(
-      ws2.sent.filter((f) => typeof f.box === "string").length,
-    ).toBeGreaterThanOrEqual(1);
+    expect((await pushSubscriptions(ws2, agentKey)).at(-1)!.subscription).toEqual(current);
   });
 
-  it("re-delivers the room's OWN sub on reconnect (per-agent-key room, not just fanout)", async () => {
+  it("reconciles the room's own key on reconnect", async () => {
     const m = newManager();
     const room = "cd34cd34cd34cd34";
     m.add(payload(room));
@@ -549,11 +563,10 @@ describe("SessionManager", () => {
       endpoint: "https://push.example/agent",
       keys: { p256dh: "p", auth: "au" },
     };
-    expect(await m.sendPushSubscriptionTo(room, sub)).toBe(true); // delivered on the live socket
+    expect(await deliver(m, room, sub)).toBe(true); // delivered on the live socket
 
     // Reconnect (iOS resume). The prod build bakes an EMPTY build key (ADR 0016),
-    // so per-agent rooms are the only kind there: the per-room sub must be
-    // re-delivered on the fresh connection, not only the global fanout one.
+    // so each room's native subscription must be reconciled on reconnect.
     m.retryAll();
     const ws2 = FakeWS.byRoom.get(room)!;
     ws2.open();
@@ -563,32 +576,87 @@ describe("SessionManager", () => {
     ).toBeGreaterThanOrEqual(1);
   });
 
-  it("reconnect re-delivers the per-agent sub, NOT the build fanout sub (build key baked)", async () => {
+  it("rejects fallback or another agent's key when the room has its own signed key", async () => {
     const m = newManager();
     const room = "ef56ef56ef56ef56";
     m.add(payload(room));
-    const { agentKey } = await pair(room);
-
-    // Self-hoster with a baked build key: the anyPaired fanout fires first, then
-    // the agent's OWN key produces this room's subscription.
-    await m.sendPushSubscription({
-      endpoint: "https://push.example/build",
-      keys: { p256dh: "p", auth: "au" },
-    });
-    await m.sendPushSubscriptionTo(room, {
-      endpoint: "https://push.example/agent",
-      keys: { p256dh: "p", auth: "au" },
-    });
-
+    const { ws, agentKey } = await pair(room);
+    await sendVapid(ws, agentKey, "own-key");
+    const sub = { endpoint: "https://push.example/agent", keys: { p256dh: "p", auth: "au" } };
+    expect(await deliver(m, room, sub, "build-key")).toBe(false);
+    expect(await pushSubscriptions(ws, agentKey)).toHaveLength(0);
+    expect(await deliver(m, room, sub, "own-key")).toBe(true);
     m.retryAll();
-    const ws2 = FakeWS.byRoom.get(room)!;
-    ws2.open();
-    await until(() => ws2.sent.some((f) => typeof f.box === "string"));
-    // The re-delivered sub is the AGENT-keyed one — re-sending the build sub
-    // would clobber the agent's correct endpoint and 403 every push forever.
-    const got = (await pushSubscriptions(ws2, agentKey)).at(-1)!;
-    expect(got.kind).toBe("push_sub");
-    expect(got.subscription.endpoint).toBe("https://push.example/agent");
+    const reconnected = FakeWS.byRoom.get(room)!;
+    reconnected.open();
+    await until(() => reconnected.sent.some((f) => typeof f.box === "string"));
+    expect((await pushSubscriptions(reconnected, agentKey)).at(-1)!.subscription).toEqual(sub);
+  });
+
+  it("stale tab reconnect signs native E2 after another tab has delivered E2, never cached E1", async () => {
+    const persist = new FakePersist();
+    const a = newManager(persist);
+    const room = "feedfeedfeedfeed";
+    a.add(payload(room));
+    const { ws: first, agentKey } = await pair(room);
+    const e1 = { endpoint: "https://push.example/e1", keys: { p256dh: "p", auth: "a" } };
+    const e2 = { ...e1, endpoint: "https://push.example/e2" };
+    expect(await deliver(a, room, e1)).toBe(true);
+    const b = newManager(persist);
+    expect(b.restoreAll()).toBe(1);
+    await until(() => FakeWS.byRoom.get(room));
+    const second = FakeWS.byRoom.get(room)!;
+    second.open();
+    expect(await deliver(b, room, e2)).toBe(true);
+    const newer = (await pushSubscriptions(second, agentKey)).at(-1)!;
+    a.retryAll();
+    const reconnected = FakeWS.byRoom.get(room)!;
+    reconnected.open();
+    await until(() => reconnected.sent.some((f) => typeof f.box === "string"));
+    const reconciled = (await pushSubscriptions(reconnected, agentKey)).at(-1)!;
+    expect(reconciled.subscription).toEqual(e2);
+    expect(reconciled.push_seq).toBeGreaterThan(newer.push_seq!);
+    expect((await pushSubscriptions(first, agentKey))[0]!.subscription).toEqual(e1);
+  });
+
+  it("never sends cached data or reports ready after native reconciliation fails on reconnect", async () => {
+    const m = newManager();
+    const room = "deadfeeddeadfeed";
+    m.add(payload(room));
+    const { agentKey } = await pair(room);
+    expect(await deliver(m, room, { endpoint: "https://push.example/old", keys: { p256dh: "p", auth: "a" } })).toBe(true);
+    nativeSubscriptions.delete(room);
+    m.retryAll();
+    const reconnected = FakeWS.byRoom.get(room)!;
+    reconnected.open();
+    await until(() => m.pushStatus(room, "build-key") === "failed");
+    expect(await pushSubscriptions(reconnected, agentKey)).toHaveLength(0);
+  });
+
+  it("does not sign a delayed superseded reconciliation or one whose room was forgotten", async () => {
+    let finish!: () => Promise<boolean>;
+    let slow = true;
+    const e1 = { endpoint: "https://push.example/e1", keys: { p256dh: "p", auth: "a" } };
+    const e2 = { ...e1, endpoint: "https://push.example/e2" };
+    const m = newManager(undefined, async (_key, _room, use) => slow
+      ? new Promise<boolean>((resolve) => { finish = async () => { const sent = await use(e1); resolve(sent); return sent; }; })
+      : use(e2));
+    const room = "decafdecafdecaff";
+    m.add(payload(room));
+    const { ws, agentKey } = await pair(room);
+    const old = m.reconcilePushSubscription(room, "key");
+    slow = false;
+    expect(await m.reconcilePushSubscription(room, "key")).toBe(true);
+    expect(await finish()).toBe(false);
+    expect(await old).toBe(false);
+    expect((await pushSubscriptions(ws, agentKey)).map((p) => p.subscription)).toEqual([e2]);
+    expect(m.pushStatus(room, "key")).toBe("ready");
+    slow = true;
+    const removed = m.reconcilePushSubscription(room, "key");
+    m.remove(room);
+    expect(await finish()).toBe(false);
+    expect(await removed).toBe(false);
+    expect((await pushSubscriptions(ws, agentKey)).map((p) => p.subscription)).toEqual([e2]);
   });
 
   it("vapidKeys returns each agent VAPID key tagged with its room (restore re-subscribe)", async () => {
