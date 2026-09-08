@@ -5,6 +5,7 @@ import io
 import json
 import os
 import subprocess
+import sys
 import tempfile
 import unittest
 from email.message import Message
@@ -63,6 +64,8 @@ def fixtures():
         "conditions": {"ready": True}, "addresses": ["10.0.0.9"],
         "targetRef": {"kind": "Pod", "uid": "relay-uid", "namespace": p.NAMESPACE},
     }]}]}
+    result["relay_core_endpoints"] = {"metadata": {}, "subsets": [{"ports": [{"port": 8080, "protocol": "TCP"}],
+        "addresses": [{"ip": "10.0.0.9", "targetRef": {"kind": "Pod", "uid": "relay-uid", "namespace": p.NAMESPACE}}]}]}
     return result
 
 
@@ -70,11 +73,11 @@ class ClusterTests(unittest.TestCase):
     def run_cluster(self, data):
         output = io.StringIO()
         report = p.Report()
-        with contextlib.redirect_stdout(output), patch.object(p, "read_object", side_effect=lambda _, key, *args: data[key]):
+        with contextlib.redirect_stdout(output), patch.object(p, "read_object", side_effect=lambda _, key, *args, **kwargs: data[key]):
             p.check_cluster(report, {"GAR_REGISTRY": PRIVATE})
         self.assertNotIn(PRIVATE, output.getvalue())
         self.assertNotIn(NEG, output.getvalue())
-        return report.ok, {x["check"]: x["ok"] for x in map(json.loads, output.getvalue().splitlines())}
+        return report.ok, {x.get("check", x.get("diagnostic")): x["ok"] for x in map(json.loads, output.getvalue().splitlines())}
 
     def test_healthy_current_cluster_and_versioned_images(self):
         data = fixtures()
@@ -140,7 +143,8 @@ class ClusterTests(unittest.TestCase):
             out = io.StringIO()
             with contextlib.redirect_stdout(out), patch.object(p, "command", side_effect=failure):
                 self.assertEqual(p.read_object(p.Report(), "relay_pods", ["pods"], {}), {})
-            self.assertEqual(json.loads(out.getvalue()), {"check": "relay_pods_read", "ok": False})
+            self.assertEqual(json.loads(out.getvalue()), {"check": "relay_pods_read", "ok": False,
+                             "failure": "timeout" if isinstance(failure, subprocess.TimeoutExpired) else "unknown_error"})
         with contextlib.redirect_stdout(io.StringIO()), patch.object(p, "command", return_value="["):
             report = p.Report()
             self.assertEqual(p.read_object(report, "ingress", ["ingress"], {}), {})
@@ -160,6 +164,158 @@ class ClusterTests(unittest.TestCase):
                 self.assertEqual(args[:5], ["gcloud", "container", "fleet", "memberships", "get-credentials"])
                 self.assertTrue(call_env["KUBECONFIG"].startswith(directory + "/aah-preflight-"))
                 self.assertFalse(os.path.exists(call_env["KUBECONFIG"]))
+
+    def test_neg_diagnostics_distinguish_backend_health_format_and_identity(self):
+        data = fixtures()
+        ok, checks = self.run_cluster(data)
+        self.assertTrue(ok)
+        for key in ("backend_registered", "backend_healthy", "pod_readiness_gate", "pod_condition_present",
+                    "pod_condition_true", "pod_positive_reason", "pod_positive_message_format", "pod_message_current_identity"):
+            self.assertTrue(checks["relay_neg_" + key], key)
+        self.assertFalse(checks["relay_neg_condition_unrecognized"])
+        data["ingress"]["metadata"]["annotations"]["ingress.kubernetes.io/backends"] = json.dumps({NEG: "UNHEALTHY"})
+        ok, checks = self.run_cluster(data)
+        self.assertFalse(ok)
+        self.assertTrue(checks["relay_neg_backend_registered"])
+        self.assertFalse(checks["relay_neg_backend_healthy"])
+        self.assertTrue(checks["relay_neg_pod_message_current_identity"])
+        data = fixtures()
+        condition = data["relay_pods"]["items"][0]["status"]["conditions"][1]
+        condition["message"] = condition["message"].replace(NEG, "another-private-neg")
+        ok, checks = self.run_cluster(data)
+        self.assertFalse(ok)
+        self.assertTrue(checks["relay_neg_pod_positive_message_format"])
+        self.assertFalse(checks["relay_neg_pod_message_current_identity"])
+        condition["message"] = PRIVATE
+        ok, checks = self.run_cluster(data)
+        self.assertFalse(ok)
+        self.assertFalse(checks["relay_neg_pod_positive_message_format"])
+        self.assertTrue(checks["relay_neg_condition_unrecognized"])
+
+    def test_neg_known_reason_categories_do_not_relax_gate(self):
+        cases = [("LoadBalancerNegTimeout", PRIVATE, "timeout"),
+                 ("LoadBalancerNegWithoutHealthCheck", PRIVATE, "no_health_check"),
+                 ("LoadBalancerNegNotReady", PRIVATE, "not_ready"),
+                 ("LoadBalancerNegReady", "Pod does not belong to any NEG. " + PRIVATE, "no_neg"),
+                 ("LoadBalancerNegReady", "Pod belongs to a node in non-default subnet. " + PRIVATE, "non_default_subnet")]
+        for reason, message, category in cases:
+            data = fixtures()
+            data["relay_pods"]["items"][0]["status"]["conditions"][1].update(reason=reason, message=message)
+            ok, checks = self.run_cluster(data)
+            self.assertFalse(ok)
+            self.assertTrue(checks["relay_neg_reason_" + category])
+            self.assertFalse(checks["relay_neg_observed_healthy"])
+            self.assertFalse(checks["relay_neg_condition_unrecognized"])
+
+    def test_missing_neg_gate_or_condition_remains_a_failure(self):
+        data = fixtures()
+        data["relay_pods"]["items"][0]["spec"].pop("readinessGates")
+        ok, checks = self.run_cluster(data)
+        self.assertFalse(ok)
+        self.assertFalse(checks["relay_neg_pod_readiness_gate"])
+        self.assertTrue(checks["relay_neg_pod_condition_present"])
+        data = fixtures()
+        data["relay_pods"]["items"][0]["status"]["conditions"].pop()
+        ok, checks = self.run_cluster(data)
+        self.assertFalse(ok)
+        self.assertFalse(checks["relay_neg_pod_condition_present"])
+
+    def test_core_endpoints_only_diagnose_existing_permissions(self):
+        data = fixtures()
+        data["relay_endpoints"] = {}
+        ok, checks = self.run_cluster(data)
+        self.assertFalse(ok, "readable core Endpoints cannot bypass the required EndpointSlice check")
+        self.assertTrue(checks["relay_core_endpoints_match_pods"])
+        for mutation in [lambda e: e["metadata"].update(annotations={"endpoints.kubernetes.io/over-capacity": "truncated"}),
+                         lambda e: e["subsets"][0].update(notReadyAddresses=[{"ip": "10.0.0.9"}]),
+                         lambda e: e["subsets"][0]["addresses"][0].update(ip="10.0.0.10"),
+                         lambda e: e["subsets"][0]["addresses"][0]["targetRef"].update(uid="wrong")]:
+            data = fixtures()
+            mutation(data["relay_core_endpoints"])
+            ok, checks = self.run_cluster(data)
+            self.assertTrue(ok, "diagnostic-only legacy API does not change the existing gate")
+            self.assertFalse(checks["relay_core_endpoints_match_pods"])
+        output = io.StringIO()
+        report = p.Report()
+        with patch.object(p, "command", side_effect=p.CheckFailure("forbidden")), contextlib.redirect_stdout(output):
+            p.read_object(report, "relay_core_endpoints", ["endpoints", p.RELAY], {}, diagnostic=True)
+        self.assertTrue(report.ok)
+        self.assertEqual(json.loads(output.getvalue()), {"diagnostic": "relay_core_endpoints_read", "ok": False, "failure": "forbidden"})
+
+
+class DiagnosticRedactionTests(unittest.TestCase):
+    def test_known_command_errors_are_fixed_categories(self):
+        cases = [
+            ("Error from server (Forbidden): " + PRIVATE, "forbidden"),
+            ("Error from server (NotFound): " + PRIVATE, "not_found"),
+            ("Error from server (Unauthorized): " + PRIVATE, "unauthenticated"),
+            ("Error from server (ServiceUnavailable): " + PRIVATE, "unavailable"),
+            ("Error from server (TooManyRequests): " + PRIVATE, "rate_limited"),
+            ("Error from server (BadRequest): " + PRIVATE, "invalid_request"),
+            ("Error from server (InternalError): " + PRIVATE, "api_error"),
+            ("ERROR: PERMISSION_DENIED " + PRIVATE, "forbidden"),
+            ("error: the server doesn't have a resource type " + PRIVATE, "not_found"),
+            ("Unable to connect to the server: " + PRIVATE + " i/o timeout", "timeout"),
+            ("Unable to connect to the server: " + PRIVATE + " context deadline exceeded", "timeout"),
+            ("Unable to connect to the server: " + PRIVATE + " x509: untrusted", "tls_error"),
+            ("Unable to connect to the server: " + PRIVATE + " connection refused", "network_error"),
+            (PRIVATE, "tool_error"),
+        ]
+        for raw, category in cases:
+            with self.subTest(category=category):
+                completed = subprocess.CompletedProcess(["kubectl", PRIVATE], 1, stdout=PRIVATE, stderr=raw)
+                output = io.StringIO()
+                with patch.object(p.subprocess, "run", return_value=completed), contextlib.redirect_stdout(output):
+                    report = p.Report()
+                    report.check("api_read", lambda: p.command(["kubectl", PRIVATE], {}))
+                self.assertFalse(report.ok)
+                self.assertEqual(json.loads(output.getvalue()), {"check": "api_read", "ok": False, "failure": category})
+
+    def test_structured_api_status_and_local_failures_are_redacted(self):
+        for raw in (json.dumps({"kind": "Status", "reason": "Forbidden", "message": PRIVATE}),
+                    json.dumps({"kind": "Status", "reason": PRIVATE, "message": PRIVATE})):
+            self.assertEqual(p.command_failure(raw, ""), "forbidden" if '"Forbidden"' in raw else "api_error")
+        for error, category in [(subprocess.TimeoutExpired([PRIVATE], 45, output=PRIVATE, stderr=PRIVATE), "timeout"),
+                                (FileNotFoundError(PRIVATE), "tool_unavailable"), (PermissionError(PRIVATE), "tool_error")]:
+            with patch.object(p.subprocess, "run", side_effect=error):
+                with self.assertRaises(p.CheckFailure) as caught:
+                    p.command([PRIVATE], {})
+            self.assertEqual(str(caught.exception), category)
+        self.assertEqual(str(p.CheckFailure(PRIVATE)), "unknown_error")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            p.Report().check("unknown_exception", lambda: (_ for _ in ()).throw(RuntimeError(PRIVATE)))
+        self.assertEqual(json.loads(out.getvalue())["failure"], "unknown_error")
+        self.assertNotIn(PRIVATE, out.getvalue())
+
+    def test_real_failing_process_stdout_stderr_and_args_never_reach_report(self):
+        with tempfile.TemporaryDirectory() as directory:
+            fake = os.path.join(directory, "fake-cli.py")
+            with open(fake, "w") as file:
+                file.write("import sys\nprint(sys.argv[1])\nsys.stderr.write('Error from server (Forbidden): '+sys.argv[1])\nsys.exit(1)\n")
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                report = p.Report()
+                report.check("api_read", lambda: p.command([sys.executable, fake, PRIVATE], dict(os.environ)))
+            self.assertEqual(json.loads(output.getvalue()), {"check": "api_read", "ok": False, "failure": "forbidden"})
+            self.assertNotIn(directory, output.getvalue())
+
+    def test_read_scope_stays_namespace_only_and_legacy_probe_is_exact_name(self):
+        data = fixtures()
+        seen = []
+        def read(args, env):
+            seen.append(args)
+            # Returning an empty object is enough to inspect scope; all semantic
+            # failures are captured/redacted and no required check can pass.
+            return "{}"
+        with patch.object(p, "command", side_effect=read), contextlib.redirect_stdout(io.StringIO()):
+            report = p.Report()
+            p.check_cluster(report, {})
+        self.assertEqual(len(seen), 9)
+        self.assertTrue(all(args[:5] == ["kubectl", "--namespace", p.NAMESPACE, "--request-timeout=30s", "get"] for args in seen))
+        self.assertEqual(seen[-1][5:], ["endpoints", p.RELAY, "-o", "json"])
+        self.assertFalse(any("auth" in args or "secrets" in args for args in seen))
+        self.assertFalse(report.ok)
 
 
 class Response:
