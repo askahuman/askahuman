@@ -1,0 +1,52 @@
+# No apply, rollout, exec, logs, Secret reads or cloud mutations. Private API
+# responses and CLI errors stay in memory; the script emits fixed booleans only.
+name: production-preflight
+
+on:
+  workflow_dispatch:
+    inputs:
+      expected_version:
+        description: "Optional deployed version (without v); blank checks current topology only"
+        required: false
+        type: string
+      expected_commit:
+        description: "Full public commit SHA; required with version to check the public release"
+        required: false
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+# Coordinate with tag deployments to avoid reading a half-applied rollout.
+concurrency:
+  group: deploy-prod
+  cancel-in-progress: false
+
+jobs:
+  preflight:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    environment: production
+    env:
+      GCP_PROJECT: ${{ secrets.GCP_PROJECT_ID }}
+      GKE_CLUSTER: ${{ secrets.GKE_CLUSTER }}
+      GAR_REGISTRY: ${{ secrets.GAR_REGISTRY }}
+      EXPECTED_VERSION: ${{ inputs.expected_version }}
+      EXPECTED_COMMIT: ${{ inputs.expected_commit }}
+      USE_GKE_GCLOUD_AUTH_PLUGIN: "True"
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
+        with:
+          project_id: ${{ secrets.GCP_PROJECT_ID }}
+          workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
+          service_account: ${{ secrets.GCP_DEPLOYER_SA }}
+      - uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3
+        with:
+          install_components: gke-gcloud-auth-plugin
+      - name: Read-only production topology and rollout checks
+        run: python3 scripts/production_preflight.py
+      - name: Verify the public release and actual GFE proxy path
+        if: inputs.expected_version != '' || inputs.expected_commit != ''
+        run: python3 scripts/verify_public_release.py

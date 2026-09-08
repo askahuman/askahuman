@@ -2,6 +2,9 @@
 # built Go binaries (scripts go build -o ./bin/...)
 /bin/
 
+# Python verification scripts
+__pycache__/
+
 # autonomous agent-E2E pair log (scripts/agent-e2e.sh)
 .aah-pair.log
 .cursor/mcp.json

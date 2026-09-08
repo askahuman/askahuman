@@ -11,6 +11,7 @@ import { useEffect, useRef, useState } from 'react';
 import { codeSymbolsBefore, defaultRelayURL, formatCodeInput } from '../lib/codegen.ts';
 import { relayURLProblem } from '../lib/payload.ts';
 import type { Palette } from './theme.ts';
+import { BuildVersion } from './BuildVersion.tsx';
 
 const MONO = "'JetBrains Mono', ui-monospace, monospace";
 const SANS = "'IBM Plex Sans', sans-serif";
@@ -328,6 +329,7 @@ export function PairScreen({ c, onSubmitCode, error }: PairScreenProps) {
       <div style={{ fontFamily: SANS, fontSize: 13, color: c.faint, textAlign: 'center', lineHeight: 1.55 }}>
         The code is the key. It derives the room and encrypts the channel, and the relay can't read it.
       </div>
+      <BuildVersion c={c} />
     </div>
   );
 }

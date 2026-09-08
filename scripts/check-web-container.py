@@ -1,5 +1,6 @@
 """Smoke-check the real nginx container started by CI; no external services."""
 import json
+import os
 import re
 from urllib.request import urlopen
 
@@ -27,4 +28,12 @@ assert "javascript" in headers["Content-Type"] and worker
 assert "no-store" in headers["Cache-Control"]
 manifest, _ = get("/manifest.webmanifest")
 assert json.loads(manifest)["start_url"].rstrip("/") == "/app"
-print("Production container serves app, JavaScript, worker, and manifest with security/cache headers.")
+version, headers = get("/version.json")
+assert "application/json" in headers["Content-Type"]
+assert "no-store" in headers["Cache-Control"]
+assert json.loads(version) == {
+    "version": os.environ.get("EXPECTED_VERSION", "dev"),
+    "commit": os.environ.get("EXPECTED_COMMIT", "unknown"),
+}
+assert "version.json" not in worker, "release metadata must not enter the service-worker cache"
+print("Production container serves app, JavaScript, worker, manifest and uncached version with security/cache headers.")

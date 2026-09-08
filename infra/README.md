@@ -4,6 +4,9 @@ Kustomize manifests + local dev orchestration for **ask-a-human** (relay + web P
 No database, single replica each, two container images. The MCP agent is a separately
 distributed binary — it is **not** an image and is not deployed here.
 
+For the scoped production preflight, public version/proxy probes, and iPhone
+release checks, see [release verification](release-verification.md).
+
 ## Layout
 
 ```

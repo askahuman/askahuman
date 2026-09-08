@@ -9,6 +9,7 @@
 //	       (manual/dev use).
 //	ask    one-shot CLI driver for E2E tests: mint a code (room derived from
 //	       it), pair as A, send one request, print the decision JSON, exit 0.
+//	version print the public build version and commit without starting an agent.
 package main
 
 import (
@@ -36,6 +37,8 @@ func main() {
 		err = runPair(ctx, os.Args[2:])
 	case "ask":
 		err = runAsk(ctx, os.Args[2:])
+	case "version", "--version":
+		err = runVersion(os.Args[2:])
 	default:
 		usage()
 		os.Exit(2)
@@ -47,8 +50,9 @@ func main() {
 
 func usage() {
 	// stderr only: stdout is reserved for MCP JSON-RPC.
-	fmt.Fprintln(os.Stderr, "usage: agent <serve|pair|ask> [flags]")
+	fmt.Fprintln(os.Stderr, "usage: agent <serve|pair|ask|version> [flags]")
 	fmt.Fprintln(os.Stderr, "  serve  run the stdio MCP server (request_approval tool)")
 	fmt.Fprintln(os.Stderr, "  pair   print the pairing code and hold it open")
 	fmt.Fprintln(os.Stderr, "  ask    one-shot: pair, send one request, print the decision JSON")
+	fmt.Fprintln(os.Stderr, "  version  show public release version and commit (--json for JSON)")
 }

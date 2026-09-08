@@ -23,6 +23,7 @@ import (
 
 	"github.com/coder/websocket"
 
+	"github.com/askahuman/askahuman/backend/pkg/buildinfo"
 	"github.com/askahuman/askahuman/backend/pkg/wire"
 )
 
@@ -520,15 +521,20 @@ func writeSignal(ctx context.Context, p *peer, sig wire.RelaySignal) {
 
 // Health is the liveness/readiness probe handler for /healthz.
 func (r *Relay) Health(w http.ResponseWriter, _ *http.Request) {
+	info := buildinfo.Current()
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("X-AAH-Version", info.Version)
+	w.Header().Set("X-AAH-Commit", info.Commit)
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte("ok"))
 }
 
-// Mux returns the relay's HTTP routes: /ws and /healthz.
+// Mux returns the relay's WebSocket, health and boolean proxy-check routes.
 func (r *Relay) Mux() *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ws", r.Handler())
 	mux.HandleFunc("/healthz", r.Health)
+	mux.HandleFunc("/healthz/proxy", r.ProxyHealth)
 	return mux
 }
 

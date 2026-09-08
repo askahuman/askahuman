@@ -93,6 +93,7 @@ export default defineConfig({
       injectManifest: {
         // Precache the static shell; the relay WS traffic is never cached.
         globPatterns: ["**/*.{js,css,html,svg,png,woff2}"],
+        globIgnores: ["**/version.json"],
       },
       devOptions: {
         enabled: false,
