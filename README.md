@@ -191,11 +191,13 @@ Ask a human. **BLOCKS** until they respond. Pass `expires_in_s` to also time out
 
 ### `pair_status`
 
-Read-only. Reports whether the agent is paired, waiting to pair, or idle (as a short status message). Never returns the code. Does not start pairing (use `start_pairing` for that).
+Read-only. Reports whether a pairing session exists and whether the relay currently reports the phone present, or whether pairing is waiting/idle. Never returns the code or changes the session. Does not start pairing (use `start_pairing` for that).
 
 ### `start_pairing`
 
-Read-only trigger. Begins pairing with your phone eagerly, instead of waiting for the first `request_approval`. Prints the short code in the agent terminal for you to type into the app; the handshake runs in the background and the tool returns immediately. Returns only non-secret status. The code never appears in the result.
+Begins pairing with your phone eagerly, instead of waiting for the first `request_approval`. Prints the short code in the agent terminal for you to type into the app; the handshake runs in the background. Returns only non-secret status. The code never appears in the result. An ordinary call preserves an existing session and joins an attempt already in progress.
+
+If you removed the agent entry from the phone or the phone forgot its pairing, call `start_pairing` with `{"reset":true}` and enter the fresh code. This explicitly disconnects the old session and discards its session key, device-key pin, and push subscription before pairing again. Reset refuses while an approval is pending; answer or cancel that request first. Reopening the app after an ordinary disconnect does not require a reset. A failed pairing releases all waiting callers with the failure, and the next call can start a fresh attempt.
 
 For agents: [`https://ask-a-human.ai/llms.txt`](https://ask-a-human.ai/llms.txt)
 
