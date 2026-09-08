@@ -190,7 +190,10 @@ try {
     await page.evaluate(() => document.documentElement.style.setProperty('--app-vvh', '350px'));
     const textbox = page.getByRole('textbox', { name: 'Your reply' });
     const send = page.getByRole('button', { name: 'Send reply' });
-    assert.ok(await send.isDisabled());
+    assert.ok(await send.isEnabled(), 'an explicit empty text reply is valid');
+    await send.click();
+    assert.deepEqual(await answers(page), ['']);
+    await render(page, 'text', { title: longTitle, summary: longSummary, response: { kind: 'text', max_len: 200 } });
     await textbox.fill('Checked the complete request');
     await inViewport(page, textbox);
     await inViewport(page, send);

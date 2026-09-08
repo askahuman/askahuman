@@ -11,7 +11,7 @@ import { fileURLToPath } from 'node:url';
 
 export const ROOT = process.env.RECOVERY_ROOT || fileURLToPath(new URL('../../', import.meta.url));
 const require = createRequire(path.join(ROOT, 'frontend/package.json'));
-const { chromium } = require('playwright');
+const { chromium, webkit } = require('playwright');
 const { ws: WS, wsServer: WSS } = require('playwright-core/lib/utilsBundle');
 export const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 export async function until(fn, timeout = 15000) {
@@ -41,6 +41,7 @@ export async function setup({ modules = {} } = {}) {
   try {
     let blockAgentUntil = 0;
     let transform = (frame) => frame;
+    let transformPhone = (frame) => frame;
     await mkdir(path.join(out, 'bin'));
     await writeFile(path.join(out, 'bin/open'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
     const agentBinary = process.env.AGENT_BINARY || path.join(out, 'agent');
@@ -65,6 +66,7 @@ export async function setup({ modules = {} } = {}) {
       if (url.pathname === '/app') { res.writeHead(301, { Location: '/app/' }); res.end(); return; }
       res.setHeader('Content-Security-Policy', csp);
       res.setHeader('Cache-Control', 'no-cache');
+      if (url.pathname === '/__recovery/blank') { res.setHeader('Content-Type', 'text/html'); res.end('<!doctype html><title>Protocol storage test</title>'); return; }
       if (fixtures.has(url.pathname)) { res.setHeader('Content-Type', 'text/javascript'); res.end(fixtures.get(url.pathname)); return; }
       const pathname = url.pathname.endsWith('/') ? `${url.pathname}index.html` : url.pathname;
       const file = path.resolve(ROOT, 'frontend/dist', `.${pathname}`);
@@ -83,7 +85,7 @@ export async function setup({ modules = {} } = {}) {
         connections.add(connection);
         const queue = [];
         socket.on('message', (raw) => {
-          const frame = agentSide ? transform(raw.toString()) : raw.toString();
+          const frame = agentSide ? transform(raw.toString()) : transformPhone(raw.toString());
           if (frame === null) return;
           if (upstream.readyState === WS.OPEN) upstream.send(frame); else queue.push(frame);
         });
@@ -96,12 +98,14 @@ export async function setup({ modules = {} } = {}) {
     }
     await new Promise((resolve) => server.listen(basePort + 1, '127.0.0.1', resolve));
     await new Promise((resolve) => proxy.listen(basePort + 2, '127.0.0.1', resolve));
-    browser = await chromium.launch(process.env.CHROME_EXECUTABLE ? { executablePath: process.env.CHROME_EXECUTABLE } : { channel: 'chromium' });
+    browser = process.env.RECOVERY_BROWSER === 'webkit'
+      ? await webkit.launch()
+      : await chromium.launch(process.env.CHROME_EXECUTABLE ? { executablePath: process.env.CHROME_EXECUTABLE } : { channel: 'chromium' });
     async function mcp(name = 'recovery-test') {
       // Model independent machines: each process signs pushes with its own key.
       const vapid = createECDH('prime256v1'); vapid.generateKeys();
       const processAgent = spawn(agentBinary, ['serve', '--relay', `ws://127.0.0.1:${basePort + 2}/ws`, '--name', name], {
-        env: { ...process.env, PATH: `${path.join(out, 'bin')}:${process.env.PATH}`, AAH_VAPID_PUBLIC_KEY: vapid.getPublicKey().toString('base64url'), AAH_VAPID_PRIVATE_KEY: vapid.getPrivateKey().toString('base64url'), AAH_REQUIRE_DEVICE_SIG: '1' },
+        env: { ...process.env, PATH: `${path.join(out, 'bin')}:${process.env.PATH}`, AAH_VAPID_PUBLIC_KEY: vapid.getPublicKey().toString('base64url'), AAH_VAPID_PRIVATE_KEY: vapid.getPrivateKey().toString('base64url') },
         stdio: ['pipe', 'pipe', 'pipe'],
       });
       children.add(processAgent);
@@ -131,6 +135,9 @@ export async function setup({ modules = {} } = {}) {
     }
     return {
       origin, browser, mcp,
+      transformAgentFrames: (fn) => { transform = fn; },
+      transformPhoneFrames: (fn) => { transformPhone = fn; },
+      injectToPhone: (frame) => { for (const c of connections) if (!c.agentSide && c.socket.readyState === WS.OPEN) c.socket.send(frame); },
       tamperConfirmation: (enabled) => { transform = enabled ? (frame) => JSON.parse(frame).confirm ? JSON.stringify({ confirm: Buffer.alloc(32).toString('base64') }) : frame : (frame) => frame; },
       cutAgent: () => {
         blockAgentUntil = Date.now() + 600;

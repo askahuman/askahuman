@@ -162,7 +162,7 @@ func TestStartPairingResetRefusesActiveApproval(t *testing.T) {
 	_, _, err := h.startPairing(ctx, nil, resetPairingInput(t))
 	require.ErrorIs(t, err, ErrBusy)
 	assert.Same(t, old, ag.sess)
-	pushBox(t, conn, key, wire.Decision{Kind: wire.KindDecision, ID: "req_1", Result: wire.Result{Approved: boolPtr(false)}})
+	answerBox(t, ag, conn, key, wire.Decision{Kind: wire.KindDecision, ID: "req_1", Result: wire.Result{Approved: boolPtr(false)}})
 	require.NoError(t, <-answered, "the original approval must remain answerable")
 }
 

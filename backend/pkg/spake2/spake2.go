@@ -182,6 +182,12 @@ func (s *State) startWith(x *ristretto255.Scalar) []byte {
 // this side's key-confirmation MAC; send it to the peer and verify theirs with
 // Confirm before trusting the channel.
 func (s *State) Finish(peerMsg []byte) (sessionKey, confirmMsg []byte, err error) {
+	return s.FinishWithContext(peerMsg, nil)
+}
+
+// FinishWithContext authenticates application identity/version binding before
+// deriving session and confirmation keys. Production protocol v2 requires it.
+func (s *State) FinishWithContext(peerMsg, binding []byte) (sessionKey, confirmMsg []byte, err error) {
 	if s.msg == nil {
 		return nil, nil, ErrNotStarted
 	}
@@ -206,6 +212,12 @@ func (s *State) Finish(peerMsg []byte) (sessionKey, confirmMsg []byte, err error
 	}
 
 	s.transcript = buildTranscript(sBytes, tBytes, k.Bytes(), s.w.Bytes())
+	if len(binding) > 0 {
+		var size [8]byte
+		binary.BigEndian.PutUint64(size[:], uint64(len(binding)))
+		s.transcript = append(s.transcript, size[:]...)
+		s.transcript = append(s.transcript, binding...)
+	}
 	ttHash := sha256.Sum256(s.transcript)
 
 	s.sessionKey, err = hkdf.Key(sha256.New, ttHash[:], nil, infoSession, KeySize)

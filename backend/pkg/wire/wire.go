@@ -35,22 +35,14 @@ func pad(b []byte) []byte {
 // EncodeRequest JSON-encodes r and pads the plaintext to a fixed block so the
 // request body length does not leak through the sealed box. Seal the result.
 func EncodeRequest(r Request) ([]byte, error) {
-	raw, err := json.Marshal(r)
-	if err != nil {
-		return nil, err
-	}
-	return pad(raw), nil
+	return EncodeMessage(r)
 }
 
 // EncodeDecision JSON-encodes d and pads the plaintext to a fixed block so
 // approve vs decline (and all decisions) seal to the same length, hiding the
 // answer from the relay via ciphertext-length analysis. Seal the result.
 func EncodeDecision(d Decision) ([]byte, error) {
-	raw, err := json.Marshal(d)
-	if err != nil {
-		return nil, err
-	}
-	return pad(raw), nil
+	return EncodeMessage(d)
 }
 
 // EncodeVAPIDKey JSON-encodes the agent's VAPID public key and pads the
@@ -78,6 +70,8 @@ func EncodeDeviceKey(spkiB64 string) ([]byte, error) {
 	return pad(raw), nil
 }
 
+// Deprecated: DecisionSigningMessage is the legacy v1 transcript, retained
+// only for compatibility vectors. Protocol v2 rejects these signatures.
 // DecisionSigningMessage builds the canonical byte string the phone signs and
 // the agent verifies for one decision. It is a cross-language contract (like
 // the SPAKE2 transcript): the JS twin decisionSigningMessage in
@@ -177,12 +171,13 @@ const (
 	// KindDeviceKey delivers the phone's per-device ECDSA P-256 public key to
 	// the agent so it can verify the signature on every decision.
 	KindDeviceKey MessageKind = "device_key"
+	KindAck       MessageKind = "ack"
 )
 
 // ValidMessageKind reports whether k is a known application message kind.
 func ValidMessageKind(k MessageKind) bool {
 	switch k {
-	case KindRequest, KindDecision, KindPushSub, KindVAPIDKey, KindDeviceKey:
+	case KindRequest, KindDecision, KindPushSub, KindVAPIDKey, KindDeviceKey, KindAck:
 		return true
 	default:
 		return false
@@ -255,6 +250,11 @@ type Response struct {
 
 // Request is an approval request sent agent -> phone, sealed inside a Box.
 type Request struct {
+	RequestSeq int64  `json:"request_seq"`
+	Protocol   int    `json:"protocol"`
+	Room       string `json:"room"`
+	DeadlineMS int64  `json:"deadline_ms"`
+	Sig        string `json:"sig"`
 	// Kind is always KindRequest.
 	Kind MessageKind `json:"kind"`
 	// ID uniquely identifies the request; the phone de-dupes by it.
@@ -286,19 +286,20 @@ type Result struct {
 
 // Decision is the human's answer sent phone -> agent, sealed inside a Box.
 type Decision struct {
+	Protocol     int          `json:"protocol"`
+	Room         string       `json:"room"`
+	RequestHash  string       `json:"request_hash"`
+	ResponseKind ResponseKind `json:"response_kind"`
 	// Kind is always KindDecision.
 	Kind MessageKind `json:"kind"`
 	// ID echoes the Request.ID being answered.
 	ID string `json:"id"`
 	// Result carries the answer matching the request's response kind.
 	Result Result `json:"result"`
-	// Sig is base64(raw IEEE-P1363 r||s, 64 bytes) of the phone's ECDSA P-256
-	// signature over DecisionSigningMessage(roomID, ID, Result). It is omitted
-	// (omitempty) by a phone with no device key, keeping an unsigned decision
-	// byte-compatible with older agents. Once the agent has learned the phone's
-	// device key, every decision MUST carry a verifying Sig or it is rejected —
-	// a stolen session key can decrypt but cannot forge an approval. See
-	// docs/decisions/architecture/0021_device_signed_decisions.md.
+	// Sig is base64(raw IEEE-P1363 r||s, 64 bytes) over the v2 request-bound
+	// transcript. The agent requires it and the PAKE-authenticated device key.
+	// omitempty preserves the ability to encode invalid/legacy test frames;
+	// it never enables unsigned acceptance.
 	Sig string `json:"sig,omitempty"`
 }
 
@@ -322,6 +323,10 @@ type PushKeys struct {
 // PushSub delivers the phone's PushSubscription to the agent, sealed
 // inside a Box so the relay never sees the endpoint.
 type PushSub struct {
+	PushSeq  int64  `json:"push_seq"`
+	Protocol int    `json:"protocol"`
+	Room     string `json:"room"`
+	Sig      string `json:"sig"`
 	// Kind is always KindPushSub.
 	Kind MessageKind `json:"kind"`
 	// Subscription is the sealed Web Push subscription.
@@ -333,6 +338,9 @@ type PushSub struct {
 // the agent signs wake-up pushes with (signer == subscribe-key). Only the
 // PUBLIC key ever crosses the wire; the private key never leaves the agent.
 type VAPIDKey struct {
+	Protocol int    `json:"protocol"`
+	Room     string `json:"room"`
+	Sig      string `json:"sig"`
 	// Kind is always KindVAPIDKey.
 	Kind MessageKind `json:"kind"`
 	// PublicKey is the agent's VAPID public key (base64url, uncompressed P-256).

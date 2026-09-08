@@ -186,7 +186,7 @@ export class Handshake {
    * { sessionKey, confirm }. Send confirm to the peer; verify theirs with
    * confirmPeer before trusting the key.
    */
-  finish(peerMsg: Uint8Array): { sessionKey: Uint8Array; confirm: Uint8Array } {
+  finish(peerMsg: Uint8Array, binding?: Uint8Array): { sessionKey: Uint8Array; confirm: Uint8Array } {
     if (!this.msg || this.x === undefined) throw new Error('spake2: start not called');
     const peerEl = Point.fromBytes(peerMsg); // canonical decode; throws if invalid
 
@@ -209,6 +209,7 @@ export class Handshake {
       tBytes,
       this.sharedKBytes,
       scalarToBytes(this.w),
+      ...(binding?.length ? [binding] : []),
     ]);
     const ttHash = sha256(this.transcript);
 

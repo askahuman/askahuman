@@ -10,7 +10,7 @@
     "astro": "astro",
     "check": "astro check",
     "test": "vitest run",
-    "interop": "node test/spake2-interop.mjs"
+    "interop": "node test/spake2-interop.mjs && node test/protocol-interop.mjs"
   },
   "dependencies": {
     "@astrojs/react": "^4.4.2",

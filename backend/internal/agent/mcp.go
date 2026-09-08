@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -27,9 +28,9 @@ type ApprovalInput struct {
 // ApprovalOutput is the request_approval tool's structured result; exactly
 // one field is set, matching the request's response_kind.
 type ApprovalOutput struct {
-	Approved *bool  `json:"approved,omitempty"`
-	Choice   string `json:"choice,omitempty"`
-	Text     string `json:"text,omitempty"`
+	Approved *bool   `json:"approved,omitempty"`
+	Choice   string  `json:"choice,omitempty"`
+	Text     *string `json:"text,omitempty"`
 }
 
 // MCPServer wraps an Agent as an MCP server exposing request_approval,
@@ -295,44 +296,56 @@ func textResult(text string) *mcp.CallToolResult {
 }
 
 // requestApproval is the MCP tool handler.
-func (h *MCPServer) requestApproval(ctx context.Context, _ *mcp.CallToolRequest, in ApprovalInput) (*mcp.CallToolResult, ApprovalOutput, error) {
+func (h *MCPServer) requestApproval(ctx context.Context, call *mcp.CallToolRequest, in ApprovalInput) (*mcp.CallToolResult, ApprovalOutput, error) {
+	// Validate the original JSON as well as the typed arguments: encoding/json
+	// otherwise repairs lone surrogate escapes and loses duplicate keys.
+	if call != nil && call.Params != nil && len(call.Params.Arguments) > 0 {
+		if err := wire.StrictDecode(call.Params.Arguments, &in); err != nil {
+			return nil, ApprovalOutput{}, err
+		}
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal(call.Params.Arguments, &fields); err != nil {
+			return nil, ApprovalOutput{}, err
+		}
+		for _, field := range []string{"options", "placeholder", "max_len"} {
+			if _, present := fields[field]; present && ((field == "options" && in.ResponseKind != "choice") || (field != "options" && in.ResponseKind != "text")) {
+				return nil, ApprovalOutput{}, fmt.Errorf("%s is not permitted for response_kind %s", field, in.ResponseKind)
+			}
+		}
+	}
 	rk := wire.ResponseKind(in.ResponseKind)
-	if !wire.ValidResponseKind(rk) {
-		return nil, ApprovalOutput{}, fmt.Errorf("invalid response_kind %q (want yesno|choice|text)", in.ResponseKind)
-	}
-	h.mu.Lock()
-	h.pendingRequests++
-	h.mu.Unlock()
-	defer func() {
-		h.mu.Lock()
-		h.pendingRequests--
-		h.mu.Unlock()
-	}()
-	if err := h.ensurePaired(ctx); err != nil {
-		return nil, ApprovalOutput{}, fmt.Errorf("pairing: %w", err)
-	}
-
 	reqID, err := NewReqID()
 	if err != nil {
 		return nil, ApprovalOutput{}, fmt.Errorf("req id: %w", err)
 	}
 	req := wire.Request{
-		ID:         reqID,
-		Title:      in.Title,
-		Category:   wire.Category(in.Category),
-		Summary:    in.Summary,
-		Agent:      h.ag.cfg.AgentName,
-		Response:   wire.Response{Kind: rk, Options: in.Options, Placeholder: in.Placeholder, MaxLen: in.MaxLen},
+		ID: reqID, Title: in.Title, Category: wire.Category(in.Category), Summary: in.Summary,
+		Agent: h.ag.cfg.AgentName, Response: wire.Response{Kind: rk, Options: in.Options, Placeholder: in.Placeholder, MaxLen: in.MaxLen},
 		ExpiresInS: in.ExpiresInS,
+	}
+	if err := wire.ValidateRequestInput(req); err != nil {
+		return nil, ApprovalOutput{}, err
+	}
+	h.mu.Lock()
+	h.pendingRequests++
+	h.mu.Unlock()
+	defer func() { h.mu.Lock(); h.pendingRequests--; h.mu.Unlock() }()
+	if err := h.ensurePaired(ctx); err != nil {
+		return nil, ApprovalOutput{}, fmt.Errorf("pairing: %w", err)
 	}
 
 	dec, err := h.ag.Ask(ctx, req)
 	if err != nil {
 		return nil, ApprovalOutput{}, err
 	}
-	return nil, ApprovalOutput{
-		Approved: dec.Result.Approved,
-		Choice:   dec.Result.Choice,
-		Text:     dec.Result.Text,
-	}, nil
+	out := ApprovalOutput{}
+	switch wire.ResponseKind(in.ResponseKind) {
+	case wire.ResponseYesNo:
+		out.Approved = dec.Result.Approved
+	case wire.ResponseChoice:
+		out.Choice = dec.Result.Choice
+	case wire.ResponseText:
+		out.Text = &dec.Result.Text // retain a present, accepted empty reply
+	}
+	return nil, out, nil
 }

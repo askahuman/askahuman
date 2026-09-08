@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"crypto/ecdsa"
+	"crypto/elliptic"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/hex"
@@ -10,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/askahuman/askahuman/backend/pkg/spake2"
@@ -35,21 +37,27 @@ var ErrPairing = errors.New("agent: pairing failed")
 // Session is a paired channel: a live relay connection plus the SPAKE2
 // session key. It is the result of Pair and the input to Ask.
 type Session struct {
-	relayURL string
-	roomID   string
-	code     string
-	key      []byte
+	requestSeq atomic.Int64
+	pushSeq    int64 // guarded by Agent.mu
+	relayURL   string
+	roomID     string
+	code       string
+	key        []byte
 	// connMu guards conn, which the persistent reader swaps on reconnect while
 	// Ask writes and Close tears down. Access it only via currentConn/setConn.
 	connMu sync.Mutex
 	conn   frameConn
 	dial   dialer
-	// devicePub is the phone's per-device ECDSA P-256 public key, learned from a
-	// sealed device_key frame (absorbDeviceKey) and PINNED first-seen. Once set,
-	// every decision must carry a signature that verifies against it. It is
-	// touched only from the single persistent reader goroutine (handleFrame), so
-	// it needs no lock.
-	devicePub *ecdsa.PublicKey
+	// These identities are authenticated by the PAKE transcript, immutable for
+	// the session, and never enrolled from a session-key-only device_key frame.
+	devicePub   *ecdsa.PublicKey
+	agentSigner *ecdsa.PrivateKey
+	protocol    int
+	// ackQueue and receipts are initialized before starting the reader. The
+	// Agent waiterMu protects receipts; a bounded worker handles ack I/O.
+	ackQueue     chan []byte
+	receipts     map[string]wire.Ack
+	receiptOrder []string
 }
 
 // currentConn returns the session's live connection under the lock (the reader
@@ -113,13 +121,29 @@ func pairAsA(ctx context.Context, dial dialer, relayURL, roomID, code string) (*
 		return nil, err
 	}
 
+	agentSigner, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		_ = conn.close()
+		return nil, err
+	}
+	agentSPKI, err := wire.PublicSigner(agentSigner)
+	if err != nil {
+		_ = conn.close()
+		return nil, err
+	}
+	var devicePub *ecdsa.PublicKey
 	hs := spake2.NewA(code)
 	pake, err := hs.Start()
 	if err != nil {
 		_ = conn.close()
 		return nil, fmt.Errorf("%w: start: %w", ErrPairing, err)
 	}
-	if err := writeEnvelope(ctx, conn, envelope{Pake: b64(pake)}); err != nil {
+	hello, err := json.Marshal(wire.PairHello{Protocol: wire.Protocol, Pake: b64(pake), Signer: agentSPKI})
+	if err != nil {
+		_ = conn.close()
+		return nil, err
+	}
+	if err := writeEnvelope(ctx, conn, envelope{Pake: b64(hello)}); err != nil {
 		_ = conn.close()
 		return nil, fmt.Errorf("%w: send pake: %w", ErrPairing, err)
 	}
@@ -139,7 +163,7 @@ func pairAsA(ctx context.Context, dial dialer, relayURL, roomID, code string) (*
 			// The peer just (re)joined: our earlier pake may have been
 			// dropped as undeliverable before they arrived. Re-send the SAME
 			// pake (never re-randomize mid-flow) so they can finish.
-			if werr := writeEnvelope(ctx, conn, envelope{Pake: b64(pake)}); werr != nil {
+			if werr := writeEnvelope(ctx, conn, envelope{Pake: b64(hello)}); werr != nil {
 				_ = conn.close()
 				return nil, fmt.Errorf("%w: resend pake: %w", ErrPairing, werr)
 			}
@@ -151,12 +175,23 @@ func pairAsA(ctx context.Context, dial dialer, relayURL, roomID, code string) (*
 			if finished {
 				continue // duplicate pake after a resend; already finished.
 			}
-			peer, derr := base64.StdEncoding.DecodeString(env.Pake)
+			raw, derr := base64.StdEncoding.DecodeString(env.Pake)
+			var peerHello wire.PairHello
+			if derr != nil || wire.StrictDecode(raw, &peerHello) != nil || peerHello.Protocol != wire.Protocol {
+				_ = conn.close()
+				return nil, fmt.Errorf("%w: %s", ErrPairing, wire.UpgradeMessage)
+			}
+			devicePub, derr = wire.ParseSigner(peerHello.Signer)
 			if derr != nil {
 				_ = conn.close()
-				return nil, fmt.Errorf("%w: bad pake b64: %w", ErrPairing, derr)
+				return nil, fmt.Errorf("%w: phone signing identity: %w", ErrPairing, derr)
 			}
-			_, confirm, ferr := hs.Finish(peer)
+			peer, derr := base64.StdEncoding.Strict().DecodeString(peerHello.Pake)
+			if derr != nil || len(peer) != 32 || b64(peer) != peerHello.Pake {
+				_ = conn.close()
+				return nil, fmt.Errorf("%w: invalid peer point", ErrPairing)
+			}
+			_, confirm, ferr := hs.FinishWithContext(peer, wire.PairBinding(roomID, agentSPKI, peerHello.Signer))
 			if ferr != nil {
 				_ = conn.close()
 				return nil, fmt.Errorf("%w: finish: %w", ErrPairing, ferr)
@@ -171,7 +206,7 @@ func pairAsA(ctx context.Context, dial dialer, relayURL, roomID, code string) (*
 					_ = conn.close()
 					return nil, fmt.Errorf("%w: confirm: %w", ErrPairing, cerr)
 				}
-				return pairedSession(relayURL, roomID, code, hs.SessionKey(), conn, dial), nil
+				return pairedSession(relayURL, roomID, code, hs.SessionKey(), conn, dial, agentSigner, devicePub), nil
 			}
 		case env.Confirm != "":
 			peerConfirm, derr := base64.StdEncoding.DecodeString(env.Confirm)
@@ -187,13 +222,14 @@ func pairAsA(ctx context.Context, dial dialer, relayURL, roomID, code string) (*
 				_ = conn.close()
 				return nil, fmt.Errorf("%w: confirm: %w", ErrPairing, cerr)
 			}
-			return pairedSession(relayURL, roomID, code, hs.SessionKey(), conn, dial), nil
+			return pairedSession(relayURL, roomID, code, hs.SessionKey(), conn, dial, agentSigner, devicePub), nil
 		}
 	}
 }
 
-func pairedSession(relayURL, roomID, code string, key []byte, conn frameConn, dial dialer) *Session {
+func pairedSession(relayURL, roomID, code string, key []byte, conn frameConn, dial dialer, signer *ecdsa.PrivateKey, device *ecdsa.PublicKey) *Session {
 	return &Session{
+		protocol: wire.Protocol, agentSigner: signer, devicePub: device,
 		relayURL: relayURL,
 		roomID:   roomID,
 		code:     code,

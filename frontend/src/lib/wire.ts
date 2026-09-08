@@ -1,3 +1,9 @@
+import {
+  strictJSON,
+  validateRequest,
+  validateDecision,
+  MAX_PLAINTEXT,
+} from "./protocol.ts";
 // wire mirrors backend/pkg/wire (the Go source of truth) byte-for-byte on the
 // JSON wire. Two layers travel on one WebSocket:
 //   - Frame: the relay-visible envelope ({_relay} | {pake} | {confirm} | {box}).
@@ -10,12 +16,12 @@
 // fixed block before sealing (pad / PAD_BLOCK) to hide message length.
 
 /** RelaySignal is a relay-injected control value carried in Frame._relay. */
-export type RelaySignal = 'peer_joined' | 'peer_left' | 'undeliverable';
+export type RelaySignal = "peer_joined" | "peer_left" | "undeliverable";
 
 /** Relay signals injected by the relay (clients never send these). */
-export const SignalPeerJoined: RelaySignal = 'peer_joined';
-export const SignalPeerLeft: RelaySignal = 'peer_left';
-export const SignalUndeliverable: RelaySignal = 'undeliverable';
+export const SignalPeerJoined: RelaySignal = "peer_joined";
+export const SignalPeerLeft: RelaySignal = "peer_left";
+export const SignalUndeliverable: RelaySignal = "undeliverable";
 
 /** RelaySignals lists every valid RelaySignal (mirror wire.RelaySignals). */
 export const RelaySignals: readonly RelaySignal[] = [
@@ -26,7 +32,9 @@ export const RelaySignals: readonly RelaySignal[] = [
 
 /** validRelaySignal reports whether s is a known relay signal. */
 export function validRelaySignal(s: string): s is RelaySignal {
-  return s === SignalPeerJoined || s === SignalPeerLeft || s === SignalUndeliverable;
+  return (
+    s === SignalPeerJoined || s === SignalPeerLeft || s === SignalUndeliverable
+  );
 }
 
 /**
@@ -41,13 +49,14 @@ export interface Frame {
 }
 
 /** MessageKind tags an application message inside a box. */
-export type MessageKind = 'request' | 'decision' | 'push_sub' | 'vapid_key' | 'device_key';
+export type MessageKind =
+  "request" | "decision" | "push_sub" | "vapid_key" | "device_key" | "ack";
 
-export const KindRequest: MessageKind = 'request';
-export const KindDecision: MessageKind = 'decision';
-export const KindPushSub: MessageKind = 'push_sub';
-export const KindVAPIDKey: MessageKind = 'vapid_key';
-export const KindDeviceKey: MessageKind = 'device_key';
+export const KindRequest: MessageKind = "request";
+export const KindDecision: MessageKind = "decision";
+export const KindPushSub: MessageKind = "push_sub";
+export const KindVAPIDKey: MessageKind = "vapid_key";
+export const KindDeviceKey: MessageKind = "device_key";
 
 /** validMessageKind reports whether k is a known app message kind. */
 export function validMessageKind(k: string): k is MessageKind {
@@ -56,16 +65,17 @@ export function validMessageKind(k: string): k is MessageKind {
     k === KindDecision ||
     k === KindPushSub ||
     k === KindVAPIDKey ||
-    k === KindDeviceKey
+    k === KindDeviceKey ||
+    k === "ack"
   );
 }
 
 /** ResponseKind is the answer shape a request asks the human for. */
-export type ResponseKind = 'yesno' | 'choice' | 'text';
+export type ResponseKind = "yesno" | "choice" | "text";
 
-export const ResponseYesNo: ResponseKind = 'yesno';
-export const ResponseChoice: ResponseKind = 'choice';
-export const ResponseText: ResponseKind = 'text';
+export const ResponseYesNo: ResponseKind = "yesno";
+export const ResponseChoice: ResponseKind = "choice";
+export const ResponseText: ResponseKind = "text";
 
 /** validResponseKind reports whether k is a known response kind. */
 export function validResponseKind(k: string): k is ResponseKind {
@@ -73,9 +83,15 @@ export function validResponseKind(k: string): k is ResponseKind {
 }
 
 /** Category is the badge shown on a request card; free-form on the wire. */
-export type Category = 'cash' | 'deploy' | 'data' | 'access' | 'other';
+export type Category = "cash" | "deploy" | "data" | "access" | "other";
 
-export const Categories: readonly Category[] = ['cash', 'deploy', 'data', 'access', 'other'];
+export const Categories: readonly Category[] = [
+  "cash",
+  "deploy",
+  "data",
+  "access",
+  "other",
+];
 
 /** validCategory reports whether c is a known (colored) category. */
 export function validCategory(c: string): c is Category {
@@ -92,6 +108,11 @@ export interface Response {
 
 /** Request is an approval request sent agent -> phone, sealed inside a box. */
 export interface Request {
+  request_seq?: number;
+  protocol?: number;
+  room?: string;
+  deadline_ms?: number;
+  sig?: string;
   kind: MessageKind; // always KindRequest
   id: string;
   title: string;
@@ -111,12 +132,15 @@ export interface Result {
 
 /** Decision is the human's answer sent phone -> agent, sealed inside a box. */
 export interface Decision {
+  protocol?: number;
+  room?: string;
+  request_hash?: string;
+  response_kind?: ResponseKind;
   kind: MessageKind; // always KindDecision
   id: string;
   result: Result;
-  // sig is base64(raw IEEE-P1363 r||s, 64 bytes) of the phone's ECDSA P-256
-  // signature over decisionSigningMessage. Absent when the phone has no device
-  // key (compat); once present the agent verifies it. Mirrors wire.Decision.Sig.
+  // Mandatory at the agent acceptance boundary. The codec can also represent
+  // unsigned legacy/negative fixtures, which never establish authorization.
   sig?: string;
 }
 
@@ -134,6 +158,10 @@ export interface PushSubscription {
 
 /** PushSub delivers the phone's PushSubscription to the agent, sealed. */
 export interface PushSub {
+  push_seq?: number;
+  protocol?: number;
+  room?: string;
+  sig?: string;
   kind: MessageKind; // always KindPushSub
   subscription: PushSubscription;
 }
@@ -144,6 +172,9 @@ export interface PushSub {
  * pushes with (signer == subscribe-key). Only the PUBLIC key crosses the wire.
  */
 export interface VapidKey {
+  protocol?: number;
+  room?: string;
+  sig?: string;
   kind: MessageKind; // always KindVAPIDKey
   public_key: string;
 }
@@ -175,13 +206,13 @@ export function parseFrame(raw: string): Frame | null {
   } catch {
     return null;
   }
-  if (typeof v !== 'object' || v === null) return null;
+  if (typeof v !== "object" || v === null) return null;
   return v as Frame;
 }
 
 /** isRelayControl reports whether a parsed frame is a relay control frame. */
 export function isRelayControl(f: Frame): f is Frame & { _relay: RelaySignal } {
-  return typeof f._relay === 'string' && validRelaySignal(f._relay);
+  return typeof f._relay === "string" && validRelaySignal(f._relay);
 }
 
 /**
@@ -199,93 +230,44 @@ const PAD_BLOCK = 256;
  * never recoverable). Mirrors pkg/wire.pad.
  */
 function pad(s: string): string {
-  // length is in UTF-16 code units; app payloads are ASCII-keyed JSON whose
-  // byte length only exceeds this for multi-byte values, which still land in
-  // the same block for realistic decisions. ponytail: byte-exact padding would
-  // measure TextEncoder().encode(s).length — upgrade if payloads carry large
-  // non-ASCII text and the integration length-equality test ever flakes.
-  const n = PAD_BLOCK - (s.length % PAD_BLOCK);
-  return s + ' '.repeat(n);
+  const length = new TextEncoder().encode(s).length;
+  const n = PAD_BLOCK - (length % PAD_BLOCK);
+  if (length + n > MAX_PLAINTEXT)
+    throw new Error("wire: encoded message exceeds 16 KiB");
+  return s + " ".repeat(n);
 }
 
-// String length caps for decoding untrusted-but-authenticated app frames, so a
-// malformed peer cannot drive rendering into a bad state. Generous, not tight.
-const MAX_ID_LEN = 256;
-const MAX_TITLE_LEN = 512;
-const MAX_SUMMARY_LEN = 4096;
-const MAX_AGENT_LEN = 256;
-const MAX_PLACEHOLDER_LEN = 256;
-const MAX_OPTIONS = 32;
-const MAX_OPTION_LEN = 256;
-const MAX_TEXT_LEN = 4096;
-const MAX_EXPIRES_S = 86_400; // 24h
-const MAX_INPUT_LEN = 16_384;
 const MAX_VAPID_KEY_LEN = 256; // base64url uncompressed P-256 is ~88 chars
 const MAX_DEVICE_KEY_LEN = 512; // base64 SPKI DER for P-256 is ~120 chars
-const MAX_SIG_LEN = 256; // base64 of raw 64-byte r||s is ~88 chars
 
-function checkStr(v: unknown, name: string, max: number, required: boolean): string {
-  if (v === undefined || v === '') {
+function checkStr(
+  v: unknown,
+  name: string,
+  max: number,
+  required: boolean,
+): string {
+  if (v === undefined || v === "") {
     if (required) throw new Error(`wire: ${name} missing`);
-    return '';
+    return "";
   }
-  if (typeof v !== 'string') throw new Error(`wire: ${name} must be a string`);
-  if (v.length > max) throw new Error(`wire: ${name} too long (${v.length} > ${max})`);
+  if (typeof v !== "string") throw new Error(`wire: ${name} must be a string`);
+  if (v.length > max)
+    throw new Error(`wire: ${name} too long (${v.length} > ${max})`);
   return v;
 }
 
 /** decodeRequest validates a sealed-box plaintext as a wire.Request. */
 export function decodeRequest(plaintext: Uint8Array): Request {
-  const msg = JSON.parse(new TextDecoder().decode(plaintext)) as Partial<Request>;
-  if (!validMessageKind(msg.kind ?? '') || msg.kind !== KindRequest) {
-    throw new Error(`wire: not a request (kind=${String(msg.kind)})`);
-  }
-  checkStr(msg.id, 'request id', MAX_ID_LEN, true);
-  checkStr(msg.title, 'request title', MAX_TITLE_LEN, false);
-  checkStr(msg.summary, 'request summary', MAX_SUMMARY_LEN, false);
-  checkStr(msg.agent, 'request agent', MAX_AGENT_LEN, false);
-  if (msg.category !== undefined) checkStr(msg.category, 'request category', MAX_OPTION_LEN, false);
-  if (!msg.response || !validResponseKind(msg.response.kind)) {
-    throw new Error('wire: request missing/invalid response kind');
-  }
-  const r = msg.response;
-  if (r.options !== undefined) {
-    if (!Array.isArray(r.options) || r.options.length > MAX_OPTIONS) {
-      throw new Error('wire: request options invalid/too many');
-    }
-    for (const o of r.options) checkStr(o, 'request option', MAX_OPTION_LEN, true);
-  }
-  checkStr(r.placeholder, 'request placeholder', MAX_PLACEHOLDER_LEN, false);
-  if (r.max_len !== undefined && (!Number.isInteger(r.max_len) || r.max_len < 0 || r.max_len > MAX_INPUT_LEN)) {
-    throw new Error('wire: request max_len out of bounds');
-  }
-  if (
-    msg.expires_in_s !== undefined &&
-    (!Number.isInteger(msg.expires_in_s) || msg.expires_in_s < 0 || msg.expires_in_s > MAX_EXPIRES_S)
-  ) {
-    throw new Error('wire: request expires_in_s out of bounds');
-  }
-  return msg as Request;
+  const msg = strictJSON(plaintext) as Request;
+  validateRequest(msg);
+  return msg;
 }
 
 /** decodeDecision validates a sealed-box plaintext as a wire.Decision. */
 export function decodeDecision(plaintext: Uint8Array): Decision {
-  const msg = JSON.parse(new TextDecoder().decode(plaintext)) as Partial<Decision>;
-  if (!validMessageKind(msg.kind ?? '') || msg.kind !== KindDecision) {
-    throw new Error(`wire: not a decision (kind=${String(msg.kind)})`);
-  }
-  checkStr(msg.id, 'decision id', MAX_ID_LEN, true);
-  const res = msg.result;
-  if (!res || typeof res !== 'object') throw new Error('wire: decision missing result');
-  if (res.approved !== undefined && typeof res.approved !== 'boolean') {
-    throw new Error('wire: decision approved must be boolean');
-  }
-  checkStr(res.choice, 'decision choice', MAX_OPTION_LEN, false);
-  checkStr(res.text, 'decision text', MAX_TEXT_LEN, false);
-  // The signature is optional (an unsigned decision is valid on the wire); when
-  // present it is length-capped like any untrusted string. Mirrors Decision.Sig.
-  checkStr(msg.sig, 'decision sig', MAX_SIG_LEN, false);
-  return msg as Decision;
+  const msg = strictJSON(plaintext) as Decision;
+  validateDecision(msg);
+  return msg;
 }
 
 /**
@@ -311,11 +293,13 @@ export function encodePushSub(p: PushSub): Uint8Array {
 
 /** decodeVapidKey validates a sealed-box plaintext as a wire.VapidKey. */
 export function decodeVapidKey(plaintext: Uint8Array): VapidKey {
-  const msg = JSON.parse(new TextDecoder().decode(plaintext)) as Partial<VapidKey>;
-  if (!validMessageKind(msg.kind ?? '') || msg.kind !== KindVAPIDKey) {
+  const msg = JSON.parse(
+    new TextDecoder().decode(plaintext),
+  ) as Partial<VapidKey>;
+  if (!validMessageKind(msg.kind ?? "") || msg.kind !== KindVAPIDKey) {
     throw new Error(`wire: not a vapid_key (kind=${String(msg.kind)})`);
   }
-  checkStr(msg.public_key, 'vapid_key public_key', MAX_VAPID_KEY_LEN, true);
+  checkStr(msg.public_key, "vapid_key public_key", MAX_VAPID_KEY_LEN, true);
   return msg as VapidKey;
 }
 
@@ -327,11 +311,13 @@ export function encodeVapidKey(publicKey: string): Uint8Array {
 
 /** decodeDeviceKey validates a sealed-box plaintext as a wire.DeviceKey. */
 export function decodeDeviceKey(plaintext: Uint8Array): DeviceKey {
-  const msg = JSON.parse(new TextDecoder().decode(plaintext)) as Partial<DeviceKey>;
-  if (!validMessageKind(msg.kind ?? '') || msg.kind !== KindDeviceKey) {
+  const msg = JSON.parse(
+    new TextDecoder().decode(plaintext),
+  ) as Partial<DeviceKey>;
+  if (!validMessageKind(msg.kind ?? "") || msg.kind !== KindDeviceKey) {
     throw new Error(`wire: not a device_key (kind=${String(msg.kind)})`);
   }
-  checkStr(msg.public_key, 'device_key public_key', MAX_DEVICE_KEY_LEN, true);
+  checkStr(msg.public_key, "device_key public_key", MAX_DEVICE_KEY_LEN, true);
   return msg as DeviceKey;
 }
 
@@ -367,9 +353,10 @@ export function decisionSigningMessage(
 /** resultTag renders a Result as the canonical tag used by
  *  decisionSigningMessage, matching the Go twin exactly. */
 function resultTag(result: Result): string {
-  if (result.approved !== undefined) return `yesno:${result.approved ? '1' : '0'}`;
+  if (result.approved !== undefined)
+    return `yesno:${result.approved ? "1" : "0"}`;
   if (result.choice) return `choice:${result.choice}`;
-  return `text:${result.text ?? ''}`;
+  return `text:${result.text ?? ""}`;
 }
 
 /** newYesNoDecision builds a yesno Decision for request id. */

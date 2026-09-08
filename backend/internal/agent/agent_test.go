@@ -93,14 +93,32 @@ func pushBox(t *testing.T, f *fakeConn, key []byte, v any) {
 	require.NoError(t, err)
 	env, err := json.Marshal(envelope{Box: box})
 	require.NoError(t, err)
-	f.inbound <- env
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.closed {
+		return
+	}
+	select {
+	case f.inbound <- env:
+	default:
+		t.Error("test inbound queue full")
+	}
 }
 
 func pushSignal(t *testing.T, f *fakeConn, sig wire.RelaySignal) {
 	t.Helper()
 	env, err := json.Marshal(envelope{Relay: sig})
 	require.NoError(t, err)
-	f.inbound <- env
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.closed {
+		return
+	}
+	select {
+	case f.inbound <- env:
+	default:
+		t.Error("test inbound queue full")
+	}
 }
 
 // pairedAgent returns an Agent with a session pre-wired to conn under key,
@@ -110,7 +128,13 @@ func pairedAgent(t *testing.T, key []byte, conn frameConn, dial dialer) *Agent {
 	a, err := New(Config{RelayURL: "ws://test/ws"})
 	require.NoError(t, err)
 	a.dial = dial
-	a.sess = &Session{relayURL: "ws://test/ws", roomID: "room1", code: "C0-DE5", key: key, conn: conn, dial: dial}
+	phone, server := newDeviceSigner(t), newDeviceSigner(t)
+	a.sess = &Session{
+		relayURL: "ws://test/ws", roomID: testRoom, code: "C0-DE5", key: key, conn: conn, dial: dial,
+		protocol: wire.Protocol, agentSigner: server.priv, devicePub: &phone.priv.PublicKey,
+	}
+	testPhones.Store(a, phone)
+	t.Cleanup(func() { testPhones.Delete(a) })
 	// Stop the persistent reader (started lazily by the first Ask) when the test
 	// ends, so no reader goroutine outlives the test and races its cleanup.
 	t.Cleanup(a.Close)
@@ -128,7 +152,7 @@ func TestAskReturnsDecision(t *testing.T) {
 	a := pairedAgent(t, key, conn, nil)
 
 	approved := true
-	pushBox(t, conn, key, wire.Decision{Kind: wire.KindDecision, ID: "req_1", Result: wire.Result{Approved: &approved}})
+	answerBox(t, a, conn, key, wire.Decision{Kind: wire.KindDecision, ID: "req_1", Result: wire.Result{Approved: &approved}})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
@@ -136,7 +160,7 @@ func TestAskReturnsDecision(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, dec.Result.Approved)
 	assert.True(t, *dec.Result.Approved)
-	assert.Equal(t, 1, conn.writeCount()) // one box sent.
+	assert.GreaterOrEqual(t, conn.writeCount(), 1) // signed request plus asynchronous receipt.
 }
 
 func TestAskIgnoresWrongID(t *testing.T) {
@@ -146,9 +170,9 @@ func TestAskIgnoresWrongID(t *testing.T) {
 
 	// A decision for a different id (dup/stale) must be ignored.
 	other := false
-	pushBox(t, conn, key, wire.Decision{Kind: wire.KindDecision, ID: "req_OTHER", Result: wire.Result{Approved: &other}})
+	answerBox(t, a, conn, key, wire.Decision{Kind: wire.KindDecision, ID: "req_OTHER", Result: wire.Result{Approved: &other}})
 	approved := true
-	pushBox(t, conn, key, wire.Decision{Kind: wire.KindDecision, ID: "req_1", Result: wire.Result{Approved: &approved}})
+	answerBox(t, a, conn, key, wire.Decision{Kind: wire.KindDecision, ID: "req_1", Result: wire.Result{Approved: &approved}})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
@@ -167,9 +191,9 @@ func TestAskIgnoresUnauthenticatedFrame(t *testing.T) {
 	wrongKey := make([]byte, sealedbox.KeySize)
 	wrongKey[0] = 0xff
 	approved := true
-	pushBox(t, conn, wrongKey, wire.Decision{Kind: wire.KindDecision, ID: "req_1", Result: wire.Result{Approved: &approved}})
+	answerBox(t, a, conn, wrongKey, wire.Decision{Kind: wire.KindDecision, ID: "req_1", Result: wire.Result{Approved: &approved}})
 	// Then the real one.
-	pushBox(t, conn, key, wire.Decision{Kind: wire.KindDecision, ID: "req_1", Result: wire.Result{Approved: &approved}})
+	answerBox(t, a, conn, key, wire.Decision{Kind: wire.KindDecision, ID: "req_1", Result: wire.Result{Approved: &approved}})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
@@ -190,7 +214,7 @@ func TestAskResendsOnUndeliverable(t *testing.T) {
 	approved := true
 	go func() {
 		waitWrites(conn, 2, 3*time.Second)
-		pushBox(t, conn, key, wire.Decision{Kind: wire.KindDecision, ID: "req_1", Result: wire.Result{Approved: &approved}})
+		answerBox(t, a, conn, key, wire.Decision{Kind: wire.KindDecision, ID: "req_1", Result: wire.Result{Approved: &approved}})
 	}()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -239,7 +263,7 @@ func TestAskThrottlesReWake(t *testing.T) {
 	approved := true
 	go func() {
 		waitWrites(conn, 3, 5*time.Second) // initial + >=2 re-announces
-		pushBox(t, conn, key, wire.Decision{Kind: wire.KindDecision, ID: "req_1", Result: wire.Result{Approved: &approved}})
+		answerBox(t, a, conn, key, wire.Decision{Kind: wire.KindDecision, ID: "req_1", Result: wire.Result{Approved: &approved}})
 	}()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -275,7 +299,7 @@ func TestAskReconnectsOnTransportError(t *testing.T) {
 		time.Sleep(30 * time.Millisecond)
 		_ = first.close() // read error -> errReconnect.
 		time.Sleep(30 * time.Millisecond)
-		pushBox(t, second, key, wire.Decision{Kind: wire.KindDecision, ID: "req_1", Result: wire.Result{Approved: &approved}})
+		answerBox(t, a, second, key, wire.Decision{Kind: wire.KindDecision, ID: "req_1", Result: wire.Result{Approved: &approved}})
 	}()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
@@ -388,7 +412,7 @@ func TestAskTimeoutPresentAfterIdleAbsorb(t *testing.T) {
 	// Reader starts; the phone delivers its push subscription while idle (an
 	// authenticated frame marks the peer present), then stays silent.
 	a.ensureReader(a.sess)
-	pushBox(t, conn, key, wire.PushSub{
+	answerBox(t, a, conn, key, wire.PushSub{
 		Kind:         wire.KindPushSub,
 		Subscription: wire.PushSubscription{Endpoint: "https://web.push.apple.com/present", Keys: wire.PushKeys{P256dh: "p", Auth: "x"}},
 	})
@@ -419,12 +443,12 @@ func TestAbsorbPushSubscription(t *testing.T) {
 	a := pairedAgent(t, key, conn, nil)
 
 	// A push_sub arrives before the decision; it must be absorbed and stored.
-	pushBox(t, conn, key, wire.PushSub{
+	answerBox(t, a, conn, key, wire.PushSub{
 		Kind:         wire.KindPushSub,
 		Subscription: wire.PushSubscription{Endpoint: "https://web.push.apple.com/abc", Keys: wire.PushKeys{P256dh: "p", Auth: "x"}},
 	})
 	approved := true
-	pushBox(t, conn, key, wire.Decision{Kind: wire.KindDecision, ID: "req_1", Result: wire.Result{Approved: &approved}})
+	answerBox(t, a, conn, key, wire.Decision{Kind: wire.KindDecision, ID: "req_1", Result: wire.Result{Approved: &approved}})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
@@ -454,7 +478,7 @@ func TestReaderAbsorbsPushSubWhileIdle(t *testing.T) {
 	a.ensureReader(a.sess)
 
 	// The phone delivers its subscription while the agent is idle.
-	pushBox(t, conn, key, wire.PushSub{
+	answerBox(t, a, conn, key, wire.PushSub{
 		Kind:         wire.KindPushSub,
 		Subscription: wire.PushSubscription{Endpoint: "https://web.push.apple.com/idle", Keys: wire.PushKeys{P256dh: "p", Auth: "x"}},
 	})
@@ -477,7 +501,7 @@ func TestReaderAbsorbsDeviceKeyWhileIdle(t *testing.T) {
 
 	// Reader starts (as Pair would); the phone delivers its device key while idle.
 	a.ensureReader(a.sess)
-	pushBox(t, conn, key, signer.deviceKeyFrame())
+	answerBox(t, a, conn, key, signer.deviceKeyFrame())
 
 	// A later request signed by that key must verify (proving it was pinned while
 	// idle — an unsigned/unpinned decision would time out, see the reject tests).
@@ -487,7 +511,7 @@ func TestReaderAbsorbsDeviceKeyWhileIdle(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 		dec := wire.Decision{Kind: wire.KindDecision, ID: "req_1", Result: wire.Result{Approved: &approved}}
 		dec.Sig = signer.sign(t, "room1", dec)
-		pushBox(t, conn, key, dec)
+		answerBox(t, a, conn, key, dec)
 	}()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -532,7 +556,7 @@ func TestAskSingleFlightRejectsConcurrent(t *testing.T) {
 		approved := true
 		go func() {
 			time.Sleep(100 * time.Millisecond)
-			pushBox(t, conn, key, wire.Decision{Kind: wire.KindDecision, ID: "req_1", Result: wire.Result{Approved: &approved}})
+			answerBox(t, a, conn, key, wire.Decision{Kind: wire.KindDecision, ID: "req_1", Result: wire.Result{Approved: &approved}})
 		}()
 		_, err := a.Ask(ctx, yesnoReq())
 		done <- err
@@ -558,7 +582,7 @@ func TestAskResendsOnPeerLeft(t *testing.T) {
 	approved := true
 	go func() {
 		waitWrites(conn, 2, 3*time.Second)
-		pushBox(t, conn, key, wire.Decision{Kind: wire.KindDecision, ID: "req_1", Result: wire.Result{Approved: &approved}})
+		answerBox(t, a, conn, key, wire.Decision{Kind: wire.KindDecision, ID: "req_1", Result: wire.Result{Approved: &approved}})
 	}()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -602,8 +626,8 @@ func TestAskRejectsKindMismatch(t *testing.T) {
 			a := pairedAgent(t, key, conn, nil)
 
 			// The mismatched decision must be ignored; only the well-formed one returns.
-			pushBox(t, conn, key, tt.bad)
-			pushBox(t, conn, key, tt.good)
+			answerBox(t, a, conn, key, tt.bad)
+			answerBox(t, a, conn, key, tt.good)
 
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 			defer cancel()
@@ -644,7 +668,8 @@ func (d deviceSigner) deviceKeyFrame() wire.DeviceKey {
 // big.Int.FillBytes) so the concatenation is exactly 64 bytes.
 func (d deviceSigner) sign(t *testing.T, roomID string, dec wire.Decision) string {
 	t.Helper()
-	msg := wire.DecisionSigningMessage(roomID, dec.ID, dec.Result)
+	dec.Room = roomID
+	msg := wire.BoundDecisionSigningMessage(dec)
 	digest := sha256.Sum256(msg)
 	r, s, err := ecdsa.Sign(rand.Reader, d.priv, digest[:])
 	require.NoError(t, err)
@@ -654,170 +679,45 @@ func (d deviceSigner) sign(t *testing.T, roomID string, dec wire.Decision) strin
 	return base64.StdEncoding.EncodeToString(raw)
 }
 
-// TestAskDeviceSignedDecisionApproves: once the phone has delivered its device
-// key, a correctly-signed decision is accepted and approved.
-func TestAskDeviceSignedDecisionApproves(t *testing.T) {
-	key := make([]byte, sealedbox.KeySize)
-	conn := newFakeConn()
-	a := pairedAgent(t, key, conn, nil)
-	signer := newDeviceSigner(t)
-
-	pushBox(t, conn, key, signer.deviceKeyFrame())
-	dec := wire.Decision{Kind: wire.KindDecision, ID: "req_1", Result: wire.Result{Approved: boolPtr(true)}}
-	dec.Sig = signer.sign(t, "room1", dec)
-	pushBox(t, conn, key, dec)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	got, err := a.Ask(ctx, yesnoReq())
-	require.NoError(t, err)
-	require.NotNil(t, got.Result.Approved)
-	assert.True(t, *got.Result.Approved)
-}
-
-// TestAskDeviceKeyRejectsUnsigned: once armed with a device key, an UNSIGNED
-// decision is rejected — the agent keeps waiting and the request times out. A
-// missing signature is never an approval.
-func TestAskDeviceKeyRejectsUnsigned(t *testing.T) {
-	key := make([]byte, sealedbox.KeySize)
-	conn := newFakeConn()
-	a := pairedAgent(t, key, conn, nil)
-	signer := newDeviceSigner(t)
-
-	pushBox(t, conn, key, signer.deviceKeyFrame())
-	// Same shape as an accepted decision, but no signature.
-	pushBox(t, conn, key, wire.Decision{Kind: wire.KindDecision, ID: "req_1", Result: wire.Result{Approved: boolPtr(true)}})
-
-	ctx, cancel := context.WithTimeout(context.Background(), 400*time.Millisecond)
-	defer cancel()
-	dec, err := a.Ask(ctx, yesnoReq())
-	require.ErrorIs(t, err, ErrTimeout)
-	assert.Nil(t, dec.Result.Approved, "an unsigned decision is never approved once a device key exists")
-}
-
-// TestAskDeviceKeyRejectsTamperedSig: a signature over a DIFFERENT result than
-// the one sent must not verify (proves the message binds the exact answer).
-func TestAskDeviceKeyRejectsTamperedSig(t *testing.T) {
-	key := make([]byte, sealedbox.KeySize)
-	conn := newFakeConn()
-	a := pairedAgent(t, key, conn, nil)
-	signer := newDeviceSigner(t)
-
-	pushBox(t, conn, key, signer.deviceKeyFrame())
-	// Send approved=true, but sign over approved=false: the digest differs.
-	dec := wire.Decision{Kind: wire.KindDecision, ID: "req_1", Result: wire.Result{Approved: boolPtr(true)}}
-	dec.Sig = signer.sign(t, "room1", wire.Decision{Kind: wire.KindDecision, ID: "req_1", Result: wire.Result{Approved: boolPtr(false)}})
-	pushBox(t, conn, key, dec)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 400*time.Millisecond)
-	defer cancel()
-	got, err := a.Ask(ctx, yesnoReq())
-	require.ErrorIs(t, err, ErrTimeout)
-	assert.Nil(t, got.Result.Approved, "a signature over a different result must not verify")
-}
-
-// TestAskDeviceKeyRejectsWrongRoom: a signature made for a different room id must
-// not verify (proves the message binds the room, blocking cross-room replay).
-func TestAskDeviceKeyRejectsWrongRoom(t *testing.T) {
-	key := make([]byte, sealedbox.KeySize)
-	conn := newFakeConn()
-	a := pairedAgent(t, key, conn, nil)
-	signer := newDeviceSigner(t)
-
-	pushBox(t, conn, key, signer.deviceKeyFrame())
-	dec := wire.Decision{Kind: wire.KindDecision, ID: "req_1", Result: wire.Result{Approved: boolPtr(true)}}
-	dec.Sig = signer.sign(t, "some-other-room", dec) // session roomID is "room1".
-	pushBox(t, conn, key, dec)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 400*time.Millisecond)
-	defer cancel()
-	got, err := a.Ask(ctx, yesnoReq())
-	require.ErrorIs(t, err, ErrTimeout)
-	assert.Nil(t, got.Result.Approved, "a signature for a different room must not verify")
-}
-
-// TestAskDeviceKeyPinnedRejectsSwap: the device key is pinned first-seen. After
-// the real phone's key (signer1) is recorded, an attacker who stole the session
-// key seals a device_key carrying THEIR OWN key (signer2) — it must NOT overwrite
-// the pin, so a decision signed by signer2 is rejected (times out, never
-// approved). A decision signed by the pinned signer1 still verifies and approves.
-// This proves the pin defeats the session-key-thief key-swap.
-func TestAskDeviceKeyPinnedRejectsSwap(t *testing.T) {
-	key := make([]byte, sealedbox.KeySize)
-	conn := newFakeConn()
-	a := pairedAgent(t, key, conn, nil)
-	real, attacker := newDeviceSigner(t), newDeviceSigner(t)
-
-	// Real phone pins its key at pairing; attacker (session-key holder) tries to
-	// swap in theirs; attacker then signs a forged approval for req_1.
-	pushBox(t, conn, key, real.deviceKeyFrame())
-	pushBox(t, conn, key, attacker.deviceKeyFrame())
-	forged := wire.Decision{Kind: wire.KindDecision, ID: "req_1", Result: wire.Result{Approved: boolPtr(true)}}
-	forged.Sig = attacker.sign(t, "room1", forged)
-	pushBox(t, conn, key, forged)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 400*time.Millisecond)
-	defer cancel()
-	dec, err := a.Ask(ctx, yesnoReq())
-	require.ErrorIs(t, err, ErrTimeout)
-	assert.Nil(t, dec.Result.Approved, "a swapped attacker key must not overwrite the pinned real key")
-
-	// The pinned real key still works: a decision signed by signer1 verifies.
-	// Reuse the SAME connection (the single reader owns it; devicePub stays
-	// pinned to real on the session).
-	good := wire.Decision{Kind: wire.KindDecision, ID: "req_2", Result: wire.Result{Approved: boolPtr(true)}}
-	good.Sig = real.sign(t, "room1", good)
-	pushBox(t, conn, key, good)
-
-	ctx2, cancel2 := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel2()
-	req2 := yesnoReq()
-	req2.ID = "req_2"
-	got, err := a.Ask(ctx2, req2)
-	require.NoError(t, err)
-	require.NotNil(t, got.Result.Approved)
-	assert.True(t, *got.Result.Approved, "the pinned real key still verifies decisions")
-}
-
-// TestAskCompatUnsignedWithoutDeviceKey: with no device key delivered and strict
-// mode off (default), an unsigned decision is still approved — no regression for
-// an older phone that predates device signing. (Mirrors TestAskReturnsDecision;
-// kept explicit as the compat baseline for the enforcement suite.)
-func TestAskCompatUnsignedWithoutDeviceKey(t *testing.T) {
-	key := make([]byte, sealedbox.KeySize)
-	conn := newFakeConn()
-	a := pairedAgent(t, key, conn, nil)
-
-	pushBox(t, conn, key, wire.Decision{Kind: wire.KindDecision, ID: "req_1", Result: wire.Result{Approved: boolPtr(true)}})
-
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	got, err := a.Ask(ctx, yesnoReq())
-	require.NoError(t, err)
-	require.NotNil(t, got.Result.Approved)
-	assert.True(t, *got.Result.Approved)
-}
-
-// TestAskStrictModeRejectsUnsignedWithoutKey: with AAH_REQUIRE_DEVICE_SIG=1 and
-// no device key delivered, an unsigned decision is rejected (fail closed — there
-// is nothing to verify against). Toggles the package-level requireDeviceSig with
-// save/restore, mirroring the relay trustProxy tests.
-func TestAskStrictModeRejectsUnsignedWithoutKey(t *testing.T) {
-	orig := requireDeviceSig
-	t.Cleanup(func() { requireDeviceSig = orig })
-	requireDeviceSig = true
-
-	key := make([]byte, sealedbox.KeySize)
-	conn := newFakeConn()
-	a := pairedAgent(t, key, conn, nil)
-
-	pushBox(t, conn, key, wire.Decision{Kind: wire.KindDecision, ID: "req_1", Result: wire.Result{Approved: boolPtr(true)}})
-
-	ctx, cancel := context.WithTimeout(context.Background(), 400*time.Millisecond)
-	defer cancel()
-	dec, err := a.Ask(ctx, yesnoReq())
-	require.ErrorIs(t, err, ErrTimeout)
-	assert.Nil(t, dec.Result.Approved, "strict mode never approves without a verifying signature")
+// Each adversarial case starts with a correctly request-bound v2 decision;
+// mutating its authenticated fields must fail even with the symmetric key.
+func TestAskDeviceSignatureEnforcement(t *testing.T) {
+	for _, name := range []string{"valid", "unsigned", "tampered result", "wrong room", "legacy", "attacker signer"} {
+		t.Run(name, func(t *testing.T) {
+			key := make([]byte, 32)
+			conn := newFakeConn()
+			a := pairedAgent(t, key, conn, nil)
+			real := testPhone(t, a)
+			signer := real
+			if name == "attacker signer" {
+				signer = newDeviceSigner(t)
+				pushBox(t, conn, key, signer.deviceKeyFrame())
+			}
+			answerWith(t, a, conn, key, wire.Decision{Kind: wire.KindDecision, ID: "req_1", Result: wire.Result{Approved: boolPtr(true)}}, signer, func(d *wire.Decision) {
+				switch name {
+				case "unsigned":
+					d.Sig = ""
+				case "tampered result":
+					d.Result.Approved = boolPtr(false)
+				case "wrong room":
+					d.Room = "fedcba9876543210"
+				case "legacy":
+					d.Protocol = 1
+				}
+			})
+			ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+			defer cancel()
+			got, err := a.Ask(ctx, yesnoReq())
+			if name == "valid" {
+				require.NoError(t, err)
+				require.True(t, *got.Result.Approved)
+			} else {
+				require.ErrorIs(t, err, ErrTimeout)
+				require.Equal(t, wire.Decision{}, got)
+			}
+			require.True(t, a.sess.devicePub.Equal(&real.priv.PublicKey), "post-pairing device_key never changes the PAKE pin")
+		})
+	}
 }
 
 func TestNewPairingDerivesRoomFromCode(t *testing.T) {
@@ -1094,7 +994,7 @@ func TestAskFiresProactivePush(t *testing.T) {
 	approved := true
 	go func() {
 		<-pushed // answer only AFTER the proactive push has fired
-		pushBox(t, conn, key, wire.Decision{Kind: wire.KindDecision, ID: "req_1", Result: wire.Result{Approved: &approved}})
+		answerBox(t, a, conn, key, wire.Decision{Kind: wire.KindDecision, ID: "req_1", Result: wire.Result{Approved: &approved}})
 	}()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
@@ -1140,7 +1040,7 @@ func TestAskProactivePushFiresOnceAcrossReconnect(t *testing.T) {
 		for second.writeCount() < 1 {
 			time.Sleep(2 * time.Millisecond) // wait for the re-announce on `second`
 		}
-		pushBox(t, second, key, wire.Decision{Kind: wire.KindDecision, ID: "req_1", Result: wire.Result{Approved: &approved}})
+		answerBox(t, a, second, key, wire.Decision{Kind: wire.KindDecision, ID: "req_1", Result: wire.Result{Approved: &approved}})
 	}()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -1185,7 +1085,7 @@ func TestAskReactiveWakeSendsPush(t *testing.T) {
 	go func() {
 		<-pushed // proactive (after the first write)
 		<-pushed // reactive (after undeliverable)
-		pushBox(t, conn, key, wire.Decision{Kind: wire.KindDecision, ID: "req_1", Result: wire.Result{Approved: &approved}})
+		answerBox(t, a, conn, key, wire.Decision{Kind: wire.KindDecision, ID: "req_1", Result: wire.Result{Approved: &approved}})
 	}()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

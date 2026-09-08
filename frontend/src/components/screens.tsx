@@ -8,6 +8,8 @@ import { useEffect, useRef, useState } from 'react';
 import type { CSSProperties } from 'react';
 
 import type { AgentSummary } from '../lib/manager.ts';
+import { MAX_TEXT, scalarLength, clampScalars } from '../lib/protocol.ts';
+import type { DeliveryState } from '../lib/session.ts';
 import type { Request } from '../lib/wire.ts';
 import { type Palette, catColor, countdown } from './theme.ts';
 
@@ -703,16 +705,18 @@ export function TextScreen({
   req,
   expiresIn,
   onSend,
+  error,
 }: {
   c: Palette;
   req: Request;
   expiresIn: number | null;
   onSend: (text: string) => void;
+  error?: string | null;
 }) {
-  const maxLen = req.response.max_len ?? 200;
+  const maxLen = req.response.max_len || MAX_TEXT;
   const [value, setValue] = useState('');
   const send = () => {
-    if (value.trim()) onSend(value);
+    onSend(value);
   };
   return (
     <Frame c={c} announcement={`New text request: ${req.title}`} style={{ padding: 'calc(60px + env(safe-area-inset-top)) 20px 28px', boxSizing: 'border-box', display: 'flex', flexDirection: 'column' }}>
@@ -760,13 +764,12 @@ export function TextScreen({
             data-testid="text-input"
             aria-label="Your reply"
             value={value}
-            onChange={(e) => setValue(e.target.value.slice(0, maxLen))}
+            onChange={(e) => { try { setValue(clampScalars(e.target.value, maxLen)); } catch { /* reject an incomplete surrogate */ } }}
             onKeyDown={(e) => {
               if (e.key === 'Enter') send();
             }}
             enterKeyHint="send"
             placeholder={clip(req.response.placeholder ?? '', MAX_PLACEHOLDER)}
-            maxLength={maxLen}
             style={{
               flex: 1,
               background: 'transparent',
@@ -782,7 +785,6 @@ export function TextScreen({
           <button
             data-testid="text-send"
             aria-label="Send reply"
-            disabled={!value.trim()}
             onClick={send}
             style={{
               width: 46,
@@ -803,9 +805,83 @@ export function TextScreen({
           </button>
         </div>
         <div style={{ textAlign: 'right', fontSize: 11, color: c.faint, marginTop: 7 }}>
-          {value.length}/{maxLen}
+          {scalarLength(value)}/{maxLen}
         </div>
+        {error && <div role="alert" style={{color:c.decline,fontSize:13,marginTop:8}}>{error}</div>}
       </div>
+    </Frame>
+  );
+}
+
+// Pending is distinct from acceptance. A signed receipt establishes that the
+// agent received the answer, never that an external action executed.
+export function PendingScreen({
+  c,
+  delivery,
+  onRetry,
+}: {
+  c: Palette;
+  delivery: DeliveryState;
+  onRetry: () => void;
+}) {
+  const title =
+    delivery === "signing"
+      ? "Signing your answer"
+      : delivery === "expired"
+        ? "Answer was not accepted"
+        : "Waiting for agent receipt";
+  const detail =
+    delivery === "expired"
+      ? "The agent confirmed that the request expired before it accepted this answer."
+      : delivery === "signing"
+        ? "Your answer is being signed on this device."
+        : "Your answer may have reached the agent. Only its verified receipt can confirm acceptance. Reconnecting will retry the same answer.";
+  return (
+    <Frame
+      c={c}
+      announcement={title}
+      style={{
+        padding: "calc(76px + env(safe-area-inset-top)) 26px 40px",
+        display: "flex",
+        flexDirection: "column",
+        justifyContent: "center",
+        gap: 22,
+        textAlign: "center",
+        boxSizing: "border-box",
+      }}
+    >
+      <div
+        data-testid="pending-screen"
+        style={{ fontSize: 23, fontWeight: 700, color: c.text }}
+      >
+        {title}
+      </div>
+      <div
+        style={{
+          fontFamily: SANS,
+          fontSize: 16,
+          color: c.muted,
+          lineHeight: 1.6,
+        }}
+      >
+        {detail}
+      </div>
+      {delivery !== "signing" && delivery !== "expired" && (
+        <button
+          data-testid="receipt-retry"
+          onClick={onRetry}
+          style={{
+            minHeight: 48,
+            padding: "12px 20px",
+            borderRadius: 12,
+            border: `1px solid ${c.border}`,
+            background: c.surface,
+            color: c.text,
+          }}
+        >
+          Check receipt
+        </button>
+      )}
     </Frame>
   );
 }
@@ -885,7 +961,7 @@ export function ConfirmedScreen({
         >
           E2E
         </span>
-        <span style={{ fontSize: 11, color: c.muted }}>sealed &amp; sent to {agent}</span>
+        <span style={{ fontSize: 11, color: c.muted }}>receipt verified from {agent}</span>
       </div>
       <div style={{ position: 'absolute', bottom: 48, left: 0, right: 0, fontSize: 11, color: c.faint }}>
         returning to listening

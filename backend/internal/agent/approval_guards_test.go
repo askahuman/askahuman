@@ -58,7 +58,7 @@ func TestAskRejectsSignedAnswerAfterExpiryDuringResend(t *testing.T) {
 				a := pairedAgent(t, key, conn, nil)
 				release := sync.OnceFunc(func() { close(conn.release) })
 				t.Cleanup(release)
-				signer := newDeviceSigner(t)
+				signer := testPhone(t, a)
 				a.sess.devicePub = &signer.priv.PublicKey // pin before the reader starts.
 				dec := wire.Decision{Kind: wire.KindDecision, ID: "req_1", Result: wire.Result{Approved: boolPtr(true)}}
 				dec.Sig = signer.sign(t, "room1", dec)
@@ -99,7 +99,7 @@ func TestAskRejectsSignedAnswerAfterExpiryDuringResend(t *testing.T) {
 					cancel()
 				}
 				<-ctx.Done()
-				pushBox(t, conn.fakeConn, key, dec) // cannot precede expiry/cancellation.
+				answerBox(t, a, conn.fakeConn, key, dec) // cannot precede expiry/cancellation.
 				a.waiterMu.Lock()
 				waiter := a.waiter
 				a.waiterMu.Unlock()
@@ -156,7 +156,7 @@ func TestAskDoesNotSendCanceledRequest(t *testing.T) {
 
 func TestDecodeDecisionRejectsUnsignedExtraResultFields(t *testing.T) {
 	signer := newDeviceSigner(t)
-	sess := &Session{roomID: "room1", devicePub: &signer.priv.PublicKey}
+	sess := &Session{roomID: testRoom, protocol: wire.Protocol, devicePub: &signer.priv.PublicKey}
 	tests := []struct {
 		name     string
 		response wire.Response
@@ -179,13 +179,17 @@ func TestDecodeDecisionRejectsUnsignedExtraResultFields(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			dec := wire.Decision{Kind: wire.KindDecision, ID: "req_1", Result: tt.original}
-			dec.Sig = signer.sign(t, sess.roomID, dec)
+			req := wire.Request{Kind: wire.KindRequest, Protocol: wire.Protocol, Room: sess.roomID, ID: "req_1", Response: tt.response}
+			dec := signFor(t, signer, req, tt.original)
 			dec.Result = tt.changed // the added fields are deliberately never signed.
-			require.True(t, verifyDecisionSig(sess, dec), "control: the old signature still verifies")
+			if tt.response.Kind != wire.ResponseText {
+				require.True(t, verifyDecisionSig(sess, dec), "control: extra fields are rejected by shape even when the typed signature verifies")
+			} else {
+				require.False(t, verifyDecisionSig(sess, dec), "text now has its own signed result kind")
+			}
 			raw, err := json.Marshal(dec)
 			require.NoError(t, err)
-			got, ok := decodeDecision(raw, wire.Request{ID: dec.ID, Response: tt.response}, sess)
+			got, ok := decodeDecision(raw, req, sess)
 			assert.False(t, ok)
 			assert.Equal(t, wire.Decision{}, got)
 		})
@@ -194,7 +198,7 @@ func TestDecodeDecisionRejectsUnsignedExtraResultFields(t *testing.T) {
 
 func TestDecodeDecisionRequiresExactResultFields(t *testing.T) {
 	signer := newDeviceSigner(t)
-	sess := &Session{roomID: "room1", devicePub: &signer.priv.PublicKey}
+	sess := &Session{roomID: testRoom, protocol: wire.Protocol, devicePub: &signer.priv.PublicKey}
 	tests := []struct {
 		name     string
 		kind     wire.ResponseKind
@@ -215,16 +219,15 @@ func TestDecodeDecisionRequiresExactResultFields(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			dec := wire.Decision{Kind: wire.KindDecision, ID: "req_1", Result: tt.signed}
-			sig := signer.sign(t, sess.roomID, dec)
-			raw, err := json.Marshal(struct {
-				Kind   wire.MessageKind `json:"kind"`
-				ID     string           `json:"id"`
-				Result json.RawMessage  `json:"result"`
-				Sig    string           `json:"sig"`
-			}{dec.Kind, dec.ID, json.RawMessage(tt.result), sig})
+			req := wire.Request{Kind: wire.KindRequest, Protocol: wire.Protocol, Room: sess.roomID, ID: "req_1", Response: wire.Response{Kind: tt.kind, Options: []string{"Stop"}}}
+			dec := signFor(t, signer, req, tt.signed)
+			encoded, err := json.Marshal(dec)
 			require.NoError(t, err)
-			req := wire.Request{ID: dec.ID, Response: wire.Response{Kind: tt.kind, Options: []string{"Stop"}}}
+			var rawFields map[string]json.RawMessage
+			require.NoError(t, json.Unmarshal(encoded, &rawFields))
+			rawFields["result"] = json.RawMessage(tt.result)
+			raw, err := json.Marshal(rawFields)
+			require.NoError(t, err)
 			got, ok := decodeDecision(raw, req, sess)
 			assert.Equal(t, tt.accepted, ok)
 			if tt.accepted {

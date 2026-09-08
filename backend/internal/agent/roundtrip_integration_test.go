@@ -4,6 +4,9 @@ package agent
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -44,16 +47,28 @@ func startRelay(t *testing.T) string {
 type phoneStub struct {
 	conn     *websocket.Conn
 	hs       *spake2.State
+	room     string
+	signer   *ecdsa.PrivateKey
+	spki     string
+	agentPub *ecdsa.PublicKey
 	key      []byte
 	received [][]byte
 }
 
 func dialPhone(ctx context.Context, relayURL, roomID, code string) (*phoneStub, error) {
+	signer, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return nil, err
+	}
+	spki, err := wire.PublicSigner(signer)
+	if err != nil {
+		return nil, err
+	}
 	c, _, err := websocket.Dial(ctx, relayURL+"?room="+roomID, nil)
 	if err != nil {
 		return nil, err
 	}
-	return &phoneStub{conn: c, hs: spake2.NewB(code)}, nil
+	return &phoneStub{conn: c, hs: spake2.NewB(code), room: roomID, signer: signer, spki: spki}, nil
 }
 
 func (p *phoneStub) read(ctx context.Context) (envelope, error) {
@@ -86,7 +101,12 @@ func (p *phoneStub) pair(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if err := p.write(ctx, envelope{Pake: base64.StdEncoding.EncodeToString(myPake)}); err != nil {
+	hello, err := json.Marshal(wire.PairHello{Protocol: wire.Protocol, Pake: base64.StdEncoding.EncodeToString(myPake), Signer: p.spki})
+	if err != nil {
+		return err
+	}
+	pakeFrame := envelope{Pake: base64.StdEncoding.EncodeToString(hello)}
+	if err := p.write(ctx, pakeFrame); err != nil {
 		return err
 	}
 
@@ -101,7 +121,7 @@ func (p *phoneStub) pair(ctx context.Context) error {
 		case env.Relay == wire.SignalPeerJoined:
 			// Re-send the same pake: ours may have been dropped before the
 			// agent joined.
-			if werr := p.write(ctx, envelope{Pake: base64.StdEncoding.EncodeToString(myPake)}); werr != nil {
+			if werr := p.write(ctx, pakeFrame); werr != nil {
 				return werr
 			}
 			continue
@@ -111,11 +131,26 @@ func (p *phoneStub) pair(ctx context.Context) error {
 			if finished {
 				continue // duplicate pake after a resend; already finished.
 			}
-			peer, derr := base64.StdEncoding.DecodeString(env.Pake)
+			peerHelloBytes, derr := base64.StdEncoding.DecodeString(env.Pake)
 			if derr != nil {
 				return derr
 			}
-			_, confirm, ferr := p.hs.Finish(peer)
+			var peerHello wire.PairHello
+			if err := wire.StrictDecode(peerHelloBytes, &peerHello); err != nil {
+				return err
+			}
+			if peerHello.Protocol != wire.Protocol {
+				return fmt.Errorf("phone: unsupported pairing protocol %d", peerHello.Protocol)
+			}
+			p.agentPub, err = wire.ParseSigner(peerHello.Signer)
+			if err != nil {
+				return err
+			}
+			peer, derr := base64.StdEncoding.DecodeString(peerHello.Pake)
+			if derr != nil {
+				return derr
+			}
+			_, confirm, ferr := p.hs.FinishWithContext(peer, wire.PairBinding(p.room, peerHello.Signer, p.spki))
 			if ferr != nil {
 				return ferr
 			}
@@ -147,55 +182,120 @@ func (p *phoneStub) pair(ctx context.Context) error {
 	return nil
 }
 
-// answer reads request boxes and replies once with the auto-answer for the
-// request's kind (yesno=approve, choice=first, text="ok").
-func (p *phoneStub) answer(ctx context.Context) error {
+// readMessage opens a transport frame without confusing encrypted control
+// messages with approval requests. Each caller verifies its signed message.
+func (p *phoneStub) readMessage(ctx context.Context) ([]byte, wire.MessageKind, error) {
 	for {
 		env, err := p.read(ctx)
 		if err != nil {
-			return err
+			return nil, "", err
 		}
 		if env.Box == "" {
 			continue
 		}
 		plain, err := sealedbox.Open(p.key, env.Box)
 		if err != nil {
-			return err
+			return nil, "", err
 		}
-		var req wire.Request
-		if err := json.Unmarshal(plain, &req); err != nil {
-			return err
+		var header struct {
+			Kind wire.MessageKind `json:"kind"`
 		}
-		if req.Kind == wire.KindVAPIDKey {
-			continue // agent's sealed VAPID public-key frame; not a request
+		if err := json.Unmarshal(plain, &header); err != nil {
+			return nil, "", err
 		}
-		if req.Kind != wire.KindRequest {
-			return fmt.Errorf("phone: unexpected kind %q", req.Kind)
-		}
-
-		dec := wire.Decision{Kind: wire.KindDecision, ID: req.ID}
-		switch req.Response.Kind {
-		case wire.ResponseYesNo:
-			yes := true
-			dec.Result.Approved = &yes
-		case wire.ResponseChoice:
-			if len(req.Response.Options) == 0 {
-				return fmt.Errorf("phone: choice with no options")
+		if header.Kind == wire.KindVAPIDKey {
+			var vapid wire.VAPIDKey
+			if err := wire.StrictDecode(plain, &vapid); err != nil {
+				return nil, "", err
 			}
-			dec.Result.Choice = req.Response.Options[0]
-		case wire.ResponseText:
-			dec.Result.Text = "ok"
+			if vapid.Protocol != wire.Protocol || vapid.Room != p.room || !wire.Verify(p.agentPub, wire.VAPIDSigningMessage(vapid), vapid.Sig) {
+				return nil, "", fmt.Errorf("phone: invalid signed VAPID update")
+			}
+			continue
 		}
-		out, err := json.Marshal(dec)
-		if err != nil {
-			return err
-		}
-		box, err := sealedbox.Seal(p.key, out)
-		if err != nil {
-			return err
-		}
-		return p.write(ctx, envelope{Box: box})
+		return plain, header.Kind, nil
 	}
+}
+
+func (p *phoneStub) readRequest(ctx context.Context) (wire.Request, error) {
+	plain, kind, err := p.readMessage(ctx)
+	if err != nil {
+		return wire.Request{}, err
+	}
+	var req wire.Request
+	if kind != wire.KindRequest {
+		return req, fmt.Errorf("phone: expected request, got %q", kind)
+	}
+	if err := wire.StrictDecode(plain, &req); err != nil {
+		return req, err
+	}
+	if err := wire.ValidateRequest(req); err != nil {
+		return req, err
+	}
+	if req.Room != p.room || !wire.Verify(p.agentPub, wire.RequestSigningMessage(req), req.Sig) {
+		return req, fmt.Errorf("phone: request was not signed by paired agent")
+	}
+	return req, nil
+}
+
+func (p *phoneStub) readAcceptedAck(ctx context.Context, dec wire.Decision) error {
+	plain, kind, err := p.readMessage(ctx)
+	if err != nil {
+		return err
+	}
+	if kind != wire.KindAck {
+		return fmt.Errorf("phone: expected acceptance receipt, got %q", kind)
+	}
+	var ack wire.Ack
+	if err := wire.StrictDecode(plain, &ack); err != nil {
+		return err
+	}
+	if ack.Protocol != wire.Protocol || ack.Room != p.room || ack.ID != dec.ID || ack.RequestHash != dec.RequestHash ||
+		ack.DecisionHash != wire.DecisionHash(dec) || ack.Status != "accepted" || !wire.Verify(p.agentPub, wire.AckSigningMessage(ack), ack.Sig) {
+		return fmt.Errorf("phone: invalid signed acceptance receipt")
+	}
+	return nil
+}
+
+func boundDecision(req wire.Request, result wire.Result) wire.Decision {
+	return wire.Decision{Kind: wire.KindDecision, Protocol: wire.Protocol, Room: req.Room, ID: req.ID,
+		RequestHash: wire.RequestHash(req), ResponseKind: req.Response.Kind, Result: result}
+}
+
+// answer verifies the actual request before signing an answer to its digest,
+// then checks the agent's signed acceptance receipt.
+func (p *phoneStub) answer(ctx context.Context) error {
+	req, err := p.readRequest(ctx)
+	if err != nil {
+		return err
+	}
+	var result wire.Result
+	switch req.Response.Kind {
+	case wire.ResponseYesNo:
+		yes := true
+		result.Approved = &yes
+	case wire.ResponseChoice:
+		result.Choice = req.Response.Options[0]
+	case wire.ResponseText:
+		result.Text = "ok"
+	}
+	dec := boundDecision(req, result)
+	dec.Sig, err = wire.Sign(p.signer, wire.BoundDecisionSigningMessage(dec))
+	if err != nil {
+		return err
+	}
+	out, err := wire.EncodeMessage(dec)
+	if err != nil {
+		return err
+	}
+	box, err := sealedbox.Seal(p.key, out)
+	if err != nil {
+		return err
+	}
+	if err := p.write(ctx, envelope{Box: box}); err != nil {
+		return err
+	}
+	return p.readAcceptedAck(ctx, dec)
 }
 
 // runPhone pairs then answers, reporting the first error (or nil) on done.
@@ -350,10 +450,15 @@ func TestIntegrationPushSubAbsorbedWithoutAsk(t *testing.T) {
 		if e := phone.pair(ctx); e != nil {
 			return
 		}
-		sub := wire.PushSub{Kind: wire.KindPushSub, Subscription: wire.PushSubscription{
+		sub := wire.PushSub{Kind: wire.KindPushSub, Protocol: wire.Protocol, PushSeq: 1, Room: phone.room, Subscription: wire.PushSubscription{
 			Endpoint: "https://web.push.apple.com/e2e-idle", Keys: wire.PushKeys{P256dh: testP256dh, Auth: testAuth},
 		}}
-		out, e := json.Marshal(sub)
+		var e error
+		sub.Sig, e = wire.Sign(phone.signer, wire.PushSigningMessage(sub))
+		if e != nil {
+			return
+		}
+		out, e := wire.EncodeMessage(sub)
 		if e != nil {
 			return
 		}
