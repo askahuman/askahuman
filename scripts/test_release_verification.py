@@ -36,7 +36,7 @@ def fixtures():
                    f' attached to BackendService {json.dumps(f"Key{{\"{NEG}\"}}")}. '
                    f'Marking condition "{p.NEG_READY}" to True.')
         result[name + "_pods"] = {"items": [{
-            "metadata": {"uid": name + "-uid"},
+            "metadata": {"uid": name + "-uid", "name": name + "-pod"},
             "spec": {"containers": [copy.deepcopy(container)], "readinessGates": [{"conditionType": p.NEG_READY}]},
             "status": {"phase": "Running", "podIPs": [{"ip": "10.0.0.9"}],
                        "conditions": [{"type": "Ready", "status": "True"},
@@ -64,8 +64,9 @@ def fixtures():
         "conditions": {"ready": True}, "addresses": ["10.0.0.9"],
         "targetRef": {"kind": "Pod", "uid": "relay-uid", "namespace": p.NAMESPACE},
     }]}]}
-    result["relay_core_endpoints"] = {"metadata": {}, "subsets": [{"ports": [{"port": 8080, "protocol": "TCP"}],
-        "addresses": [{"ip": "10.0.0.9", "targetRef": {"kind": "Pod", "uid": "relay-uid", "namespace": p.NAMESPACE}}]}]}
+    result["relay_core_endpoints"] = {"metadata": {"name": p.RELAY, "namespace": p.NAMESPACE},
+        "subsets": [{"ports": [{"port": 8080, "protocol": "TCP"}],
+        "addresses": [{"ip": "10.0.0.9", "targetRef": {"kind": "Pod", "uid": "relay-uid", "name": "relay-pod", "namespace": p.NAMESPACE}}]}]}
     return result
 
 
@@ -220,7 +221,7 @@ class ClusterTests(unittest.TestCase):
         self.assertFalse(ok)
         self.assertFalse(checks["relay_neg_pod_condition_present"])
 
-    def test_core_endpoints_only_diagnose_existing_permissions(self):
+    def test_core_endpoints_do_not_hide_missing_data_or_affect_readable_slices(self):
         data = fixtures()
         data["relay_endpoints"] = {}
         ok, checks = self.run_cluster(data)
@@ -241,6 +242,101 @@ class ClusterTests(unittest.TestCase):
             p.read_object(report, "relay_core_endpoints", ["endpoints", p.RELAY], {}, diagnostic=True)
         self.assertTrue(report.ok)
         self.assertEqual(json.loads(output.getvalue()), {"diagnostic": "relay_core_endpoints_read", "ok": False, "failure": "forbidden"})
+
+
+class EndpointMembershipTests(unittest.TestCase):
+    def run_preflight(self, data, slice_error=None, core_error=None):
+        keys = ("relay_deployment", "web_deployment", "relay_service", "ingress", "relay_backendconfig",
+                "relay_pods", "web_pods", "relay_endpoints", "relay_core_endpoints")
+        responses = [json.dumps(data[k]) for k in keys]
+        if slice_error:
+            responses[7] = p.CheckFailure(slice_error)
+        if core_error:
+            responses[8] = p.CheckFailure(core_error)
+        output = io.StringIO()
+        report = p.Report()
+        with patch.object(p, "command", side_effect=responses), contextlib.redirect_stdout(output):
+            p.check_cluster(report, {"GAR_REGISTRY": PRIVATE})
+        self.assertNotIn(PRIVATE, output.getvalue())
+        self.assertNotIn(NEG, output.getvalue())
+        rows = [json.loads(line) for line in output.getvalue().splitlines()]
+        return report.ok, {row.get("check", row.get("diagnostic")): row for row in rows}
+
+    def test_only_explicit_forbidden_or_not_found_selects_complete_core_membership(self):
+        for error in ("forbidden", "not_found"):
+            ok, checks = self.run_preflight(fixtures(), error)
+            self.assertTrue(ok)
+            self.assertEqual(checks["relay_endpoints_read"]["failure"], error)
+            self.assertIn("diagnostic", checks["relay_endpoints_read"])
+            self.assertTrue(checks["relay_membership_uses_core_api"]["ok"])
+            self.assertTrue(checks["relay_ready_endpoints_match_pods"]["ok"])
+        for error in p.FAILURE_CLASSES - {"forbidden", "not_found"}:
+            ok, checks = self.run_preflight(fixtures(), error)
+            self.assertFalse(ok)
+            self.assertFalse(checks["relay_membership_uses_core_api"]["ok"])
+            self.assertFalse(checks["relay_ready_endpoints_match_pods"]["ok"])
+
+    def test_core_source_cannot_hide_readable_bad_slices_or_unavailable_core(self):
+        data = fixtures()
+        data["relay_endpoints"]["items"][0]["endpoints"][0]["addresses"] = ["10.0.0.10"]
+        ok, checks = self.run_preflight(data)
+        self.assertFalse(ok)
+        self.assertFalse(checks["relay_membership_uses_core_api"]["ok"])
+        self.assertTrue(checks["relay_core_endpoints_match_pods"]["ok"])
+        for error in ("forbidden", "not_found", "timeout", "invalid_json"):
+            ok, checks = self.run_preflight(fixtures(), "forbidden", error)
+            self.assertFalse(ok)
+            self.assertFalse(checks["relay_ready_endpoints_match_pods"]["ok"])
+
+    def test_core_requires_exact_single_pod_address_uid_name_and_tcp_port(self):
+        mutations = [
+            lambda d: d["relay_core_endpoints"]["metadata"].update(name="other"),
+            lambda d: d["relay_core_endpoints"]["metadata"].update(namespace="other"),
+            lambda d: d["relay_core_endpoints"]["metadata"].update(annotations={"endpoints.kubernetes.io/over-capacity": "truncated"}),
+            lambda d: d["relay_core_endpoints"]["subsets"][0]["addresses"].append(copy.deepcopy(d["relay_core_endpoints"]["subsets"][0]["addresses"][0])),
+            lambda d: d["relay_core_endpoints"]["subsets"].append(copy.deepcopy(d["relay_core_endpoints"]["subsets"][0])),
+            lambda d: d["relay_core_endpoints"]["subsets"][0].update(notReadyAddresses=[{"ip": "10.0.0.9"}]),
+            lambda d: d["relay_core_endpoints"]["subsets"][0]["ports"].append({"port": 8081, "protocol": "TCP"}),
+            lambda d: d["relay_core_endpoints"]["subsets"][0]["ports"][0].update(port=8081),
+            lambda d: d["relay_core_endpoints"]["subsets"][0]["ports"][0].update(protocol="UDP"),
+            lambda d: d["relay_core_endpoints"]["subsets"][0]["addresses"][0].update(ip="10.0.0.10"),
+            lambda d: d["relay_core_endpoints"]["subsets"][0]["addresses"][0]["targetRef"].update(uid="wrong"),
+            lambda d: d["relay_core_endpoints"]["subsets"][0]["addresses"][0]["targetRef"].update(name="wrong"),
+            lambda d: d["relay_core_endpoints"]["subsets"][0]["addresses"][0]["targetRef"].update(namespace="wrong"),
+            lambda d: d["relay_core_endpoints"]["subsets"][0]["addresses"][0]["targetRef"].update(kind="Node"),
+            lambda d: d["relay_pods"]["items"].append(copy.deepcopy(d["relay_pods"]["items"][0])),
+            lambda d: d["relay_pods"]["items"][0]["status"]["podIPs"].append({"ip": "2001:db8::9"}),
+            lambda d: d["relay_pods"]["items"][0]["status"]["conditions"][0].update(status="False"),
+            lambda d: d["relay_pods"]["items"][0]["status"].update(phase="Pending"),
+            lambda d: d["relay_service"]["spec"].update(publishNotReadyAddresses=True),
+            lambda d: d["relay_service"]["spec"]["ports"].append({"port": 8081, "targetPort": 8081}),
+        ]
+        for mutate in mutations:
+            data = fixtures()
+            mutate(data)
+            ok, checks = self.run_preflight(data, "forbidden")
+            self.assertFalse(ok)
+            self.assertFalse(checks["relay_ready_endpoints_match_pods"]["ok"])
+
+    def test_single_stack_ipv6_is_complete_but_malformed_or_scoped_addresses_fail(self):
+        for address, expected in [("2001:db8::9", True), ("invalid", False), ("fe80::9%eth0", False)]:
+            data = fixtures()
+            data["relay_pods"]["items"][0]["status"]["podIPs"][0]["ip"] = address
+            data["relay_core_endpoints"]["subsets"][0]["addresses"][0]["ip"] = address
+            ok, checks = self.run_preflight(data, "forbidden")
+            self.assertEqual(checks["relay_ready_endpoints_match_pods"]["ok"], expected)
+            self.assertEqual(ok, expected)
+
+    def test_current_no_health_check_condition_still_blocks_release(self):
+        data = fixtures()
+        data["relay_pods"]["items"][0]["status"]["conditions"][1].update(
+            reason="LoadBalancerNegWithoutHealthCheck", message="known historical condition " + PRIVATE)
+        ok, checks = self.run_preflight(data, "forbidden")
+        self.assertFalse(ok)
+        self.assertTrue(checks["relay_ready_endpoints_match_pods"]["ok"])
+        self.assertTrue(checks["relay_neg_backend_healthy"]["ok"])
+        self.assertTrue(checks["relay_neg_reason_no_health_check"]["ok"])
+        self.assertFalse(checks["relay_neg_observed_healthy"]["ok"])
 
 
 class DiagnosticRedactionTests(unittest.TestCase):

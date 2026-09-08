@@ -14,8 +14,9 @@ gh workflow run production-preflight.yml --ref main
 The job reads only the two application Deployments and their selected pods, the
 relay Service and EndpointSlices, the application Ingress, and the relay
 BackendConfig in namespace `ask-a-human`. An additional exact-name read of the
-relay's core Endpoints object diagnoses which endpoint API the existing identity
-can access. It does not substitute for the required EndpointSlice check. Raw API
+relay's core Endpoints object checks which endpoint API the existing identity
+can access. A strict single-pod alternative below applies only to an explicitly
+forbidden or absent EndpointSlice API. Ready endpoint membership remains required. Raw API
 responses and CLI errors remain in memory. Logs contain fixed check/diagnostic
 names, booleans, and allowlisted failure classes. Missing permission, unavailable
 APIs, timeout, unknown readiness formats and malformed data fail the named check;
@@ -34,7 +35,7 @@ absent; the required `check` results control workflow success.
 
 The topology checks require a ready single replica for each Deployment, the
 configured images actually running, a `gce` Ingress routing the public relay
-paths, the relay's ingress NEG, matching ready pod addresses in EndpointSlices,
+paths, the relay's ingress NEG, matching complete ready endpoint membership,
 and positive health evidence for that NEG and its global backend. Pod
 `cloud.google.com/load-balancer-neg-ready=True` alone is insufficient: GKE can
 set it when a health check times out or is absent. The checker recognizes the
@@ -53,15 +54,47 @@ no-NEG, non-default-subnet, or unrecognized condition branches. This distinguish
 an unhealthy backend from a controller-format/identity mismatch while retaining
 the same exact positive-health gate.
 
-If `relay_endpoints_read` fails, its class identifies the next investigation.
-The optional `relay_core_endpoints_read` and `relay_core_endpoints_match_pods`
-diagnostics check whether the exact named legacy object is readable and agrees
-with the ready pods. Truncated or unready legacy data does not count as matching.
-No permission check creates a SubjectAccessReview, and neither API read changes
-RBAC. Upstream Kubernetes includes EndpointSlice and Endpoints read permissions
-in the aggregated view/edit roles, but an installed role or gateway can differ;
-a failed read alone cannot identify that cause. See the
+If `relay_endpoints_read` reports `forbidden` or `not_found`, the required
+`relay_ready_endpoints_match_pods` check can use the exact named core Endpoints
+object. `relay_membership_uses_core_api` makes that choice explicit. The core
+object must contain exactly one subset, one ready address and TCP port 8080;
+its Pod name, UID, namespace and IP must match the one running, ready relay Pod.
+The Pod must have exactly one address. Any extra/duplicate endpoint, subset or
+port, unready address, truncation annotation, different identity, dual-stack Pod,
+multiple active Pods or `publishNotReadyAddresses` setting rejects this path.
+The Service's selector and sole TCP port/target port must also match the relay.
+Within this narrow topology, the same complete IP/UID/port membership evidence
+is available through either API. The core API is deprecated and cannot provide
+general dual-stack or large-service equivalence; use EndpointSlices before
+expanding that topology. See [Kubernetes Endpoints limitations](https://kubernetes.io/docs/concepts/services-networking/service/#endpoints-deprecated).
+
+A readable but empty, malformed, unready or mismatched EndpointSlice result
+still fails, even when core Endpoints look healthy. Authentication, timeout,
+network/TLS and other API errors also fail without substitution. Both reads
+remain redacted diagnostic records; an actual matching endpoint source is always
+required. No permission check creates a SubjectAccessReview, and neither API
+read changes RBAC. Upstream Kubernetes includes EndpointSlice and Endpoints read
+permissions in aggregated view/edit roles, but an installed role or gateway can
+differ. See the
 [Kubernetes 1.33 default read rules](https://github.com/kubernetes/kubernetes/blob/v1.33.0/plugin/pkg/auth/authorizer/rbac/bootstrappolicy/policy.go).
+
+## Historical NEG conditions and a new rollout
+
+The upstream readiness controller stops processing a Pod once its NEG condition
+is true, regardless of the reason. A `LoadBalancerNegWithoutHealthCheck` condition
+can therefore persist after a backend is later attached and becomes healthy.
+This explains a possible historical state; a healthy backend annotation alone
+does not prove that this is the cause or establish current per-Pod health. See
+[`needToProcess` / `evalNegReadinessGate`](https://github.com/kubernetes/ingress-gce/blob/master/pkg/neg/readiness/utils.go)
+and the [controller's early return and condition assignment](https://github.com/kubernetes/ingress-gce/blob/master/pkg/neg/readiness/reflector.go).
+
+The preflight continues to reject a no-health-check condition, including when
+core endpoint membership and the backend annotation pass. Read-only checks
+cannot refresh that historical Pod condition. A planned new release Pod must
+obtain fresh positive readiness evidence through the existing postrollout gate;
+neither a historical condition nor an automatic restart/exception is used to
+turn the current deployment's check green. The public version/proxy checks after
+rollout remain required as well.
 
 The logging check confirms `BackendConfig.spec.logging.enable=false` and the
 Service's reference to that configuration. It does **not** query the Compute API
