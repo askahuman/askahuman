@@ -74,3 +74,35 @@ test('CLI fails closed without a scanner through direct and symlink paths', t =>
     assert.match(result.stderr, /dependency audit failed: scanner failed:/);
   }
 });
+
+const codecID = 'GHSA-26w7-cxv4-gfx2';
+const codecFinding = { ...high, severity: 'critical', url: 'https://github.com/advisories/' + codecID };
+const codecException = { id: codecID, package: 'astro', reason: 'The installed native codec is verified.', expires: '2026-10-08' };
+test('the codec exception requires fresh proof and the exact outer package', () => {
+  const report = { astro: [codecFinding] };
+  for (const proof of [undefined, false, 'true', 1]) {
+    assert.throws(() => evaluateAudit(JSON.stringify(report), 1, [codecException], now, proof));
+  }
+  for (const pkg of [undefined, 'sharp', '*']) {
+    assert.throws(() => evaluateAudit(JSON.stringify(report), 1, [{ ...codecException, package: pkg }], now, true));
+  }
+  assert.equal(evaluateAudit(JSON.stringify(report), 1, [codecException], now, true).suppressed.length, 1);
+  assert.equal(evaluateAudit(JSON.stringify(report), 1, [], now, true).blocked.length, 1);
+  const spoof = { sharp: [{ ...codecFinding, package: 'astro' }] };
+  const result = evaluateAudit(JSON.stringify(spoof), 1, [codecException], now, true);
+  assert.equal(result.blocked.length, 1);
+  assert.equal(result.blocked[0].package, 'sharp');
+  const misleading = { astro: [{ ...codecFinding, package: 'sharp' }] };
+  assert.equal(evaluateAudit(JSON.stringify(misleading), 1, [codecException], now, true).suppressed[0].package, 'astro');
+});
+test('codec evidence never bypasses expiry, URL, schema, or scanner status', () => {
+  const evaluateCodec = (report, status = 1, date = now) =>
+    evaluateAudit(JSON.stringify(report), status, [codecException], date, true);
+  assert.throws(() => evaluateCodec({ astro: [codecFinding] }, 1, new Date('2026-10-09T00:00:00Z')));
+  assert.throws(() => evaluateCodec({ astro: [codecFinding] }, 2));
+  assert.throws(() => evaluateCodec({ astro: [codecFinding] }, 0));
+  assert.throws(() => evaluateCodec({ error: 'unavailable' }));
+  for (const url of [codecFinding.url + '?x=1', codecFinding.url + '#x', 'https://example.invalid/advisories/' + codecID]) {
+    assert.equal(evaluateCodec({ astro: [{ ...codecFinding, url }] }).blocked.length, 1);
+  }
+});

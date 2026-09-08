@@ -50,6 +50,8 @@ jobs:
           go-version-file: backend/go.mod
           cache-dependency-path: backend/go.sum
       - run: bun install --frozen-lockfile
+      - name: Patched native image codec and fail-closed build regressions
+        run: node --test ../scripts/image-codec-policy.test.mjs
       - name: Type-check (astro check)
         run: bun run check
       - name: Unit tests (vitest)
@@ -166,3 +168,12 @@ jobs:
           node-version: "20"
       - name: Windows PowerShell extraction with literal installation paths
         run: node --test npm/test/windows-paths.test.cjs
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: "1.3.8"
+      - name: Install the locked Windows frontend dependencies
+        working-directory: frontend
+        run: bun install --frozen-lockfile
+      - name: Verify the actual Windows native image codec
+        working-directory: frontend
+        run: node --input-type=module -e "import { assertPatchedImageCodec } from './image-codec-policy.mjs'; await assertPatchedImageCodec();"

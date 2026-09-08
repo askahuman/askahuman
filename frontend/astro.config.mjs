@@ -1,7 +1,15 @@
-import { defineConfig } from "astro/config";
-import react from "@astrojs/react";
-import tailwindcss from "@tailwindcss/vite";
-import AstroPWA from "@vite-pwa/astro";
+import { assertPatchedImageCodec } from "./image-codec-policy.mjs";
+
+// Check this machine's native codec before any integration or asset processing.
+await assertPatchedImageCodec();
+const [astro, reactModule, tailwindModule, pwaModule] = await Promise.all([
+  import("astro/config"), import("@astrojs/react"),
+  import("@tailwindcss/vite"), import("@vite-pwa/astro"),
+]);
+const { defineConfig } = astro;
+const react = reactModule.default;
+const tailwindcss = tailwindModule.default;
+const AstroPWA = pwaModule.default;
 
 // Dark palette anchor from the design mockup (renderVals().page).
 const THEME_COLOR = "#08090c";

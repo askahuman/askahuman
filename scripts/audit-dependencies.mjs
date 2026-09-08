@@ -4,11 +4,12 @@ import { fileURLToPath } from 'node:url';
 
 const severities = new Set(['info', 'low', 'moderate', 'high', 'critical']);
 const advisoryID = /^GHSA-[a-z0-9]{4}-[a-z0-9]{4}-[a-z0-9]{4}$/;
+const codecAdvisory = 'GHSA-26w7-cxv4-gfx2';
 const isRecord = value => value !== null && typeof value === 'object' && !Array.isArray(value);
 
 // Bun returns 1 both for findings and for a failed registry request. A usable
 // report AND a consistent process status are required before applying policy.
-export function evaluateAudit(stdout, status, exceptions = [], now = new Date()) {
+export function evaluateAudit(stdout, status, exceptions = [], now = new Date(), codecVerified = false) {
   if (status !== 0 && status !== 1) throw new Error('scanner did not complete normally');
   let report;
   try { report = JSON.parse(stdout); } catch { throw new Error('scanner returned invalid or empty JSON'); }
@@ -27,6 +28,9 @@ export function evaluateAudit(stdout, status, exceptions = [], now = new Date())
     }
     if (now > expiry) throw new Error('audit exception expired: ' + exception.id);
     if (allowed.has(exception.id)) throw new Error('duplicate audit exception: ' + exception.id);
+    if (exception.id === codecAdvisory && (exception.package !== 'astro' || codecVerified !== true)) {
+      throw new Error('Astro image-codec exception requires fresh installed-codec verification');
+    }
     allowed.add(exception.id);
   }
   const findings = [], blocked = [], suppressed = [];
@@ -40,13 +44,13 @@ export function evaluateAudit(stdout, status, exceptions = [], now = new Date())
       let url;
       try { url = new URL(advisory.url); } catch { throw new Error('invalid advisory URL for ' + pkg); }
       if (url.protocol !== 'https:') throw new Error('invalid advisory URL scheme for ' + pkg);
-      const finding = { package: pkg, ...advisory };
+      const finding = { ...advisory, package: pkg };
       findings.push(finding);
       if (advisory.severity !== 'high' && advisory.severity !== 'critical') continue;
       const id = url.pathname.slice('/advisories/'.length);
       const exactAdvisory = url.origin === 'https://github.com' && !url.username && !url.password &&
         url.pathname === '/advisories/' + id && advisoryID.test(id) && !url.search && !url.hash;
-      if (exactAdvisory && allowed.has(id)) suppressed.push(finding);
+      if (exactAdvisory && allowed.has(id) && (id !== codecAdvisory || pkg === 'astro' && codecVerified === true)) suppressed.push(finding);
       else blocked.push(finding);
     }
   }
@@ -56,7 +60,7 @@ export function evaluateAudit(stdout, status, exceptions = [], now = new Date())
   return { findings, blocked, suppressed };
 }
 
-function main() {
+async function main() {
   try {
     const scan = spawnSync('bun', ['audit', '--json'], {
       encoding: 'utf8', timeout: 120_000, maxBuffer: 8 * 1024 * 1024,
@@ -64,7 +68,12 @@ function main() {
     if (scan.stderr) process.stderr.write(scan.stderr);
     if (scan.error || scan.signal) throw new Error('scanner failed: ' + (scan.error?.message || scan.signal));
     const exceptions = JSON.parse(readFileSync(new URL('../frontend/audit-exceptions.json', import.meta.url), 'utf8'));
-    const result = evaluateAudit(scan.stdout, scan.status, exceptions);
+    let codecVerified = false;
+    if (Array.isArray(exceptions) && exceptions.some(exception => exception?.id === codecAdvisory)) {
+      const { assertPatchedImageCodec } = await import('../frontend/image-codec-policy.mjs');
+      codecVerified = await assertPatchedImageCodec();
+    }
+    const result = evaluateAudit(scan.stdout, scan.status, exceptions, new Date(), codecVerified);
     for (const item of result.findings) console.log(`${item.severity}: ${item.package}: ${item.title} (${item.url})`);
     console.log(`Validated audit: ${result.findings.length} records, ${result.suppressed.length} documented exceptions, ${result.blocked.length} blocking.`);
     if (result.blocked.length) throw new Error(result.blocked.length + ' unexcepted high/critical advisory records');
@@ -76,4 +85,4 @@ function main() {
 
 // Node canonicalizes module URLs, including parent-directory symlinks (/tmp on
 // macOS). Compare canonical paths so a CLI invocation can never skip the scan.
-if (process.argv[1] && realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url))) main();
+if (process.argv[1] && realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url))) await main();

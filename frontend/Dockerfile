@@ -25,7 +25,7 @@ COPY --from=bun /usr/local/bin/bun /usr/local/bin/bun
 WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
 # Narrow COPY: only the sources the build needs (.dockerignore is the second guard).
-COPY package.json bun.lock tsconfig.json astro.config.mjs ./
+COPY package.json bun.lock tsconfig.json astro.config.mjs image-codec-policy.mjs ./
 COPY src ./src
 COPY public ./public
 ARG PUBLIC_BUILD_VERSION=dev
